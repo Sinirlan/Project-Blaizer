@@ -1,0 +1,68 @@
+# Motorhead body v1: Python V12 (car 03), Base body (09-remaster 9.22 phase 6, #176). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 204 v / 224 p (204 welded), 24 open edges (the flat underside), 2 edges on more than 2
+# faces, 204/204 mirror twins; 100 edges under 10 deg, 92 at 10-20, 212 over 20; edge min 0.047
+# median 0.299 m. The two edges on more than 2 faces are the mirror bases, 4 faces each: the
+# housing's 61 / 66 (+x) and 63 / 71 (-x) meet the A-pillar panels 184 / 193 and 202 / 211 along
+# one edge ((+-0.719 0.919 0.7) to (+-0.813 0.856 0.65)), like the Adder's. No repeated face.
+# Box x +-1.040, y 0.156-1.221, z -2.025..2.125. An orange wedge with a yellow centre stripe:
+# paint 244 129 0 (110 faces), the dark orange 104 41 0 (20: the lower nose lip, the sills, the
+# rear diffuser's sides), the stripe 249 181 0 (8: nose 220-223, roof 48, rear deck 180-182).
+# Textured parts that stay as in the original until the Full body: Haalasso 13 (the rear wing /
+# engine cover 30 33 49-59), Oklog2 19 21 23 (the roof logo), Holes3 7 / 183 (the rear panel),
+# Underred (the underside). Stance kept as the original's (drop 0) for the first pass.
+#
+# [O] The arch tunnels are 0 0 0 at the back (86-103) but black in two tags at the front: the
+# ceiling and the rear wall's upper part 114 115 / 123 124 are 1 1 1, the rest 0 0 0 (the
+# generator takes a tag within 2 of the most common one, `body::near_tag`; the ticket's
+# "(0, 0, 0)" holds for the back only).
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] the mirror glass is the grey 133 131 124 quad on the back of each housing (62 / 64,
+# |x| 0.813-1.040, y 0.856-0.963, z 0.585-0.658)
+MirrorGlass rgb=133,131,124
+
+# [O] glass is 75 92 107 (13 faces, type 9: windscreen 18 20 22, rear window 24-29, side windows
+# 31 32 / 34 35). The windscreen is three panes with 10 deg folds between them, as in the
+# original; the side windows are flat.
+Glass rgb=75,92,107 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: one Ooflight quad a side, tag 125 127 52 (60 / 75, |x| 0.475-0.800, y 0.446-0.556,
+# z 1.825-2.025, facing forward and out, n 0.44 0.25 0.86); halo 0/1 runs it from (0.8 0.514 1.838)
+# to (0.488 0.501 2.013), rgb f9 fb a4. Design choice: a reflector bowl with two bulbs and a
+# daytime light bar along its bottom edge.
+Lamp from=125,127,52 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=2 rows=1 pitch=0 bulb=0.013 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.025 margin=0 clip=0 halo=1
+# [O] tail lights: one Blight4 quad a side, tag 127 10 10 (170 / 179, |x| 0.54-0.85, y 0.782-0.921,
+# z -1.875..-1.665, on the rear deck, facing up and back, n 0.21 0.83 -0.51); halo 2/3 runs it
+# from (0.54 0.873 -1.788) to (0.85 0.83 -1.744), rgb ff 11 11. Design choice: two light bars
+# across the lens.
+Lamp from=127,10,10 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] the front grille is the flat black quad 76 under the nose (|x| < 0.475, y 0.331-0.446,
+# z 2.025, facing forward; the 1 1 1 tag of 77 is the lip's underside, left alone). Design
+# choice: a honeycomb. The rear panel (Holes3 7 / 183, tag 0 0 0) stays the textured original: a
+# `Vent` on it came out at +24k triangles (plain recess), +30k (slats) and +52k with 30k
+# non-manifold edges (hex), against +7k for this grille, [U] cause not found (the recess over
+# two faces at different slopes, or the 4 cm refine of textured faces); it waits for the Full
+# body with the other textured vents.
+Vent from=0,0,0 lo=0,0.32,2.0 hi=0.5,0.45,2.06 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+
+# [O] The body is fans of flat facets (92 edges at 10-20 deg, 212 over 20): the front fender
+# 154 155 156 157 158 161 (folds 8-30 deg), the door 186 187 188 and the shoulder 201 / 184 /
+# 193, the rear haunch 195 196 197 / 137 142 / 145 141 (n.y 0.49 rolling to 0.11 down the side).
+# Design choice (like the ASC's and the Adder's): the whole flank from the nose corner to the
+# tail corner as one curved panel a side, 2.5 cm triangles, every point held to the original
+# facets (`round`) so the bulge stays; the folds to the glass line, the sill, the bonnet and
+# the lamps are over 50 deg or outside the box and stay creases.
+Smooth from=244,129,0 lo=0.7,0.4,-2.0 hi=1.0,1.0,1.9 max_deg=50 step=0.025 loose=0 round=0.1
+# the bonnet (192 194 200 and the yellow stripe 221-223, folds 9-24 deg) as a second zone: one
+# crowned panel from the cowl to the nose edge; the fold to the flank at |x| 0.7 stays a crease
+Smooth from=244,129,0;249,181,0 lo=0,0.55,1.0 hi=0.7,0.95,1.99 max_deg=50 step=0.025 loose=0 round=0.1
+
+# Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
+# #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
+Refine step=0.04

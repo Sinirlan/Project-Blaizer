@@ -1,0 +1,318 @@
+//! REMASTER vents and grilles for the generated bodies (09-remaster 9.22 phase 4). The black
+//! vent faces of the MYO [O] are picked per car by a box, recessed by `body::inset_glass`
+//! before the bevel, and filled with slats or a hex mesh standing on the recess floor. All of
+//! it a design choice.
+//!
+//! Input in car-local game space; output in view space (game z negated) like `body::body`.
+
+use super::body::{tri, Face, Glass};
+use super::lamps::{hit, vert};
+use crate::scene::Vertex;
+use glam::{Vec2, Vec3};
+use std::collections::HashMap;
+
+/// One vent (both sides of the car when it is mirrored).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vent {
+    /// the MYO face colour of the vent faces [O]
+    pub from: [u8; 3],
+    /// the faces of `from` whose centre, x mirrored to +x, lies in this box (game space)
+    pub lo: [f32; 3],
+    pub hi: [f32; 3],
+    /// the recess; `housing.rgb` is a tag of its own, given to the picked faces
+    pub housing: Glass,
+    pub kind: VentKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VentKind {
+    /// an empty recess (the Titan's rear bumper: the exhausts go there, phase 5)
+    Plain,
+    /// bars across the car (game x) every `pitch` (m), `width` (m) wide, split by `blades`
+    /// upright spine bars `spine` (m) wide along the recess standing proud of them, evenly
+    /// across (the R-Build 2's louvred tail: one wide spine down the middle; `blades: 0` =
+    /// plain louvres); `tilt` (degrees) leans every slat down the vent, its outer edge lower
+    /// than its foot, like the blades of a window blind (the Serpent's tail grille, #174 phase
+    /// 4): a slat then runs `1 / cos(tilt)` times as long, so its tip stays as high over the
+    /// floor; 0 = upright
+    Slats { pitch: f32, width: f32, blades: usize, spine: f32, tilt: f32 },
+    /// a honeycomb of cells `radius` (m, centre to corner) with walls `wall` (m) thick,
+    /// split by `blades` upright blades standing proud of it, evenly across
+    Hex { radius: f32, wall: f32, blades: usize },
+}
+
+/// slats stand this much of the recess depth tall, the honeycomb this much
+const SLAT_HEIGHT: f32 = 0.8;
+const HEX_HEIGHT: f32 = 0.6;
+/// the upright blades of the honeycomb and the slats: this much of the recess depth tall, this
+/// wide (m)
+const BLADE_HEIGHT: f32 = 0.95;
+const BLADE_WIDTH: f32 = 0.01;
+/// bar samples along their length (m)
+const STEP: f32 = 0.01;
+/// matte dark plastic of the slats and the honeycomb, lighter than the recess floor so it reads
+const BAR: [f32; 4] = [0.07, 0.07, 0.075, 1.0];
+
+/// Tag the vent faces (`Vent::housing.rgb`) and recess them; per vent, whether it was recessed.
+pub fn recess(faces: &mut Vec<Face>, vents: &[Vent]) -> Vec<bool> {
+    for v in vents {
+        let (lo, hi) = (Vec3::from(v.lo), Vec3::from(v.hi));
+        for f in faces.iter_mut().filter(|f| f.rgb == v.from) {
+            let c = f.pts.iter().map(|&p| Vec3::from(p)).sum::<Vec3>() / f.pts.len() as f32;
+            let c = Vec3::new(c.x.abs(), c.y, c.z);
+            if c.cmpge(lo).all() && c.cmple(hi).all() {
+                f.rgb = v.housing.rgb;
+            }
+        }
+    }
+    vents.iter().map(|v| super::body::inset_glass(faces, &v.housing, &[])).collect()
+}
+
+/// The insides of the recessed vents of `faces` (after `recess`): per connected region of a
+/// vent's floor, slats or a honeycomb in a frame on the region's mean plane.
+pub fn vents(faces: &[Face], vents: &[Vent], recessed: &[bool]) -> Vec<Vertex> {
+    let mut out = Vec::new();
+    for (v, _) in vents.iter().zip(recessed).filter(|(_, &r)| r) {
+        let floor: Vec<&Face> = faces.iter().filter(|f| f.rgb == v.housing.rgb).collect();
+        for region in regions(&floor) {
+            let n = region.iter().map(|f| normal(f) * area(f)).sum::<Vec3>().normalize_or(Vec3::Y);
+            let su = Vec3::X.reject_from(n).try_normalize().unwrap_or_else(|| n.any_orthonormal_vector());
+            let sv = n.cross(su);
+            let pts: Vec<Vec3> = region.iter().flat_map(|f| f.pts.iter().map(|&p| Vec3::from(p))).collect();
+            let c = pts.iter().sum::<Vec3>() / pts.len() as f32;
+            let (mut lo, mut hi) = (Vec2::MAX, Vec2::MIN);
+            for p in &pts {
+                let q = Vec2::new((*p - c).dot(su), (*p - c).dot(sv));
+                lo = lo.min(q);
+                hi = hi.max(q);
+            }
+            let at = |q: Vec2| hit(&region, c + su * q.x + sv * q.y, n);
+            let depth = v.housing.inset;
+            // `blades` upright bars `w` wide along v, evenly spaced across u, standing proud of
+            // the fill
+            let spines = |out: &mut Vec<Vertex>, blades: usize, w: f32| {
+                for b in 1..=blades {
+                    let u = lo.x + (hi.x - lo.x) * b as f32 / (blades + 1) as f32;
+                    bar(out, &at, Vec2::new(u, lo.y), Vec2::new(u, hi.y), w, depth * BLADE_HEIGHT, 0.0);
+                }
+            };
+            match v.kind {
+                VentKind::Plain => {}
+                VentKind::Slats { pitch, width, blades, spine, tilt } => {
+                    let lean = tilt.to_radians();
+                    // a leaning slat's tip lies `h tan(lean)` down the vent from its foot: the
+                    // rows keep that much off the vent's lower end, so the lowest tip stays over
+                    // the floor (v runs down the vent when `sv` points down)
+                    let margin = depth * SLAT_HEIGHT * lean.tan();
+                    let (lo_y, hi_y) = if sv.y < 0.0 { (lo.y, hi.y - margin) } else { (lo.y + margin, hi.y) };
+                    let mut y = lo_y + (hi_y - lo_y).rem_euclid(pitch) / 2.0;
+                    while y <= hi_y {
+                        bar(&mut out, &at, Vec2::new(lo.x, y), Vec2::new(hi.x, y), width, depth * SLAT_HEIGHT, lean);
+                        y += pitch;
+                    }
+                    spines(&mut out, blades, spine);
+                }
+                VentKind::Hex { radius, wall, blades } => {
+                    // flat-topped cells; each draws its three upper edges, its neighbours the rest
+                    let (du, dv) = (1.5 * radius, 3f32.sqrt() * radius);
+                    let corner = |k: usize| Vec2::from_angle(k as f32 * std::f32::consts::FRAC_PI_3) * radius;
+                    let (i0, i1) = ((lo.x / du).floor() as i32 - 1, (hi.x / du).ceil() as i32 + 1);
+                    let (j0, j1) = ((lo.y / dv).floor() as i32 - 1, (hi.y / dv).ceil() as i32 + 1);
+                    for i in i0..=i1 {
+                        for j in j0..=j1 {
+                            let m = Vec2::new(i as f32 * du, (j as f32 + 0.5 * i.rem_euclid(2) as f32) * dv);
+                            for k in 0..3 {
+                                bar(&mut out, &at, m + corner(k), m + corner(k + 1), wall, depth * HEX_HEIGHT, 0.0);
+                            }
+                        }
+                    }
+                    spines(&mut out, blades, BLADE_WIDTH);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn normal(f: &Face) -> Vec3 {
+    Vec3::from(f.normal).normalize_or_zero()
+}
+
+fn area(f: &Face) -> f32 {
+    let p0 = Vec3::from(f.pts[0]);
+    (1..f.pts.len().saturating_sub(1)).map(|k| (Vec3::from(f.pts[k]) - p0).cross(Vec3::from(f.pts[k + 1]) - p0).length() / 2.0).sum()
+}
+
+/// `faces` split into groups that share a corner (1 mm).
+fn regions<'a>(faces: &[&'a Face]) -> Vec<Vec<&'a Face>> {
+    let key = |p: [f32; 3]| p.map(|c| (c * 1000.0).round() as i32);
+    let mut parent: Vec<usize> = (0..faces.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut seen: HashMap<[i32; 3], usize> = HashMap::new();
+    for (i, f) in faces.iter().enumerate() {
+        for &p in &f.pts {
+            if let Some(&j) = seen.get(&key(p)) {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a] = b;
+            } else {
+                seen.insert(key(p), i);
+            }
+        }
+    }
+    let mut groups: HashMap<usize, Vec<&Face>> = HashMap::new();
+    for (i, &f) in faces.iter().enumerate() {
+        groups.entry(root(&mut parent, i)).or_default().push(f);
+    }
+    let mut g: Vec<Vec<&Face>> = groups.into_values().collect();
+    g.sort_by(|a, b| (a[0] as *const Face).cmp(&(b[0] as *const Face)));
+    g
+}
+
+/// A bar `w` wide and `h` tall standing on the floor (`at`: a point of the vent's plane frame
+/// onto the floor, with the floor's normal) from `a` to `b`: a top and two walls, kept where
+/// both its edges land on the floor. `lean` (radians) tips it over towards its lower side,
+/// `h / cos(lean)` long so its top stays `h` over the floor.
+#[allow(clippy::too_many_arguments)]
+fn bar(out: &mut Vec<Vertex>, at: &dyn Fn(Vec2) -> Option<(Vec3, Vec3)>, a: Vec2, b: Vec2, w: f32, h: f32, lean: f32) {
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-4 {
+        return;
+    }
+    let side = d.perp() / len * (w / 2.0);
+    let n = (len / STEP).ceil() as usize;
+    let s: Vec<Option<[(Vec3, Vec3); 2]>> = (0..=n)
+        .map(|i| {
+            let p = a + d * (i as f32 / n as f32);
+            Some([at(p - side)?, at(p + side)?])
+        })
+        .collect();
+    if lean != 0.0 {
+        leaning(out, &s, h, lean);
+        return;
+    }
+    for pair in s.windows(2) {
+        let (Some([l0, r0]), Some([l1, r1])) = (pair[0], pair[1]) else { continue };
+        let up = |q: (Vec3, Vec3)| q.0 + q.1 * h;
+        let top = |p: Vec3, q: (Vec3, Vec3)| vert(p, q.1, BAR, 0.0);
+        tri(out, [top(up(l0), l0), top(up(r0), r0), top(up(r1), r1)]);
+        tri(out, [top(up(l0), l0), top(up(r1), r1), top(up(l1), l1)]);
+        // the walls face away from the bar's middle
+        for (e0, e1, o0, o1) in [(l0, l1, r0, r1), (r0, r1, l0, l1)] {
+            let wn = (e0.0 - o0.0 + e1.0 - o1.0).normalize_or_zero();
+            let wv = |p: Vec3| vert(p, wn, BAR, 0.0);
+            tri(out, [wv(e0.0), wv(e1.0), wv(up(e1))]);
+            tri(out, [wv(e0.0), wv(up(e1)), wv(up(e0))]);
+        }
+    }
+}
+
+/// `bar`'s leaning plank over its floor samples `s` (left and right foot, each with the floor's
+/// normal): the floor normal turned by `lean` towards the lower foot gives the plank's
+/// direction; the two walls are its lower and upper faces, the top its outer edge.
+fn leaning(out: &mut Vec<Vertex>, s: &[Option<[(Vec3, Vec3); 2]>], h: f32, lean: f32) {
+    let (sl, cl) = lean.sin_cos();
+    let len = h / cl;
+    for pair in s.windows(2) {
+        let (Some([l0, r0]), Some([l1, r1])) = (pair[0], pair[1]) else { continue };
+        // per sample: the direction to the lower foot, the plank's direction and the normal of
+        // its face on the left foot's side
+        let frame = |l: (Vec3, Vec3), r: (Vec3, Vec3)| {
+            let across = (l.0 - r.0).normalize_or_zero();
+            let down = if across.y > 0.0 { -across } else { across };
+            let n = (l.1 + r.1).normalize_or(l.1);
+            let d = n * cl + down * sl;
+            (d, across * cl - n * sl * across.dot(down).signum())
+        };
+        let ((d0, side0), (d1, side1)) = (frame(l0, r0), frame(l1, r1));
+        let up = |q: (Vec3, Vec3), d: Vec3| q.0 + d * len;
+        let top = |p: Vec3, d: Vec3| vert(p, d, BAR, 0.0);
+        tri(out, [top(up(l0, d0), d0), top(up(r0, d0), d0), top(up(r1, d1), d1)]);
+        tri(out, [top(up(l0, d0), d0), top(up(r1, d1), d1), top(up(l1, d1), d1)]);
+        for (e0, e1, n0, n1) in [(l0, l1, side0, side1), (r0, r1, -side0, -side1)] {
+            tri(out, [vert(e0.0, n0, BAR, 0.0), vert(e1.0, n1, BAR, 0.0), vert(up(e1, d1), n1, BAR, 0.0)]);
+            tri(out, [vert(e0.0, n0, BAR, 0.0), vert(up(e1, d1), n1, BAR, 0.0), vert(up(e0, d0), n0, BAR, 0.0)]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TAG: [u8; 3] = [3, 3, 3];
+
+    fn quad(x0: f32, x1: f32) -> Face {
+        Face { pts: vec![[x0, 0.0, 0.0], [x1, 0.0, 0.0], [x1, 0.1, 0.0], [x0, 0.1, 0.0]], normal: [0.0, 0.0, 1.0], colour: vec![[0.0; 4]; 4], uv: vec![[0.0; 2]; 4], layer: -1.0, env: 0.0, rgb: TAG, smooth_deg: 0.0, remesh: 0.0 }
+    }
+
+    /// slats and honeycomb on a flat floor facing +z: inside its outline, between the floor and
+    /// the bar height; two separate floors are two regions
+    #[test]
+    fn insides_on_the_floor() {
+        let faces = vec![quad(0.0, 0.3), quad(0.5, 0.7)];
+        let housing = Glass { rgb: TAG, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let refs: Vec<&Face> = faces.iter().collect();
+        assert_eq!(regions(&refs).len(), 2);
+        for (kind, hf) in [(VentKind::Slats { pitch: 0.02, width: 0.006, blades: 0, spine: 0.01, tilt: 0.0 }, SLAT_HEIGHT), (VentKind::Hex { radius: 0.012, wall: 0.003, blades: 1 }, BLADE_HEIGHT)] {
+            let v = Vent { from: [1; 3], lo: [0.0; 3], hi: [1.0; 3], housing, kind };
+            let out = vents(&faces, &[v], &[true]);
+            assert!(!out.is_empty());
+            assert!(out.iter().any(|p| p.pos[0] > 0.5));
+            for p in &out {
+                let (x, y, z) = (p.pos[0], p.pos[1], -p.pos[2]);
+                assert!(((-1e-5..=0.3 + 1e-5).contains(&x) || (0.5 - 1e-5..=0.7 + 1e-5).contains(&x)) && (-1e-5..=0.1 + 1e-5).contains(&y), "{x} {y}");
+                assert!((-1e-5..=0.03 * hf + 1e-5).contains(&z), "{z}");
+            }
+            assert!(vents(&faces, &[v], &[false]).is_empty());
+        }
+    }
+
+    /// slats with a spine: one upright bar down the middle of each region, taller than the
+    /// louvres; without it nothing stands above the slat height
+    #[test]
+    fn slats_with_a_spine() {
+        let faces = vec![quad(0.0, 0.3), quad(0.5, 0.7)];
+        let housing = Glass { rgb: TAG, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let v = |blades| Vent { from: [1; 3], lo: [0.0; 3], hi: [1.0; 3], housing, kind: VentKind::Slats { pitch: 0.02, width: 0.006, blades, spine: 0.02, tilt: 0.0 } };
+        let plain = vents(&faces, &[v(0)], &[true]);
+        assert!(plain.iter().all(|p| -p.pos[2] <= 0.03 * SLAT_HEIGHT + 1e-5));
+        let spined = vents(&faces, &[v(1)], &[true]);
+        assert!(spined.len() > plain.len());
+        let tall: Vec<&Vertex> = spined.iter().filter(|p| -p.pos[2] > 0.03 * SLAT_HEIGHT + 1e-4).collect();
+        assert!(!tall.is_empty());
+        for p in &tall {
+            let x = p.pos[0];
+            assert!((x - 0.15).abs() <= 0.01 + 1e-5 || (x - 0.6).abs() <= 0.01 + 1e-5, "{x}");
+            assert!(-p.pos[2] <= 0.03 * BLADE_HEIGHT + 1e-5);
+        }
+        assert!(tall.iter().any(|p| (p.pos[0] - 0.14).abs() < 1e-4) && tall.iter().any(|p| (p.pos[0] - 0.61).abs() < 1e-4));
+    }
+    /// window-blind slats (#174 phase 4) on a floor tilted 45 deg like the Serpent's tail grille
+    /// (facing back and up): leaning 45 deg down the vent, their outer edges face straight back
+    /// (level slats), and nothing rises more than the slat height off the floor
+    #[test]
+    fn leaning_slats_lie_level() {
+        let (c, s) = (std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+        // the floor: x 0..0.3, 0.1 m up its slope (0, s, c) from z 0; its normal (0, s, -c)
+        let p = |x: f32, v: f32| [x, v * s, v * c];
+        let floor = Face { pts: vec![p(0.0, 0.0), p(0.0, 0.1), p(0.3, 0.1), p(0.3, 0.0)], normal: [0.0, s, -c], colour: vec![[0.0; 4]; 4], uv: vec![[0.0; 2]; 4], layer: -1.0, env: 0.0, rgb: TAG, smooth_deg: 0.0, remesh: 0.0 };
+        let housing = Glass { rgb: TAG, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let v = Vent { from: [1; 3], lo: [0.0; 3], hi: [1.0; 3], housing, kind: VentKind::Slats { pitch: 0.02, width: 0.004, blades: 0, spine: 0.0, tilt: 45.0 } };
+        let out = vents(&[floor], &[v], &[true]);
+        assert!(!out.is_empty());
+        // game -z (straight back) is view +z
+        assert!(out.iter().any(|q| q.normal[2] > 0.999), "no slat edge faces straight back");
+        let n = Vec3::new(0.0, s, -c);
+        for q in &out {
+            let g = Vec3::new(q.pos[0], q.pos[1], -q.pos[2]);
+            assert!(g.dot(n) <= 0.03 * SLAT_HEIGHT + 1e-4 && g.dot(n) >= -1e-4, "{g}");
+        }
+    }
+}

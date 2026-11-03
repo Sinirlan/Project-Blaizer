@@ -1,0 +1,71 @@
+# Motorhead body v1: Kobra X3 (car 01), Base body (09-remaster 9.22 phase 6, #179). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 213 v / 248 p (213 welded), 44 open edges, 2 edges on more than 2 faces, 207/213
+# mirror twins (the six without one are the tail panel's corners, 4 mm off: x -0.233 / 0.237,
+# -0.352 / 0.356, -0.706 / 0.710); 130 edges under 10 deg, 36 at 10-20, 261 over 20; edge min
+# 0.042 median 0.302 m. Box x +-1.090, y 0.229..1.277, z -2.055..2.026.
+# The two edges on more than 2 faces are the mirror bases, 4 faces each (housing 124/125 and
+# 130/131 with the fender 96/100 and the cowl 184/238), as on the Adder and the Python.
+# The open edges are not only the underside: most are T-junctions (a long edge against two
+# shorter ones) on the roof 101/102/107/108, the windscreen and its logo strip 60/61/66/67, the
+# nose 158-162 / 208-216, the bonnet vents 170/224 and the sills 174/177/228/231.
+# An olive wedge: paint 75 91 34 (86 faces), orange 192 78 0 (40: the spine over the rear
+# window, the mirrors, the nose's lower half, the sills, the rear panel), white 255 255 255
+# (24: the spine's sides and the stripes beside it, the sill stripe). 70 flat black 0 0 0
+# faces: the arch tunnels 17-52, the rear wing 69-86 (stays as in the original until the Full
+# body), the side scoops 87-92, the spine's front 6, the windscreen corners 59 / 65, the nose
+# intake 122, the panel between the tail lamps 12, the rear valance 139 and the bonnet vents
+# 169 / 170 / 223 / 224. Textured: Underred (the underside), Oklog2 61 64 67 (the logo strip
+# over the windscreen), Ogflight 120 / 121, Ogblight 10 / 11.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] the mirror glass is the grey 146 146 146 quad on the back of each housing (118 / 119,
+# |x| 0.888-1.090, y 0.896-0.983, z 0.510-0.558)
+MirrorGlass rgb=146,146,146
+
+# [O] glass is 75 92 107 (11 faces: windscreen 60 62 63 66 68, side windows 54 / 57, the rear
+# window in two halves either side of the spine 53 55 / 56 58)
+Glass rgb=75,92,107 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: one Ogflight quad a side, tag 127 127 104 (120 / 121, |x| 0.254-0.818,
+# y 0.371-0.571, z 1.816-2.026, n 0.35 0 0.94: a wide lens across the nose's corner); halo 0/1
+# runs it from (0.818 0.489 1.816) to (0.254 0.42 2.026), rgb ff f8 99. Design choice: a
+# reflector bowl with three bulbs and a daytime bar along its bottom edge.
+Lamp from=127,127,104 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.014 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.025 margin=0 clip=0 halo=1
+# [O] tail lights: one Ogblight quad a side, tag 127 0 0 (10 / 11, |x| 0.233-0.722, y 0.664-0.800,
+# z -2.055..-2.026, n 0 0.21 -0.98); halo 2/3 runs from (0.716 0.753 -2.034) to (0.296 0.732
+# -2.04), rgb ff 11 11. The lens is a trapezoid: its top edge level (y 0.800), its bottom edge
+# rising 7 deg outwards (0.664 at |x| 0.352 to 0.706 at 0.710), and the LED frame lies along
+# the bottom edge. Design choice: two level light bars, parallel to the top edge and the halo
+# (rising 0.12 frame widths over the run cancels the slope; along the bottom edge they sloped
+# against the car's lines and stopped halfway across the lens).
+Lamp from=127,0,0 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.15 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] flat black (0 0 0) openings that are not arch tunnels, the wing or the underside:
+# - the nose intake 122 between the headlights (|x| < 0.254, y 0.371-0.469, z 2.026): honeycomb
+Vent from=0,0,0 lo=0,0.36,2.0 hi=0.26,0.48,2.05 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+# - the panel between the tail lamps 12 (|x| < 0.356, y 0.664-0.800, z -2.055..-2.026): slats
+Vent from=0,0,0 lo=0,0.65,-2.07 hi=0.36,0.81,-2.0 rgb=3,3,4 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.02 width=0.006 blades=0 spine=0.01 tilt=0
+# - the side scoops' back walls 89 / 92 (|x| 0.78-0.966, y 0.493-0.909, z -0.753..-0.516,
+#   facing forward and up): slats
+Vent from=0,0,0 lo=0.77,0.48,-0.76 hi=0.97,0.92,-0.5 rgb=3,3,5 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.01 tilt=0
+# - the bonnet vents 169 / 170 and 223 / 224 (|x| 0.319-0.571, y 0.707-0.898, z 0.999-1.744):
+#   louvres
+Vent from=0,0,0 lo=0.3,0.7,0.98 hi=0.58,0.9,1.75 rgb=3,3,6 frame=0.008 inset=0.025 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
+
+# [O] The front fenders are a box of crisp facets (top 151 / 180, a 45 deg chamfer 146 / 185 and the
+# side 147 / 186, folds 40-54 deg) that fan out at the nose corner into 148 / 150 / 181 / 187
+# (folds 13-25 deg, and 40 between 148 and 150), where the chamfer fades into the nose. Unlike
+# the other cars' fenders these are creases, not a Gouraud fan (only 36 cage edges at 10-20 deg,
+# the fewest). Design choice: a curved zone over the four corner facets only (centroids |x|
+# 0.75-0.89, y 0.73-0.85, z 1.40-1.62), so they become one rounded panel and the chamfer lines
+# stay creases. A zone over the whole fender with folds under 30 deg rounded left the chamfer
+# creases ending inside it: the far fender came out mottled and 14 more non-manifold edges.
+Smooth from=75,91,34 lo=0.73,0.7,1.38 hi=0.9,0.86,1.65 max_deg=45 step=0.025 loose=0 round=0.1
+
+# Every edge cut and every face remeshed at 4 cm, like the other base bodies.
+Refine step=0.04

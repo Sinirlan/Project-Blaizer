@@ -1,0 +1,16 @@
+# Motorhead cine v1
+# Test sequence for #150: RedRock, 8 AI cars, 10 s from the green light.
+# Two tracking cameras beside / over the start straight, one mounted on the leader's nose, one chase.
+Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60
+End 10
+
+Camera grid    static  Eye 14 3 -10 Target car 7 Zoom auto 18 Lag 0.15 Lead 0.2 Clear on
+Camera gantry  static  Eye -6 7 80 Target leader Zoom auto 30 Lag 0.25 Lead 0.3 Clear on
+Camera nose    mounted Target leader Offset 0 0.55 2.1 Angles 0 0 0 Zoom 1 Hide on
+Camera chase   chase   Target car 3
+
+Shot 0 grid
+Shot 3 gantry
+Shot 6 nose
+Shot 8 chase

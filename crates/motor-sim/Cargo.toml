@@ -1,0 +1,10 @@
+[package]
+name = "motor-sim"
+description = "Motorhead car physics reimplemented from the recovered model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+motor-data = { path = "../motor-data" }
+glam = { version = "0.34.1", features = ["bytemuck"] }

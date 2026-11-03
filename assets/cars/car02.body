@@ -1,0 +1,59 @@
+# Motorhead body v1: Adder Mk2 (car 02), Base body (09-remaster 9.22 phase 6, #175). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 190 v / 228 p (190 welded), 0 open edges, 2 edges on more than 2 faces, 190/190
+# mirror twins; 108 edges under 10 deg, 46 at 10-20, 258 over 20; edge min 0.044 median 0.292 m.
+# The two edges on more than 2 faces are the mirror bases, 4 faces each: the housing's 8/12
+# (-x) and 14/18 (+x) meet the A-pillar panels 189/191 and 222/224 along one edge
+# ((+-0.856 0.915 0.678) to (+-0.789 0.934 0.653)). No repeated face (unlike the Serpent's
+# 95 = 89); the bevel and the corner fans cope as they are, mesh check non-manifold 0.
+# Box x +-1.069, y 0.226-1.244, z -1.987..1.987; hubs x +-0.75 (PhyWheel 0.6 x 1.25), z 1.22 /
+# -1.42. A blue wedge coupe: Colour1 15 53 123 (54 faces: bonnet, front fenders, the upper
+# flanks), Colour2 23 91 174 (41: the rear haunches and deck, the roof, the front lip and the
+# sills) and Colour3 155 159 164 (36: the mirrors, the canopy's pillars, the diagonal stripe).
+# The arch tunnels and the underside (Underred) are 0 0 0 (61 faces). The textured parts
+# (Spoller 24-30 = the spoiler on the rear deck, the side intake 44-49 / 137 / 138, the Grill1
+# panel 20/22/23 between the tail lamps, the Oklog2 roof logo 39) stay as in the original
+# until the Full body. Stance kept as the original's (drop 0) for the first pass.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] the mirror faces are the white 216 217 218 quads 5/6 on the back of the housings
+# (x 0.856-1.069, y 0.915-1.007, z 0.637-0.678)
+MirrorGlass rgb=216,217,218
+
+# [O] glass is 75 92 107 (10 faces, type 8/9: windscreen 31/36/37, side windows 33/34 and
+# 40/41, rear window 35/42/43); the rest as the Titan's
+Glass rgb=75,92,107 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: one Ooflight quad a side, tag 125 127 104 (157/158, x 0.516-0.828, y 0.479-0.603,
+# z 1.668-1.908, facing forward and out, n 0.58 0.13 0.80); halo 0/1 runs it from (0.58 0.51 1.89)
+# to (0.82 0.56 1.71), rgb fd ff b3. Design choice: a reflector bowl with three bulbs along the
+# slim lens and a daytime light bar along its bottom edge.
+Lamp from=125,127,104 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.011 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.025 margin=0 clip=0 halo=1
+# [O] tail lights: one Obblight quad a side, tag 127 49 19 (19/21, x 0.55-0.897, y 0.804-0.933,
+# z -1.817..-1.566, on the sloping rear deck, facing up, back and out, n 0.32 0.78 -0.53); halo
+# 2/3 runs it from (0.575 0.875 -1.75) to (0.85 0.85 -1.625), rgb ff 24 24. Design choice: three
+# light bars across the lens (frame units = the lens's width, about 0.35 m).
+Lamp from=127,49,19 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.03 repeat=3 step=0,0.08 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] the bonnet's nose end: three black quads 0-2 (x +-0.267, y 0.651-0.694, z 1.652-1.764, facing
+# up and back) between the channel's walls 3/4 (flat black triangles, kept as they are).
+# Design choice: the mouth an empty recess, like the ASC's bonnet channel.
+Vent from=0,0,0 lo=0,0.6,1.6 hi=0.3,0.72,1.8 rgb=3,3,5 frame=0.008 inset=0.03 tint=0.5 kind=plain
+
+# [O] The fenders are fans of flat facets: the front fender crown 192 (15 53 123, n -0.63 0.71
+# 0.33) with 193 behind it, the side 187/188 below (n.x -0.98) and the small piece 166 at the
+# arch's front, the cowl 191 above; the rear haunch (23 91 174) rolls over from the deck 185
+# (n.y 0.97) through 180 (0.71) and 163 (0.52) to the sides 162/182 and the tail corner 184, each
+# fold 20-30 deg. Design choice (like the ASC's and the Resonic's): each curved into one panel a
+# side, 2.5 cm triangles, every point held to the original facets (`round`) so the bulge stays;
+# the folds to the bonnet, the glass line, the door side and the lamps stay creases.
+Smooth from=15,53,123 lo=0.8,0.55,0.85 hi=1.0,0.95,1.7 max_deg=50 step=0.025 loose=0 round=0.1
+Smooth from=23,91,174 lo=0.65,0.6,-1.7 hi=1.0,1.0,-0.8 max_deg=50 step=0.025 loose=0 round=0.1
+
+# Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
+# #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
+Refine step=0.04

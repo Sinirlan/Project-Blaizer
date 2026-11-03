@@ -1,0 +1,10 @@
+[package]
+name = "motor-audio"
+description = "Sample mixer and WAV loading for the Motorhead reimplementation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "ogg", "vorbis", "flac", "wav", "pcm"] }

@@ -1,0 +1,34 @@
+# Motorhead cine v1
+# Sample for #151: RedRock, 8 AI cars, 15 s from the green light.
+# A keyed fly-over of the grid (aim along the path, zoom keys), a trackside camera that shakes as the
+# pack goes by, a dolly that keeps pace with car 7 through the first right-hander, and a slow-motion
+# nose camera with a handheld sway that fades out.
+Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60
+End 15
+
+Camera fly     path Drive time Aim tangent
+Key fly 0 Eye 8 22 -70 Fov 70
+Key fly 2 Eye 12 11 10 Tcb 0.3 0 0
+Key fly 4 Eye 7 5 35 Fov 95
+
+Camera gantry  static Eye 9 1.5 185 Target nearest Lag 0.05 Lead 0.1
+Key gantry 0 Fov 45
+Key gantry 3 Fov 100
+Shake gantry proximity 3
+
+# keys at metres of car 7's lap arc, 9 m outside the corner, 4 m above the car
+Camera dolly   path Drive car 7 Target car 7 Lag 0.1 Lead 0.2 Zoom auto 14 Clear on
+Key dolly 235 Eye 4.7 3.6 266.7
+Key dolly 300 Eye 44.1 1.8 322.1
+Key dolly 371 Eye 90.5 -15 372.9
+Key dolly 443 Eye 127.5 -19.3 426.4
+Key dolly 515 Eye 137.8 -19.4 494.5
+
+Camera nose    mounted Target car 7 Offset 0 0.55 2.1 Hide on
+Shake nose handheld 1.5
+
+Shot 0 fly FadeIn 1
+Shot 4 gantry
+Shot 7 dolly
+Shot 11 nose Speed 0.5 FadeOut 1.5

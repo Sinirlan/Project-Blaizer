@@ -1,0 +1,17 @@
+[package]
+name = "motorinstall"
+description = "Installs Motorhead from the user's CD image (.cue/.bin, .iso or a disc folder): unpacks the InstallShield cabinet, copies the movies, rips the CD music to FLAC."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+motor-data = { path = "../motor-data" }
+miniz_oxide = "0.8.9"
+flacenc = { version = "0.5.1", default-features = false, features = ["par"] }
+eframe = { version = "0.37.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+rfd = "0.15"
+png = "0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }

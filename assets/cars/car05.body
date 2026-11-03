@@ -1,0 +1,73 @@
+# Motorhead body v1: ASC II (car 05), Base body (09-remaster 9.22 phase 6, #178). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 195 v / 216 p (195 welded), 40 open edges (the underside), 0 edges on more than 2
+# faces, 191/195 mirror twins about x = 0 (the front fender tops end at x 0.946 / -0.953);
+# 111 edges under 10 deg, 52 at 10-20, 214 over 20. Box x -0.953..0.946, y 0.242..1.107,
+# z -2.009..1.981. A white wedge: paint 219 218 216 (55 faces), amber 237 163 0 (30: the flank,
+# the front fender tops, the haunches and the deck beside the engine cover), red-orange 255 64 0
+# (21: the stripe over the door 6 / 114, the scuttle 103 / 122, the sills, the rear panel),
+# orange 255 123 0 (8: the rear deck lip and the haunches' back), dark red 195 36 0 (4: the rear
+# valance). 36 textured faces [O] (not 64): Grill1 25 / 26 (the side intakes behind the doors),
+# 28 / 29 (between the tail lamps), 192 / 207 (the engine cover); Blight4 27 / 30; Flightg
+# 72-79; Newlog 131 133 140 142 (the banner over the windscreen); Avgas1 169-172 (the rear
+# opening); Underred (the underside). The arch tunnels are 10 10 10.
+# Stays as in the original until the Full body: the rear wing (60 60 60: 55-59, 155-164), the
+# Grill1 side intakes and engine cover, the Newlog banner and the Avgas1 rear opening.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] the mirror glass is the white 255 255 255 quad on the back of each housing (31 / 32,
+# |x| 0.675-0.880, y 0.826-0.943, z 0.406-0.417)
+MirrorGlass rgb=255,255,255
+
+# [O] glass is 47 60 88 (14 faces: windscreen 125 / 139 and its sides 132 / 141, side windows
+# 127-129 / 135-137, rear quarter windows 126 / 134, rear window 130 / 138)
+Glass rgb=47,60,88 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: a Flightg pocket a side in the nose, tag 127 111 0: the lens 72 / 73 on its back
+# wall (|x| 0.343-0.760, y 0.594-0.687, z 1.509-1.671, n 0.18 0.58 0.80), the floor 74 / 77
+# (|x| 0.313-0.732, y 0.560-0.609, z 1.583-1.803, facing up) and the end walls 75 76 / 78 79;
+# halo 2/3 runs diagonally from the lens's outer end (0.746 0.636 1.595) onto the floor's inner
+# front (0.328 0.610 1.716), rgb ef f7 8e. Design choice: the Serpent's Flightg lamp, a near-black
+# housing with two projector pods (4 cm radius, the pocket is 7-9 cm tall), over the lens and
+# the floor. The end walls are painted in the wing's grey (the first 60 60 60 face is 55) and
+# leave the lamp: with them in it a reflector bowl (the ASC's kind) stepped up the walls and
+# poked a spike out of the outer one; on the lens alone it lost its bulbs (the halo's foci lie
+# on the floor), and on lens and floor its grid stepped along their slanted edges.
+# Boxes by face centre: the inner wall 76 (0.341 0.604 1.701), the outer wall 75 (0.732 0.627
+# 1.591); the lens 72 (0.544 0.637 1.598) and the floor 74 (0.529 0.587 1.685) stay.
+Paint from=127,111,0 lo=0.32,0.59,1.68 hi=0.36,0.62,1.72 like=60,60,60
+Paint from=127,111,0 lo=0.7,0.6,1.55 hi=0.77,0.65,1.63 like=60,60,60
+Lamp from=127,111,0 frame=0.008 inset=0.06 tint=0.45 kind=projectors count=2 radius=0.04 rows=1 span=0.6 floor=34,35,38 led_inset=0
+# [O] tail lights: one Blight4 quad a side, tag 127 0 0 (27 / 30, |x| 0.411-0.845, y 0.623-0.688,
+# z -1.971..-1.816, n 0.14 0.72 -0.68: 45 deg, facing back and up); halo 0/1 runs from
+# (0.411 0.656 -1.937) to (0.834 0.656 -1.853), rgb e1 00 00. Design choice: two light bars.
+Lamp from=127,0,0 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] the Grill1 panel between the tail lamps, 28 / 29 (|x| < 0.411, y 0.623-0.690,
+# z -2.009..-1.902, n 0.07 0.71 -0.71), carries the tail lamps' tag 127 0 0, so it would join
+# their housing. Repainted in the arch tunnels' black first (the first 10 10 10 face is the
+# untextured 9), then a slatted vent like the Serpent's. Upright slats (tilt 0): leaning 45 deg
+# down like the Serpent's (tilt 45), the lowest slat poked through the panel 189 / 190 below the
+# vent's outer end as a dark sliver (this panel is 9 cm deep, the Serpent's 16 cm; a 2.5 cm
+# recess only shrank it).
+Paint from=127,0,0 lo=0,0.6,-2.02 hi=0.3,0.71,-1.89 like=10,10,10
+Vent from=10,10,10 lo=0,0.6,-2.02 hi=0.3,0.71,-1.89 rgb=3,3,5 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=0
+
+# [O] the flat black 84 between the headlight pockets (|x| < 0.343, y 0.651-0.660,
+# z 1.505-1.629, facing up) is the only 10 10 10 face that is not an arch tunnel: a slatted
+# nose intake.
+Vent from=10,10,10 lo=0,0.63,1.49 hi=0.35,0.68,1.64 rgb=3,3,3 frame=0.008 inset=0.03 tint=0.5 kind=slats pitch=0.02 width=0.006 blades=0 spine=0.01 tilt=0
+
+# [O] The white front corners and nose are a fan of flat facets 10-30 deg apart that the original
+# draws Gouraud-shaded (types 8 / 9): the fender crown 97 (centroid 0.874 0.750 1.115), the
+# corner 92 / 93 / 123 / 91, the nose's upper corners 94 / 95, its front 96, the middle 111 / 113
+# and 120 between the headlight pockets. Design choice (like the ASC's fenders): one curved zone
+# over them, every point held to the original facets (`round`), so the bonnet's raised centre
+# (83 86 98 99) and the paint lines stay creases.
+Smooth from=219,218,216 lo=0.7,0.4,1.0;0,0.3,1.7 hi=0.95,0.8,1.7;0.7,0.62,2.0 max_deg=50 step=0.025 loose=0 round=0.1
+
+# Every edge cut and every face remeshed at 4 cm, like the other base bodies.
+Refine step=0.04

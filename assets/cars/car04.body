@@ -1,0 +1,148 @@
+# Motorhead body v1: Serpent (car 04), Base body (09-remaster 9.22 phase 6, #174). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 204 v / 217 p (203 welded), 17 open edges (the flat underside), 3 edges on more than
+# 2 faces: windscreen triangle 95 repeats 89 (the same three vertices, same winding), so the
+# windscreen's middle triangle is there twice. 203/204 mirror twins; 104 edges under 10 deg, 61
+# at 10-20, 235 over 20; edge min 0.040 median 0.297 m. Box x +-0.978, y 0.188-1.279,
+# z -2.183..2.041; hubs x +-0.775 (PhyWheel 0.62 x 1.25), z 1.19 / -1.5.
+# A wedge with a raised rear deck: two-tone paint 143 146 177 (70 faces: nose, fenders, roof,
+# rear wing and the tail) and 73 103 135 (69: the sides, the haunches, the deck, the nose's
+# lower lip). The 1 1 1 faces (48) are the arch tunnels 26-65 (inner walls at |x| 0.5), the
+# back-facing walls 18-21 of the step behind each front arch (the "door blades", kept as they
+# are until the Full body), the roof scoop's mouth 22/23 and the quarter intakes 24/25. The
+# underside is Underred (0 0 0: 2-11); the rear wing over the deck (66-77, 159-161, 216) and
+# the Grill1 panel between the tail lamps (14/17) stay as in the original until the Full body.
+# Stance kept as the original's (drop 0) for the first pass.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] glass is 54 70 86 (12 faces, type 8/9: side windows 84-86 and 90-92, the windscreen's
+# sides 87/93 and middle 88/94 with the triangle 89 and its duplicate 95); the rest as the Titan's
+Glass rgb=54,70,86 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: one Flightg quad a side on the nose's top, tag 127 127 47 (0/1, x 0.512-0.798,
+# y 0.508-0.693, z 1.553-1.946, facing up and forward, n 0.12 0.86 0.49); halo 2/3 runs it from
+# (0.512 0.508 1.946) to (0.798 0.693 1.553), rgb fb fe 83. [O] the lens is lopsided about the
+# halo: 0.52 m long, 7-10 cm wide on the inner-front side of it, 12-19 cm on the other.
+# Design choice (#174 phase 2, after the user's headlight photo and the lamps of the reference
+# model koenigsegg+ccx.blend): a 9 cm deep housing under the lens, near-black, the Flightg
+# texture gone, and two projector pods 11 cm across, centred across the lens over the middle
+# 60 % of the halo. The pods point along the car, not along the lens (which faces mostly up):
+# upright faces (chrome bezel, LED ring, dark lens), barrels running back into the floor, so
+# they step back up the lamp. No daytime bar: the original's halo glows along the diagonal.
+Lamp from=127,127,47 frame=0.008 inset=0.09 tint=0.45 kind=projectors count=2 radius=0.055 rows=1 span=0.6 floor=34,35,38 led_inset=0
+# [O] tail lights: two Blight4 quads a side, tag 127 40 0 (12: x 0.387-0.699, z -2.089..-1.860,
+# facing back and up; 13: the corner wrapping round, x 0.696-0.830, z -1.960..-1.740); halo 0/1
+# runs from (0.393 0.862 -2.036) to (0.697 0.862 -1.910), rgb f4 00 00. Design choice: two LED
+# bars along the lens. 13 is 20 deg off 12, so it counts as the main facet and a bar run on
+# across it bends down with its narrowing lower edge; #174 phase 4 (the user's request): the bars
+# stop short of the fold at 12's outer edge (x 0.697, about 0.67 of the lens's width).
+Lamp from=127,40,0 frame=0.01 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.62,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] the Grill1 panel between the tail lamps, 14/17 (128 128 128, x 0-0.399, y 0.810-0.914,
+# z -2.103..-1.983, n 0.02 0.71 -0.70: 45 deg, facing back and up). Design choice (#174 phase 4,
+# the user's request): a louvred vent like a window blind, its slats leaning 45 deg down from
+# upright on the panel (so they stand level, pointing back). Repainted in the vent faces' black
+# look first, so the vent picks it.
+Paint from=128,128,128 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 like=1,1,1
+Vent from=1,1,1 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 rgb=3,3,5 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=45
+
+# [O] the roof scoop's mouth 22/23 (1 1 1, |x| < 0.228, y 1.196-1.279, z -0.47..-0.43, facing
+# forward and up between the scoop's walls 79/81). Design choice: a honeycomb.
+Vent from=1,1,1 lo=0,1.15,-0.5 hi=0.3,1.3,-0.4 rgb=3,3,3 frame=0.008 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+# [O] the quarter panels 24/25 behind the side windows (1 1 1, |x| 0.517-0.75, y 0.894-1.145,
+# z -0.941..-0.432, facing out and up like the glass in front of them). Design choice: slatted
+# intakes, like the Titan's haunch intakes.
+Vent from=1,1,1 lo=0.5,0.85,-1 hi=0.8,1.2,-0.4 rgb=3,3,4 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
+
+# [O] the front bumper is a band of flat facets round the nose's plan, folded at x 0.275, 0.51,
+# 0.73 and 0.92, in rows at y 0.189, 0.229, 0.32 and the headlight / bonnet line (0.506-0.55):
+# the lip, 73 103 135 (96, 98, 99, 102: a 4 cm vertical strip at y 0.19-0.23 over the
+# underside, the nose's most forward part at z 2.041), a chin strip over it sloping back to
+# y 0.32 (97, 100, 101, 103), and over that the nose's front, the blue 162 in the middle and
+# 143 146 177 at the sides (132, 141 under the headlight, 142 round the corner to the front
+# arch). Design choice (#342, the user's request): the front bumper of the reference model
+# koenigsegg+ccx.blend ([O] there: the face upright at mid-height and rounded over into the
+# bonnet, leaning back 4 cm over its lower 14 cm onto a 5 cm carbon splitter; a recessed grille
+# of fine horizontal bars in the middle over the splitter, 10 cm of the 31 cm bumper; its fog
+# lamps and side vents left out). The cage's rows move (mirrored to -x): the bottom row 3 cm
+# back; the lip row up to y 0.295, the intake's top (a third of the bumper's 0.189-0.506), its
+# column under the headlight's inner corner in to |x| 0.461 (the headlights' inner edges 0.512
+# less 5 % of the 1.024 m between them) with the bottom row's; the chin row up to y 0.39 and
+# 7.6 cm forward, the bumper's fullest line (1.4 cm past the old lip). The headlight corners and
+# the arch column (the arch rounding moves it onto the tyre's circle) stay.
+Push lo=0.27,0.185,2.03 hi=0.28,0.195,2.05 by=0,0,-0.03
+Push lo=0.51,0.185,2.0 hi=0.52,0.195,2.02 by=-0.053,0,-0.022
+Push lo=0.73,0.185,1.85 hi=0.745,0.195,1.87 by=-0.021,0,-0.022
+Push lo=0.27,0.225,2.03 hi=0.28,0.235,2.05 by=0,0.066,0.004
+Push lo=0.51,0.225,2.0 hi=0.52,0.235,2.02 by=-0.053,0.066,0.011
+Push lo=0.73,0.225,1.85 hi=0.745,0.235,1.87 by=0.003,0.065,0.003
+Push lo=0.27,0.315,1.97 hi=0.28,0.325,1.99 by=0,0.07,0.076
+Push lo=0.505,0.315,1.94 hi=0.52,0.325,1.96 by=0,0.07,0.076
+Push lo=0.725,0.315,1.79 hi=0.735,0.325,1.81 by=0.015,0.069,0.07
+# Curved into one rounded bumper, both tags in one zone (each face keeps its colour, the paint
+# line stays; #174 phase 2), listed before the front fender's zone so 142 goes with the bumper:
+# the lower band outside the intake (98, 99), everything over the intake, and (#342) the
+# bonnet's nose top 133/163, so the fold into the bonnet rounds like the CCX's. The intake's
+# faces (102 and 96) stay out of it: flat, their outline a crease, recessed below. The folds to
+# the underside, the headlight and the bonnet behind 133/163 stay creases.
+Smooth from=73,103,135;143,146,177 lo=0.5,0.18,1.6;0,0.3,1.6;0,0.56,1.6 hi=0.95,0.3,2.1;0.95,0.56,2.1;0.55,0.65,1.9 max_deg=50 step=0.025 loose=0 round=0.1
+# The intake (#342): the lower band's middle faces 102 and 96 (|x| < 0.461, y 0.189-0.295)
+# repainted in the vent faces' black look, then recessed 5 cm with fine horizontal slats and
+# upright dividers, after the CCX's grille (a black plastic grid of horizontal bars). The boxes
+# test the mean of a face's points, and the curved zone above gives 102's top edge 21 cut points
+# (mean y 0.2865, 96's 0.2685); the zone's own triangles over the intake have theirs above
+# 0.2997 (each has a point at least 0.55 step off the edge), so the paint stops at 0.297.
+Paint from=73,103,135 lo=0,0.2,1.95 hi=0.44,0.297,2.1 like=1,1,1
+Vent from=1,1,1 lo=0,0.18,1.95 hi=0.47,0.3,2.1 rgb=3,3,6 frame=0.01 inset=0.05 tint=0.5 kind=slats pitch=0.016 width=0.004 blades=5 spine=0.012 tilt=0
+# The carbon splitter (#342) under the new bottom edge, out to the corner before the front
+# arch: 2.5 cm thick, 6 cm proud of the edge (1.6 cm past the bumper's fullest line, the CCX's
+# 2 cm), a round front, fading out over its last 20 cm.
+Splitter edge=0,0.189,2.011;0.275,0.189,2.011;0.461,0.188,1.99;0.717,0.189,1.84;0.86,0.189,1.679 reach=0.06 depth=0.2 thickness=0.025 nose=4 taper=0.2 carbon=1
+# [O] The fenders are fans of flat facets, 143 146 177: the front fender crown 129 (n 0.69 0.72),
+# 131 and 153 ahead of it, 130 and 137 down its side, 154 and 142 down to the nose; the rear
+# haunch is 73 103 135: 121/122 at its front, 157 and 156/128 on top, 124/125, 145/144 and 148
+# down to the tail lamp. Design choice (like the ASC's and the Resonic's): each curved into one
+# panel a side, 2.5 cm triangles, every point held to the original facets (`round`); the folds
+# to the hood, the door, the deck and the lamps stay creases.
+Smooth from=143,146,177 lo=0.75,0.3,0.55 hi=1.0,0.9,1.85 max_deg=50 step=0.025 loose=0 round=0.1
+# [O] the side panel 120 (73 103 135, n 0.97 0.24 0.08, |x| 0.842-0.969, y 0.471-0.895,
+# z -1.116..0.589) runs flat from the door blade to the haunch and meets 121 along 110-172;
+# the shoulder 113 over it (n 0.43 0.90 0.07, under the quarter intake) meets the haunch's top
+# 128 along 68-172. Design choice (#174 phase 3): both join the haunch's zone (second and third
+# box), so those folds round instead of a crease and a dimple at 172 where the curved haunch met
+# the flat side; the fold to the lower side 111 stays a crease.
+# [O] the rear bumper is flat facets too: upright 143 146 177 panels at y 0.32-0.63, 139 in the
+# middle (x 0-0.389), 140 (x 0.387-0.749) and the corner 138 round to the rear arch, and over
+# them the 73 103 135 band sloping in to the tail lamps, 150 and 149 (y 0.63-0.81). Design choice
+# (#174 phase 4, the user's request): curved into one rounded bumper, in the haunch's zone (fourth
+# and fifth box, both tags: each face keeps its colour, the paint line stays), so the haunch's
+# corner 148 flows into it; as a zone of its own the fold between them stayed a vertical crease.
+# The folds to the underside, the tail lamps and the louvred grille stay creases.
+Smooth from=73,103,135;143,146,177 lo=0.65,0.55,-2.05;0.85,0.6,-0.5;0.65,0.85,-1.0;0,0.3,-2.2;0,0.6,-2.2 hi=1.0,1.0,-0.9;1.0,0.8,0.1;0.9,1.0,-0.5;0.93,0.64,-1.8;0.75,0.82,-1.95 max_deg=50 step=0.025 loose=0 round=0.1
+
+# [O] the glass canopy is facets folded 3-15 deg apart: the windscreen 87/93 (n 0.25 0.94 0.23),
+# 88/94 (0.05 0.95 0.30) and the centre triangle 89; the side windows 84-86 / 90-92. Design
+# choice (#174 phase 3): each curved into one pane before the glass is recessed, the windscreen
+# and the side windows as two zones so the fold between them (the A-pillar line, 87/86) stays.
+# A longer `round` than the paint's: the glass reads as one even curve, not flats joined by
+# rounded folds.
+Smooth from=54,70,86 lo=0,0.7,0.3 hi=0.55,1.2,1.4 max_deg=30 step=0.025 loose=0 round=0.3
+Smooth from=54,70,86 lo=0.56,0.8,-0.6 hi=0.8,1.2,0.7 max_deg=30 step=0.025 loose=0 round=0.3
+
+# [O] the rear wing, 143 146 177: a swept wedge over the deck, not joined to it (66-77, 159-161,
+# 214-216: top 72-77, back 66/67, underside 159-161, the tip's side wall 68). Leading edge
+# (0 1.079 -1.59) (0.405 1.081 -1.574) (0.499 1.086 -1.536) (0.696 1.103 -1.314) to the tip
+# (0.734 1.107 -1.365); trailing edge (0 1.025-1.071 -1.87) (0.52 -1.83) (0.644 1.037-1.084
+# -1.762), the side wall running from there to the tip. 4.6 cm thick at the back, sharp at the
+# front, 3-5 cm over the deck. Design choice (#174 phase 4, the user's request): rebuilt as an
+# aerofoil on the same outline (the tip cut flat at x 0.71, where the chord is still 14 cm),
+# 12 % thick with a downforce camber, its trailing edge 1 cm over its leading edge, the whole
+# wing about 5 cm higher, on two struts 12 cm long to the deck.
+Foil from=143,146,177 lo=0,1.0,-1.9 hi=0.75,1.12,-1.29 le=0,1.12,-1.59;0.405,1.122,-1.574;0.499,1.127,-1.536;0.696,1.144,-1.314;0.71,1.145,-1.33 te=0,1.13,-1.867;0.521,1.133,-1.83;0.644,1.14,-1.762;0.71,1.145,-1.471 thickness=0.12 camber=-0.03 step=0.025 struts=0.3,0.5 strut_chord=0.12 strut_width=0.014
+
+# Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
+# #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
+Refine step=0.04

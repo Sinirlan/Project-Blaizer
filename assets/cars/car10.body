@@ -1,0 +1,119 @@
+# Motorhead body v1: Titan (car 10), 09-remaster 9.22 phases 1-5. Game-space metres, x to the
+# right, y up, z forward; boxes `lo`/`hi` are x-mirrored where the generator says so. Colours
+# `r,g,b` are the MYO face tags before the repaint. Design choices unless marked [O].
+#
+# [O] 111 edges under 10 deg are splits or curved panels, the facets start at about 10 deg;
+# shortest edge 0.041 m. The original's arches are a circle of r 0.44 round y 0.32 (tyre
+# r 0.353): at rest the tyre stands 6.4 cm up the model (MODEL_OFFSET), its top at 0.77 against
+# the arch top 0.76, so the original already fills them. Tighter arches, like a modern supercar
+# (the user's reference render), with a 2 cm flat lip round them (the user's second reference:
+# the band reads as about 1.5 cm once the bevels take their share). The stance was tuned with
+# the tyre bottom at y = 0 and the body 4 cm down; with the rest position known it is 2.4 cm up
+# on the original body (#182), the same height over the road, and the arch top at 0.78, as high
+# as the front fender's ridge (0.787) allows.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=9 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=-0.024
+
+# [O] the mirror glass (face 78) is 229 249 255, facing back: shaded as polished metal
+MirrorGlass rgb=229,249,255
+
+# [O] glass is 21 25 29 (15 faces: windscreen, side windows, rear window, all type 8/9); the
+# rest a design choice: 2 cm of rubber, glass 1.5 cm under it, 40 % darker
+Glass rgb=21,25,29 frame=0.02 inset=0.015 tint=0.6
+# [O] each side window is a pentagon fanned into 4 faces (91 93 95 96, mirrored 92 94 97 98)
+# round one inner point (0.764 0.914 0.701) that stands 3.3 cm out of the outline's plane: it
+# read as a bulge. One flat pane in the outline's plane instead, the frame taking up the outline's
+# own 1.5 cm off it (the user's call, #291); the windscreen and the rear window stay curved.
+FlatGlass lo=0.45,0.75,-0.3 hi=0.95,1.15,1.2
+
+# [O] headlights: one Bendljus quad a side (127 127 127, faces 82 and 88, about 0.32 x 0.09 m),
+# halo segment across it; tail lights: a Redfjus cluster of 6 faces a side (127 0 1, faces
+# 105-116) round the rear corner, halo segment diagonal across its back. The rest a design
+# choice: an integrated assembly, a chrome reflector bowl dipping to three bulbs a side (#171 1b,
+# the user's fog-lamp photo; was three projector cups); the tail lights after the user's hand-drawn layout (LED
+# dots on a dark red lens: a column up the inner end, two rows along the bottom dipping into a V
+# where the lower outer "foot" starts and rising to the outer end).
+Lamp from=127,127,127 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.012 led_inset=0
+Lamp from=127,0,1 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.04
+# The user's draft (1125 px lens), read off in facet widths in the edge frame: along the bottom
+# edge for 12 dots, then rising to the outer end, twice (the second row 0.05 above the first); a
+# column of dots up the inner edge from above the rows, stopping an inset short of the lens's
+# top (the bottom row and the column keep the inset from the edges, the user's note).
+Led pts=0,0;0.6,0;0.88,0.12 repeat=2 step=0,0.05 style=dots dot=0.015 pitch=0.05 margin=0 clip=0 halo=1
+Led pts=0,0.1;0,2 repeat=1 step=0,0 style=dots dot=0.015 pitch=0.05 margin=0.04 clip=0 halo=1
+
+# [O] vents are flat black (1 1 1) faces, like the arch tunnels (which the boxes miss): front
+# intake 81/87 (below the nose, |x| < 0.42), the panel between the tail lights 39-43, the rear
+# bumper's centre 51 (|x| < 0.36, y 0.40-0.61), the intakes on the rear haunches 101/103 and the
+# back walls of the side scoops 138/139. The rest a design choice (after the user's reference
+# render): honeycomb front and rear, slats on the haunches and in the scoops, the bumper's
+# centre an empty recess for the exhausts (phase 5). The `rgb` tags are unused colours.
+Vent from=1,1,1 lo=0,0.15,1.95 hi=0.5,0.5,2.2 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+Vent from=1,1,1 lo=0,0.65,-2.05 hi=0.75,0.85,-1.85 rgb=3,3,4 frame=0.01 inset=0.025 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+Vent from=1,1,1 lo=0,0.35,-2.1 hi=0.4,0.65,-1.95 rgb=3,3,5 frame=0.012 inset=0.04 tint=0.5 kind=plain
+Vent from=1,1,1 lo=0.6,0.82,-1 hi=0.9,0.97,-0.45 rgb=3,3,6 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
+Vent from=1,1,1 lo=0.6,0.25,-0.4 hi=0.95,0.6,0 rgb=3,3,7 frame=0.012 inset=0.04 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.01 tilt=0
+# the framed side intake: its inner face is tagged 4 4 1 by the Panel below
+Vent from=4,4,1 lo=0.4,0.15,1.8 hi=0.72,0.55,2.1 rgb=3,3,8 frame=0.006 inset=0.035 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=1
+
+# Nose kit after the user's Audi R8 reference (its hexagonal single-frame grille, framed side
+# intakes with an upright blade, a splitter blade). [O] The grille's lower outer corner is at
+# (0.417 0.21 2.067), the panel beside the grille (face 79/85, 65 63 60, under the headlight)
+# runs x 0.417-0.685, y 0.21-0.48, angled back to z 1.887, and the bottom front edge runs
+# (0 0.21 2.105) -> (0.417 0.21 2.067) -> (0.685 0.22 1.887) -> (0.879 0.22 1.654) into the
+# arch. The cuts are a design choice: about the R8's proportions, a 2.5 cm frame round the
+# intakes, the splitter 5 cm proud, stopping short of the arch.
+Chamfer from=1,1,1 corner=0.417,0.21,2.067 across=0.09 along=0.12
+Panel from=65,63,60 lo=0.45,0.25,1.9 hi=0.65,0.45,2.05 frame=0.025 rgb=4,4,1
+# The user's call (#291): a curve through the edge's points with a half-round lip (4 segments),
+# not the straight runs, and both ends fading into the body over 25 cm, the outer end carried on
+# along the bottom edge towards the arch (85 % of the way from the 0.685 corner).
+Splitter edge=0,0.21,2.105;0.417,0.21,2.067;0.685,0.22,1.887;0.85,0.22,1.689 reach=0.05 depth=0.15 thickness=0.012 nose=4 taper=0.25 carbon=1
+
+# Phase 5, after the user's reference render. [O] The Titan has one mirror, on the left: a
+# closed box (faces 167-171, paint, and the glass 78, 229 249 255, facing back) on the window
+# line, not welded to the body; copied to the right.
+Mirror lo=-0.94,0.93,0.71 hi=-0.62,1.02,0.9
+# [O] The side scoop is a wedge (inner wall 184, floor 140, roof 141, back wall 138) flush at
+# the front (x 0.904, z 0.72-0.78) and deepest at the back wall, whose inner points are
+# (0.660 0.437 -0.200) and (0.740 0.297 -0.060); those go 6 cm further in.
+Push lo=0.65,0.29,-0.21 hi=0.75,0.44,-0.05 by=-0.06,0,0
+# [O] The wing is two shells of paint (per side a top 157-165, walls 144-147 and 156) open
+# underneath and along the leading edge, 0-8 cm over the deck (y 0.92-1.0), the back wall 4 cm
+# tall. After the user's Blender edit (reference_materials/titan/titan_wing_v001.blend): the
+# sloping inner wall 156 run the wing's full depth (a corner under its front end, level with its
+# back one) and carried down to the deck as a leg; then the user's call: the leg half as thick
+# (2 cm) and the whole plate that thin too.
+Thicken lo=-0.9,0.93,-1.85 hi=0.9,1.1,-1.2 thickness=0.02 legs=1
+Split a=-0.273,1.0598,-1.4487 b=-0.2311,0.9988,-1.8125 c=-0.2311,0.9988,-1.4487
+# [O] the rear bumper: trim faces 52-61 (65 63 60) round the exhaust recess and its lower lip,
+# 54/61 wrapping round the corner; carbon, the user's call
+Carbon from=65,63,60 lo=0,0.25,-2.1 hi=1,0.62,-1.8
+# two mirrored tips in the bumper recess (|x| < 0.36, y 0.40-0.61, face at z -2.017, 4 cm deep
+# [O]), a centimetre proud. After the user's layout drawing (the recess 1210 x 555 px, each tip
+# 444 x 296 px with an 86 px gap, scaled per axis): 0.264 x 0.112 m, 5 cm apart, the outer side
+# leaning in 5.2 cm at the top; the chamfers kept at 45 deg (2 cm), a design choice; every
+# corner rounded (1.2 cm), the user's call after the reference render
+Exhaust x=0.025 y=0.506 z=-2.027 width=0.264 height=0.112 chamfer=0.02 slant=0.052 round=0.012 lip=0.006 pipe=0.08 depth=0.06
+# [O] The fenders over the arches are fans of 3-10-gons folded 11-46 deg (front: faces from
+# the headlamp corner to the door line, rear: from the side intake to the tail) where the
+# original's paint texture shades a round wing; curved here (the user's marked shots): remeshed
+# at 2 cm and faired (Taubin relaxing left the folds visible, PN triangles rippled along the
+# rear one; cutting each facet 12x left slivers along the arch arcs that rippled). The front box
+# also takes the two upper panels between the strip and the hood (faces of centroid x 0.61 and
+# 0.51, the user's call); the boxes (centroids, |x|) stop short of the hood centre, the mirror
+# and wing (y >= 0.95) and the door sides (n.x 0.94, z 0.3 / -0.59); the folds to them stay
+# creases. [O] The rear box's fold 196 | 195/166 (the upper quarter, n.y 0.78, to the side,
+# 31 deg) runs from the arch rim to the tail lamp's corner; with the panels' slopes held along
+# both, fairing kept it as a crease over the arch (the user's marked shot), so that box is
+# `loose` (the user's call). Both boxes `round=0.1` (#171 follow-up): the plate through the outline
+# alone met the hood with its own slope, and the hood centre's long fan triangles swept that tilt
+# across as diagonal seams; held to the facets by springs it meets the hood flat again, and the
+# fenders keep their bulge.
+Smooth from=200,200,200 lo=0.5,0.42,0.75 hi=1.2,0.92,2.05 max_deg=50 step=0.02 loose=0 round=0.1
+Smooth from=200,200,200 lo=0.79,0.5,-2 hi=1.2,0.92,-0.85 max_deg=50 step=0.02 loose=1 round=0.1
+# [O] The sides are long thin polygons: the door band (1.2 m by 0.25 m, under the window), the
+# door's crease strip (1.2 m by 5 cm), the sill (1.8 m by 8 cm), and the panel before the rear
+# arch, a 12-gon whose rear edge is the arch's arc. Ear clipped, they fanned into slivers (the
+# user's mesh-check shot); every edge cut and every face remeshed at 4 cm (the step the faces
+# round the fenders already had), a design choice.
+Refine step=0.04

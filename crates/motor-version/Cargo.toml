@@ -1,0 +1,7 @@
+[package]
+name = "motor-version"
+description = "The game's version, stage and git commit, stamped at build time (#338)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"

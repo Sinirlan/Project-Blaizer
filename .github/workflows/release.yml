@@ -1,0 +1,150 @@
+name: release
+
+# A pushed tag vX.Y.Z[-stage] builds the Linux and Windows packages and creates a GitHub Release.
+# "Run workflow" (workflow_dispatch) does the same build and checks, keeps the packages as
+# workflow artifacts and creates no Release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            exe: ''
+            archive: tar.gz
+          - os: windows-latest
+            platform: windows-x86_64
+            exe: .exe
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux build dependencies (audio, input)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Version and package name
+        run: |
+          ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            tag=$GITHUB_REF_NAME
+            # The tag is the only thing that names a release: it must be the version of the commit.
+            [[ $tag == "v$ver" ]] || { echo "tag $tag does not match Cargo.toml version $ver" >&2; exit 1; }
+          else
+            tag=test-${GITHUB_SHA::7}
+          fi
+          {
+            echo "VERSION=$ver"
+            echo "PKG=motorhead-$tag-${{ matrix.platform }}"
+            echo "MOTOR_GIT_HASH=${GITHUB_SHA::7}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --bin motorhead --bin motorinstall
+
+      - name: Stage the package (allowlist)
+        run: |
+          rm -rf "$PKG" && mkdir "$PKG"
+          cp "target/release/motorhead${{ matrix.exe }}" "target/release/motorinstall${{ matrix.exe }}" "$PKG/"
+          cp LICENSE "$PKG/"
+          cat > "$PKG/README.txt" <<'EOF'
+          Motorhead (Rust reimplementation)
+
+          This package contains the programs only: it has NO game data. You need your own copy of
+          Motorhead (Digital Illusions, 1998).
+
+          1. Run motorinstall (no arguments opens a window) and pick your CD image and a target folder.
+          2. Copy motorhead next to motor.exe in that folder and start it there, or start it with the
+             folder as its argument: motorhead /path/to/folder
+
+          Settings: ~/.config/motorhead/settings.cfg (Windows: %APPDATA%\Motorhead\settings.cfg).
+          Licence: GNU AGPL-3.0-or-later (LICENSE). The source of this build is the tagged commit of the
+          repository this release belongs to.
+          EOF
+
+      - name: Checks (version, file list, size, leaks)
+        run: |
+          set -euo pipefail
+          # 1. The packaged program reports the version of the tag (alpha/beta/rc also show the commit).
+          out=$("$PKG/motorhead${{ matrix.exe }}" --version)
+          echo "$out"
+          [[ $out == "motorhead $VERSION"* ]] || { echo "--version does not start with 'motorhead $VERSION'" >&2; exit 1; }
+          if [[ $VERSION == *-* ]]; then
+            [[ $out == *" ${GITHUB_SHA::7}" ]] || { echo "--version does not end with the commit ${GITHUB_SHA::7}" >&2; exit 1; }
+          fi
+          # 2. Exactly the allowlisted files: no game data, nothing else.
+          want=$(printf '%s\n' LICENSE README.txt "motorhead${{ matrix.exe }}" "motorinstall${{ matrix.exe }}" | sort)
+          have=$(cd "$PKG" && find . -type f | sed 's|^\./||' | sort)
+          [[ $want == "$have" ]] || { echo "package content differs from the allowlist:" >&2; echo "$have" >&2; exit 1; }
+          # 3. Size: a stray game file or debug build would show here.
+          kb=$(du -sk "$PKG" | cut -f1)
+          echo "package: $kb KB"
+          (( kb < 102400 )) || { echo "package is over 100 MB" >&2; exit 1; }
+          # 4. No build-machine paths in the programs. The source tree is already audited by the export
+          #    script, so only paths of the build environment can add anything (the runner's own are fine).
+          if grep -raPl -- '/home/(?!runner)[a-z]|[A-Za-z]:[\\/]Users[\\/](?!runneradmin)' "$PKG"/motor*; then
+            echo "user home paths in the programs" >&2; exit 1
+          fi
+
+      - name: Archive
+        run: |
+          if [[ "${{ matrix.archive }}" == tar.gz ]]; then
+            tar -czf "$PKG.tar.gz" "$PKG"
+          else
+            7z a -tzip "$PKG.zip" "$PKG" >/dev/null
+          fi
+          ls -l "$PKG.${{ matrix.archive }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: ${{ env.PKG }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}   # this job has no checkout, so gh cannot read a git remote
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release notes
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          pre=
+          if [[ $TAG == *-* ]]; then pre='This is a pre-release; its version also shows the commit it was built from. '; fi
+          cat > ../notes.md <<EOF
+          Motorhead $TAG for Linux (x86_64) and Windows (x86_64).
+
+          ${pre}The packages contain the programs only and **no game data**: you need your own copy of Motorhead (\`motorinstall\` builds the install folder from your CD image). \`SHA256SUMS\` lists the checksums.
+
+          Source: these programs were built from the commit tagged \`$TAG\` in this repository (GNU AGPL-3.0-or-later).
+          EOF
+      - name: Create the release
+        run: |
+          flags=()
+          [[ $TAG == *-* ]] && flags+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --title "Motorhead $TAG" --notes-file notes.md "${flags[@]}"
+          fi

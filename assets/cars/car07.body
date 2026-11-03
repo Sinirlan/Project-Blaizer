@@ -1,0 +1,50 @@
+# Motorhead body v1: ASC (car 07), Base body (09-remaster 9.22 phase 6, #172). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 204 v / 222 p, 10 open edges, 202/204 mirror twins; 121 edges under 10 deg, 219
+# over 20 deg, edge min 0.037 median 0.277 m. A mid-engined wedge: paint 239 159 4 (95 faces)
+# with the two-tone red 228 42 4 (36: the sills, bumpers, lower nose, the bonnet 203 and roof
+# 113 centre stripe, the cowl 74/75). The arch tunnels and the underside (Underred) are 0 0 0.
+# Stance kept as the original's (drop 0) for the first pass; arches like the Titan's.
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
+
+# [O] glass is 50 83 107 (16 faces, type 8/9: windscreen 76-78, rear window 84 86 89, side
+# windows 91-100); the rest as the Titan's
+Glass rgb=50,83,107 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights are a slim textured band a side, tag 101 99 94: Redfjus 132/133 (x 0.32-0.74,
+# y 0.42-0.52, z 1.78-2.02) wrapping round the corner as 6link 134 (x 0.74-0.82, z 1.70-1.82);
+# halo 0/1 runs the band from (0.322 0.417 2.018) to (0.817 0.518 1.778). Design choice: one
+# reflector bowl with three bulbs along the band and a daytime light bar along its bottom edge.
+Lamp from=101,99,94 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.011 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.03 margin=0 clip=0 halo=1
+# [O] tail lights: one Blight4 quad a side, tag 127 2 0 (118/119, x 0.42-0.82, y 0.73-0.83,
+# z -1.95..-1.85); halo 2/3 along it from (0.42 0.776 -1.941) to (0.824 0.775 -1.861). Design
+# choice: two light bars across the lens (frame units = the lens's width, about 0.4 m).
+Lamp from=127,2,0 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.04 margin=0 clip=0 halo=1
+
+# [O] the dark 10 10 10 faces: the grille 202 under the nose panel (|x| < 0.322, y 0.31-0.42,
+# z 2.02), the side scoops ahead of the rear arches (54-57, x 0.74-0.92, y 0.31-0.76,
+# z 0.34-0.64, their back walls facing up and back), the bonnet channel's mouth 69 (|x| < 0.39,
+# y 0.63-0.70, z 1.53-1.65, facing up and back) and the B-pillars 101/102 (left as paint).
+# Design choice: honeycomb grille, slatted side scoops, the channel's mouth an empty recess.
+Vent from=10,10,10 lo=0,0.28,1.98 hi=0.35,0.44,2.05 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+Vent from=10,10,10 lo=0.7,0.28,0.3 hi=0.95,0.8,0.7 rgb=3,3,4 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.01 tilt=0
+Vent from=10,10,10 lo=0,0.6,1.5 hi=0.4,0.72,1.66 rgb=3,3,5 frame=0.008 inset=0.03 tint=0.5 kind=plain
+
+# [O] The fenders are fans of flat facets: the front fender crown 155-158 / 194-197 (folded
+# 20-35 deg from the side 129/128 and the bonnet slope 154), the rear haunch 178 179 185 /
+# 206 207 213 (n.y 0.73) folding 45 deg down to the side 184 186 176 / 212 214 204. Design
+# choice (like the Titan's fenders): each curved into one panel a side, 2.5 cm triangles, every
+# point held to the original facets (`round`) so the bulge stays; the folds to the bonnet
+# centre, the glass line and the lower red body stay creases.
+Smooth from=239,159,4 lo=0.7,0.5,0.9 hi=0.95,0.85,1.85 max_deg=50 step=0.025 loose=0 round=0.1
+Smooth from=239,159,4 lo=0.8,0.5,-1.8 hi=0.95,0.95,-0.5 max_deg=50 step=0.025 loose=0 round=0.1
+# Second pass (the user's mesh-check shot, 2026-10-29): 2,584 of the body's 13,574 triangles were
+# slivers (under 5 deg), [D] mostly the bevel strips' rows, 3-12 mm across, along cage edges up to
+# 1.5 m (the windscreen and side-window frames, the sills, the nose), and long fans over the big
+# side and bonnet panels. Every edge cut and every face remeshed at 4 cm, like the Titan; a design
+# choice: at 5-15 cm the rows come out 3-6 mm by 6-15 cm, still slivers, and more of them.
+Refine step=0.04

@@ -1,0 +1,86 @@
+# Motorhead body v1: R-Build 2 (car 09), Base body (09-remaster 9.22 phase 6). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 148 v / 167 p, no vents: the (0,0,0) faces are the arch tunnels (front 90-103, rear
+# 74-89) and the underside. The facets are long (71 edges under 10 deg, 184 over 20 deg), so
+# the bevel is wider and the arch lower-key; the drop was tuned as 3 cm with the tyre bottom at
+# y = 0, its rest is 1.4 cm up (#182).
+Body bevel=0.02 segments=3 bevel_tol=0.001 smooth_deg=12 arch_step_deg=7.5 arch_clearance=0.04 arch_lip=0.02 drop=0.016
+
+# [O] glass is 55 72 89 (11 faces: windscreen 3 5 7 9 12, rear 13 14, side 104-107); the rest
+# as the Titan's
+Glass rgb=55,72,89 frame=0.02 inset=0.015 tint=0.6
+
+# [O] lamps are textured faces, told apart by their colour tag: headlights Redfjus 127 122 61
+# (faces 1 and 2, x +-0.5, z 2.02), tails Blight4 127 8 8 (faces 60 and 61, x +-0.6, z -1.99).
+# Design choice: two projector cups a side; one light bar along each tail's facet.
+# Full body after the user's reference render (2026-10-27, #171 phase 1): an integrated lamp
+# assembly (phase 1b, the user's fog-lamp photo): one chrome reflector bowl over the lens dipping
+# to two rows of three bulbs, over a daytime light bar along the lens's bottom edge.
+Lamp from=127,122,61 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=2 pitch=0.03 bulb=0.009 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.03 margin=0 clip=0 halo=1
+# Tail lamps after the user's drawing (#171 phase 3): a light tube round the lens open at the
+# inner end and a thick middle bar, nothing else lit (the user dropped the drawing's slats and
+# dashes); only the bar carries a halo strip (the tube's corner strips streaked). Frame units = the lens's width, about 0.39 m; x outwards along the bottom edge, y up).
+Lamp from=127,8,8 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0
+Led pts=0,0 repeat=1 step=0,0 style=rim width=0.03 gap=0.03 closed=0 margin=0 clip=0 halo=0
+Led pts=0.03,0.14;0.9,0.11 repeat=1 step=0,0 style=bar width=0.05 margin=0 clip=0.07 halo=1
+
+# [O] the nose: a dark panel (26 26 26) of two faces, the front 0 (|x| < 0.307, y 0.324-0.458,
+# z 2.1) and its sloped top 33 (y 0.458-0.507); under each headlight a trim panel (62 71 83,
+# faces 42/45, x 0.336-0.683, y 0.247-0.458, z 1.98-2.12); the lower lip 30 (62 71 83, y
+# 0.247-0.324, z 2.114-2.119); the bottom front edge (0 .247 2.119) -> (.336 .247 2.119) ->
+# (.683 .247 1.98) -> (.869 .227 1.694). Design choice after the reference render: honeycomb
+# grille, framed honeycomb side intakes with an upright blade, a carbon splitter blade and a
+# carbon lower lip.
+Vent from=26,26,26 lo=0,0.3,2.05 hi=0.35,0.52,2.13 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
+Panel from=62,71,83 lo=0.4,0.3,2.0 hi=0.6,0.42,2.12 frame=0.025 rgb=4,4,1
+Vent from=4,4,1 lo=0.4,0.3,2.0 hi=0.6,0.42,2.12 rgb=3,3,8 frame=0.006 inset=0.035 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=1
+Splitter edge=0,0.247,2.119;0.336,0.247,2.119;0.683,0.247,1.98;0.8,0.235,1.78 reach=0.05 depth=0.15 thickness=0.012 nose=0 taper=0 carbon=1
+Carbon from=62,71,83 lo=0,0.24,2.1 hi=0.4,0.33,2.13
+
+# [O] the rear: the engine cover is the deck face 56 (62 71 83, |x| < 0.308, y 1.001-1.032,
+# z -1.787..-1.327, between the ducktail wedges 57/58, body colour 131 108 71), the sloped rear
+# panel 47 (Redsug3, tag 25 26 27, |x| < 0.448, y 0.85-1.032, z -2.003..-1.787) and the panel
+# between the tail lamps 48 (same tag, y 0.721-0.85, z -2.051..-2.003). Design choice after the
+# reference render (#171 phase 2): louvres with a wide spine down the slope, continued between
+# the lamps, each a framed recess (a Panel frames the face keeping its tag, a Vent fills the
+# inner face). Phase 3, the user's request: the deck and the slope's frame are plain body paint
+# like the wedges (Paint), no mesh window; only the frame between the lamps is carbon.
+Paint from=62,71,83 lo=0,0.99,-1.8 hi=0.32,1.04,-1.3 like=131,108,71
+Panel from=25,26,27 lo=0,0.84,-2.02 hi=0.46,1.04,-1.78 frame=0.025 rgb=5,5,2
+Paint from=25,26,27 lo=0,0.845,-2.02 hi=0.46,1.04,-1.78 like=131,108,71
+Vent from=5,5,2 lo=0,0.84,-2.02 hi=0.46,1.04,-1.78 rgb=3,3,10 frame=0.006 inset=0.025 tint=0.5 kind=slats pitch=0.03 width=0.018 blades=1 spine=0.06 tilt=0
+Panel from=25,26,27 lo=0,0.7,-2.06 hi=0.46,0.83,-1.99 frame=0.02 rgb=5,5,3
+Carbon from=25,26,27 lo=0,0.7,-2.06 hi=0.46,0.845,-1.99
+Vent from=5,5,3 lo=0,0.7,-2.06 hi=0.46,0.83,-1.99 rgb=3,3,11 frame=0.006 inset=0.025 tint=0.5 kind=slats pitch=0.03 width=0.018 blades=1 spine=0.06 tilt=0
+
+# Phase 3 (#171), design choice after the render: four diffuser fins under the rear floor ([O] 65:
+# y 0.262 at z -1.74 rising to 0.358 at -1.979, 67 on to 0.484 at -2.086); carbon on the lower
+# bumper (65/67), the bumper centre 22 (62 71 83, y 0.484-0.679, z -2.09) and the sills 38/39
+# (62 71 83, x 0.89-0.955, y 0.23-0.62). The plan's carbon wing on pylons over the ducktail
+# wedges was built and then removed at the user's word: the original ducktail stays the spoiler.
+Fins xs=0.15;0.45 z0=-2.0 z1=-1.75 depth=0.06 thickness=0.01 carbon=1
+Carbon from=0,0,0 lo=0,0.25,-2.1 hi=0.2,0.5,-1.7
+Carbon from=62,71,83 lo=0,0.45,-2.1 hi=0.2,0.69,-2.0
+Carbon from=62,71,83 lo=0.85,0.2,-1 hi=1,0.65,0.9
+
+# Phase 4 (#171): the whole flank faired into one curved panel a side, like the Titan's fenders
+# but across the door too (the user's marked shots: the waist fold 128 | sill 38 read as a ridge,
+# and so did the seams of the first try's two fender zones at the door and the fender's edge
+# into the lower front panel 36). [O] The zone: the front fender crown 157 159 162 164 165 166
+# (folded 20-35 deg), the door 126 128 and the flat strips 127 163 above it, the rear quarter
+# 117 118 122 132 133 140 141 with the deck-side strips 136 139 and the tail-lamp surround 29,
+# and the trim-tagged (62 71 83) sill 38, lower front panel 36/37 and bumper side 20: `from`
+# names both tags, each face keeps its colour. It stops short of the roof line (y 0.95) and the
+# tail corner 134 (z -1.95); the folds to them, and to the lamps, intakes and grille (recesses),
+# stay creases. 2.5 cm triangles: 2 cm looked the same from the quarter view and cost 1.1 s more
+# car load than the Titan, 2.5 cm 0.4 s (50,441 body triangles).
+# Follow-up (the user's marked front view): the hood joins the zone through a second box (|x| <
+# 0.55, y 0.5-0.9, z 1.1-2.1: the flat hood 147/148 and its slope 151/158, [O] folded 21 deg,
+# with the trim-tagged centre stripe 161/160, 18 deg), so its crease across and its edges down to
+# the lamps round out with the fenders. `round=`: the plate through the outline alone lost the
+# facets' outward bulge (the fenders read concave against the original); now every point is
+# held to the original facets by a spring and the folds round over about this length.
+Smooth from=131,108,71;62,71,83 lo=0.55,0.2,-1.95;0,0.5,1.1 hi=0.96,0.95,1.98;0.55,0.9,2.1 max_deg=50 step=0.025 loose=0 round=0.1

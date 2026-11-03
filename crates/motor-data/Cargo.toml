@@ -1,0 +1,11 @@
+[package]
+name = "motor-data"
+description = "Loaders for Motorhead (1998) data files. Reads a user-supplied install; ships no game data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+png = "0.17"

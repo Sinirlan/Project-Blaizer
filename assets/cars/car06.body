@@ -1,0 +1,56 @@
+# Motorhead body v1: Avalanche (car 06), Base body (09-remaster 9.22 phase 6, #177). Game-space
+# metres, x to the right, y up, z forward. Colours `r,g,b` are the MYO face tags before the
+# repaint. Design choices unless marked [O].
+#
+# [O] cage 223 v / 230 p (223 welded), 42 open edges (the underside), 0 edges on more than 2
+# faces, 0/223 mirror twins about x = 0 but 221/223 about x +3 mm (every vertex pair sums to
+# x +6 mm; the halos too: 0.721 / -0.715); 124 edges under 10 deg, 80 at 10-20, 212 over 20.
+# Box x -0.968..0.974, y 0.147..1.097, z -2.136..2.071. Hence `centre=0.003`: the generator works
+# on the cage moved 3 mm to the left, so every |x| box below is about the car's own middle.
+# A blue wedge: paint 50 105 181 (74 faces), orange 255 112 0 (39: the flank stripe 18-25, the
+# sills 13 / 15, the rear panel 145-160, the bonnet and roof stripes, the wing's middle), white
+# 230 230 230 (24: the stripes' edges, the wing), a black line along the flank 172 / 208.
+# Textured parts that stay as in the original until the Full body: Newlog 110 / 114 / 121 (the
+# banner over the windscreen), Grill1 196 (between the tail lamps), the rear wing (43 44,
+# 58-63, 168 203 204), Underred (the underside).
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0 centre=0.003
+
+# [O] the mirror glass is the grey 126 126 126 quad on the back of each housing (48 / 195,
+# |x| 0.73-0.97, y 0.817-0.921, z 0.475-0.557)
+MirrorGlass rgb=126,126,126
+
+# [O] glass is 43 59 70 (15 faces: windscreen 109 111 115 118 122, side windows 116 117 / 123 124,
+# rear window 105-108 and 112 / 119)
+Glass rgb=43,59,70 frame=0.02 inset=0.015 tint=0.6
+
+# [O] headlights: tag 125 126 82 on two quads a side, the Redfjus lens 50 / 54 (|x| 0.31-0.72,
+# y 0.416-0.510, z 1.835-2.030, n 0.25 0.55 0.79) and the 6link side wrap 49 / 53 (|x| 0.72-0.87,
+# z 1.51-1.90, facing out); halo 0/1 runs along the lens from (0.721 0.463 1.867) to
+# (0.314 0.442 2.013), rgb fc ff 86. Design choice: one housing wrapping the corner, a reflector
+# bowl with two bulbs and a daytime bar on the front lens.
+Lamp from=125,126,82 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=2 rows=1 pitch=0 bulb=0.013 led_inset=0.03
+Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.025 margin=0 clip=0 halo=1
+# [O] tail lights: one Blight4 quad a side, tag 126 0 0 (171 / 207, |x| 0.42-0.87, y 0.821-0.918,
+# z -2.001..-1.748, on the deck's rear lip, facing up and back); halo 2/3 runs from
+# (0.836 0.863 -1.795) to (0.419 0.871 -1.949), rgb ff 1a 1a. Design choice: two light bars.
+Lamp from=126,0,0 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
+Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=0 halo=1
+
+# [O] flat black (0 0 0) openings that are not arch tunnels or the underside:
+# - the bonnet slot 34 (|x| < 0.35, y 0.63-0.65, z 1.57-1.65): slats
+Vent from=0,0,0 lo=0,0.62,1.55 hi=0.36,0.66,1.67 rgb=3,3,3 frame=0.008 inset=0.03 tint=0.5 kind=slats pitch=0.02 width=0.006 blades=0 spine=0.01 tilt=0
+# - the scoops beside the rear window 113 / 120 (|x| 0.51-0.75, y 0.89-1.06, z -0.94..-0.62): slats
+Vent from=0,0,0 lo=0.5,0.88,-0.95 hi=0.76,1.07,-0.61 rgb=3,3,4 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
+# - the intakes ahead of the rear wheels 10 / 11 (|x| 0.75-0.91, y 0.31-0.45, z -0.93..-0.73): slats
+Vent from=0,0,0 lo=0.74,0.3,-0.94 hi=0.92,0.46,-0.72 rgb=3,3,5 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.01 tilt=0
+# - the rear opening 144 / 154 with the Avgas1 plate 151 between them (|x| < 0.73, y 0.40-0.55,
+#   z -2.14..-2.03): the plate painted plain black (the first 0 0 0 face is the untextured 10)
+#   and the whole opening one slatted grille (a honeycomb cost +15k triangles)
+Paint from=0,0,0 lo=0,0.39,-2.14 hi=0.4,0.56,-2.11 like=0,0,0
+Vent from=0,0,0 lo=0,0.39,-2.14 hi=0.73,0.56,-2.02 rgb=3,3,6 frame=0.01 inset=0.035 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.02 tilt=0
+# [O] the engine cover behind the rear window is a near-black 13 13 13 panel (56 / 57, |x| < 0.49,
+# y 0.918-0.946, z -1.898..-1.257, facing up): louvres
+Vent from=13,13,13 lo=0,0.9,-1.91 hi=0.5,0.96,-1.24 rgb=3,3,7 frame=0.01 inset=0.025 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.02 tilt=0
+
+# Every edge cut and every face remeshed at 4 cm, like the other base bodies.
+Refine step=0.04
