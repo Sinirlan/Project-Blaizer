@@ -29,17 +29,47 @@ const SHADOW_FLAG: u32 = 128;
 /// around the cars' centres, the depth bias (metres) and the largest sun slant from vertical
 /// the map is set up for.
 const SHADOW_SIZE: u32 = 2048;
-const SHADOW_RANGE: f32 = 120.0;
-const SHADOW_MARGIN: f32 = 4.5;
-const SHADOW_MIN_RADIUS: f32 = 8.0;
-const SHADOW_BIAS: f32 = 0.08;
-/// REMASTER overhead car shadow [design choice]: on tracks darker than `OVERHEAD_DARKNESS`
-/// (`Look::darkness`: 1, 3, 7, 8) the map looks straight down instead of along the MYW sun, which
-/// cannot tell dusk from night (9.15). The shadow gets a soft edge of `OVERHEAD_SOFT` metres and
-/// the shader's fixed `OVERHEAD_WORLD` strength; lit objects are not shadowed.
-const OVERHEAD_DARKNESS: f32 = 0.3;
-const OVERHEAD_SOFT: f32 = 1.0;
-const OVERHEAD_WORLD: f32 = 0.55;
+motor_tune::tunable! {
+    /// Cars farther than this from the camera are left out of the car shadow map fit (they cast into it only if they fall inside it).
+    /// range: 20..400
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHADOW_RANGE: f32 = 120.0;
+    /// Margin around the cars' centres when the car shadow map is fitted.
+    /// range: 0..20
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHADOW_MARGIN: f32 = 4.5;
+    /// Smallest radius the car shadow map covers, however close the cars are together.
+    /// range: 1..40
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHADOW_MIN_RADIUS: f32 = 8.0;
+    /// Depth bias of the car shadow lookup. Too small speckles the cars, too large detaches the shadow.
+    /// range: 0..0.5
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHADOW_BIAS: f32 = 0.08;
+}
+// REMASTER overhead car shadow [design choice]: on tracks darker than `OVERHEAD_DARKNESS`
+// (`Look::darkness`: 1, 3, 7, 8) the map looks straight down instead of along the MYW sun, which
+// cannot tell dusk from night (9.15). The shadow gets a soft edge of `OVERHEAD_SOFT` metres and
+// the shader's fixed `OVERHEAD_WORLD` strength; lit objects are not shadowed.
+motor_tune::tunable! {
+    /// Tracks darker than this (`Look::darkness`) cast the car shadow straight down instead of along the MYW sun.
+    /// range: 0..1
+    /// area: Graphics/Shadows
+    OVERHEAD_DARKNESS: f32 = 0.3;
+    /// Soft edge of the overhead car shadow.
+    /// range: 0..5
+    /// unit: m
+    /// area: Graphics/Shadows
+    OVERHEAD_SOFT: f32 = 1.0;
+    /// Strength of the overhead car shadow on the world (the shader's fixed value).
+    /// range: 0..1
+    /// area: Graphics/Shadows
+    OVERHEAD_WORLD: f32 = 0.55;
+}
 /// REMASTER lamp shadows [design choice, 11-dynamic-shadows.md phase 2]: layers of the atlas
 /// (the first `LAMP_LAYERS` for street lamps, the rest for the headlights of phase 3), map size,
 /// the `Globals.env.w` bit of a view that samples it, the fade time of a layer, and how far
@@ -47,8 +77,14 @@ const OVERHEAD_WORLD: f32 = 0.55;
 const SPOT_LAYERS: usize = 6;
 /// edges of the light shadow atlases (`ShadowQuality::atlas`)
 const SPOT_SIZES: [u32; 3] = [512, 1024, 2048];
-/// bound of a car body as a shadow caster, metres [APPROX: one sphere for every car]
-const CASTER_RADIUS: f32 = 2.6;
+// bound of a car body as a shadow caster, metres [APPROX: one sphere for every car]
+motor_tune::tunable! {
+    /// Bound of a car body as a light-shadow caster: one sphere for every car [APPROX].
+    /// range: 0.5..6
+    /// unit: m
+    /// area: Graphics/Shadows
+    CASTER_RADIUS: f32 = 2.6;
+}
 const LAMP_LAYERS: usize = 4;
 /// layers of the atlas after the lamps': the headlights of the cars (phase 3)
 const HEAD_LAYERS: usize = SPOT_LAYERS - LAMP_LAYERS;
@@ -62,42 +98,120 @@ const FLAT_FLAG: u32 = 8192;
 /// CHEAT tribute to tron (#320, `0x48e964`): `Globals.env.w` bit of a Tron view: the MYO triangles are drawn as blue
 /// light and outlined (shader `tron_shade`, the codes of `scene::TRON_CODE`)
 const TRON_FLAG: u32 = 16384;
-/// REMASTER Neon grid (#320 phase 3, design choice): the glowing polygon sides are this wide at a 1080-line render,
-/// in proportion at other heights (so SSAA and 4K keep the same look), half on each triangle of a shared side
-const NEON_EDGE_PX: f32 = 1.5;
-const NEON_REF_H: f32 = 1080.0;
-/// REMASTER Neon grid: the edge width in the 128 px env probe faces (the reflections of the grid)
-const NEON_PROBE_EDGE_PX: f32 = 1.5;
-/// REMASTER fog: the fog colour's ceiling in linear light (`fog_colour`)
-const FOG_COLOUR_MAX: f32 = 4.0;
+// REMASTER Neon grid (#320 phase 3, design choice): the glowing polygon sides are this wide at a 1080-line render,
+// in proportion at other heights (so SSAA and 4K keep the same look), half on each triangle of a shared side
+motor_tune::tunable! {
+    /// Neon grid (Tron cheat) edge width at a 1080-line render, in proportion at other heights.
+    /// range: 0.2..8
+    /// unit: px
+    /// area: Graphics/Post
+    NEON_EDGE_PX: f32 = 1.5;
+    /// The render height at which `NEON_EDGE_PX` is measured.
+    /// range: 360..4320
+    /// unit: px
+    /// area: Graphics/Post
+    NEON_REF_H: f32 = 1080.0;
+}
+// REMASTER Neon grid: the edge width in the 128 px env probe faces (the reflections of the grid)
+motor_tune::tunable! {
+    /// Neon grid edge width in the 128 px env probe faces (the grid's reflections).
+    /// range: 0.2..8
+    /// unit: px
+    /// area: Graphics/Post
+    NEON_PROBE_EDGE_PX: f32 = 1.5;
+}
+// REMASTER fog: the fog colour's ceiling in linear light (`fog_colour`)
+motor_tune::tunable! {
+    /// Ceiling of the Remaster fog colour in linear light.
+    /// range: 1..16
+    /// area: Graphics/Post
+    FOG_COLOUR_MAX: f32 = 4.0;
+}
 /// the shaders' gamma (shader.wgsl GAMMA)
 const GAMMA: f32 = 2.2;
-const SPOT_FADE: f32 = 0.3;
+motor_tune::tunable! {
+    /// Seconds a light shadow layer takes to fade in or out.
+    /// range: 0..3
+    /// unit: s
+    /// area: Graphics/Shadows
+    SPOT_FADE: f32 = 0.3;
+}
 /// REMASTER bloom: mip levels of the chain below the half-size first level (fewer on small
 /// targets) and the soft threshold, in linear light (knee: the width of the soft part)
 /// [design choice]
 const BLOOM_LEVELS: u32 = 6;
-const BLOOM_THRESHOLD: f32 = 1.0;
-const BLOOM_KNEE: f32 = 0.25;
-/// the brightest light the bloom takes (linear): above the halo cores (shader HALO_CORE_GAIN
-/// 2.5), below sun glints on the cars, which bloomed into blobs driving towards the sun
-/// (Atlantika) [design choice]
-const BLOOM_MAX: f32 = 3.0;
-/// bloom added at the option's 100 %
-const BLOOM_STRENGTH: f32 = 4.0;
-/// REMASTER ambient occlusion (ssao.wgsl, 09-remaster 9.28) [design choice]: the horizon search
-/// radius and the distance where it fades out (metres), the darkening at the option's 100 %, and
-/// the format of the half-size (visibility, linear depth) targets
-const SSAO_RADIUS: f32 = 1.5;
-const SSAO_FADE: [f32; 2] = [60.0, 140.0];
-const SSAO_MAX: f32 = 0.7;
-/// REMASTER local light: seconds a volume baked in the background takes to fade in [design choice]
-const LOCAL_FADE: f32 = 1.0;
-/// REMASTER local light (#192): the probes' sun term is rebaked when the view's sun turns more
-/// than this (cosine of 0.5°) and has then stayed put for `LOCAL_SUN_SETTLE` seconds (the F11
-/// sky turn slider) [design choice].
-const LOCAL_SUN_TURN: f32 = 0.999_962;
-const LOCAL_SUN_SETTLE: f32 = 0.5;
+motor_tune::tunable! {
+    /// Remaster bloom: soft threshold in linear light; light below it does not bloom.
+    /// range: 0..4
+    /// area: Graphics/Post
+    BLOOM_THRESHOLD: f32 = 1.0;
+    /// Remaster bloom: width of the soft part of the threshold.
+    /// range: 0.01..2
+    /// area: Graphics/Post
+    BLOOM_KNEE: f32 = 0.25;
+}
+// the brightest light the bloom takes (linear): above the halo cores (shader HALO_CORE_GAIN
+// 2.5), below sun glints on the cars, which bloomed into blobs driving towards the sun
+// (Atlantika) [design choice]
+motor_tune::tunable! {
+    /// The brightest light the bloom takes (linear): above the halo cores, below sun glints on the cars.
+    /// range: 1..16
+    /// area: Graphics/Post
+    BLOOM_MAX: f32 = 3.0;
+}
+// bloom added at the option's 100 %
+motor_tune::tunable! {
+    /// Bloom added at the option's 100 %.
+    /// range: 0..16
+    /// area: Graphics/Post
+    BLOOM_STRENGTH: f32 = 4.0;
+}
+// REMASTER ambient occlusion (ssao.wgsl, 09-remaster 9.28) [design choice]: the horizon search
+// radius and the distance where it fades out (metres), the darkening at the option's 100 %, and
+// the format of the half-size (visibility, linear depth) targets
+motor_tune::tunable! {
+    /// Remaster ambient occlusion: horizon search radius.
+    /// range: 0.1..6
+    /// unit: m
+    /// area: Graphics/Post
+    SSAO_RADIUS: f32 = 1.5;
+    /// Remaster ambient occlusion: distance where it starts to fade out.
+    /// range: 5..400
+    /// unit: m
+    /// area: Graphics/Post
+    SSAO_FADE_NEAR: f32 = 60.0;
+    /// Remaster ambient occlusion: distance where it has faded out.
+    /// range: 10..600
+    /// unit: m
+    /// area: Graphics/Post
+    SSAO_FADE_FAR: f32 = 140.0;
+    /// Remaster ambient occlusion: darkening at the option's 100 %.
+    /// range: 0..1
+    /// area: Graphics/Post
+    SSAO_MAX: f32 = 0.7;
+}
+// REMASTER local light: seconds a volume baked in the background takes to fade in [design choice]
+motor_tune::tunable! {
+    /// Remaster local light: seconds a volume baked in the background takes to fade in.
+    /// range: 0.05..5
+    /// unit: s
+    /// area: Graphics/Lights
+    LOCAL_FADE: f32 = 1.0;
+}
+// REMASTER local light (#192): the probes' sun term is rebaked when the view's sun turns more
+// than this (cosine of 0.5°) and has then stayed put for `LOCAL_SUN_SETTLE` seconds (the F11
+// sky turn slider) [design choice].
+motor_tune::tunable! {
+    /// Remaster local light: the probes' sun term is rebaked when the view's sun turns more than this (cosine of the angle).
+    /// range: 0.9..1
+    /// area: Graphics/Lights
+    LOCAL_SUN_TURN: f32 = 0.999_962;
+    /// Remaster local light: seconds the sun must stay put before the probes' sun term is rebaked.
+    /// range: 0..5
+    /// unit: s
+    /// area: Graphics/Lights
+    LOCAL_SUN_SETTLE: f32 = 0.5;
+}
 const SSAO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 /// Car meshes drawn per frame (one uniform buffer each): 8 cars x (body + 4 wheels), plus
 /// headroom.
@@ -183,11 +297,27 @@ struct Globals {
     hell: [[f32; 4]; 16],
     /// CHEAT tribute to tron, REMASTER Neon grid (#320): x = half the edge width in render pixels (`NEON_EDGE_PX`)
     tron: [f32; 4],
+    /// the flashlight (`DebugView::flashlight`, shader `flashlight`): xyz the beam axis, w the cosine of the cone's outer half angle
+    flash: [f32; 4],
+    /// the flashlight: rgb the light colour, w its range in metres (0 = off)
+    flash_col: [f32; 4],
 }
 
-/// The scene shader: shader.wgsl plus the REMASTER paint finish model (paint.wgsl, re-notes/21), which `fs_remaster`
-/// calls. Every module built from shader.wgsl (grass, water, holofrost) starts from this, so the `fin_*` names resolve.
-const SHADER_SRC: &str = concat!(include_str!("shader.wgsl"), "\n", include_str!("paint.wgsl"));
+// Flashlight cone: cosine of the outer half angle, light colour (gamma-space gain) and range [design choice].
+motor_tune::tunable! {
+    /// Flashlight cone: cosine of the outer half angle.
+    /// range: 0.5..1
+    /// area: Graphics/Lights
+    FLASH_COS_OUTER: f32 = 0.88;
+}
+const FLASH_COLOUR: [f32; 3] = [1.0, 0.96, 0.88];
+motor_tune::tunable! {
+    /// Flashlight range.
+    /// range: 5..400
+    /// unit: m
+    /// area: Graphics/Lights
+    FLASH_RANGE: f32 = 90.0;
+}
 
 /// Water bodies per track (the parameters ride in the globals)
 const MAX_WATER: usize = crate::procgen::water::MAX_BODIES;
@@ -398,24 +528,43 @@ fn set_myw(g: &mut Globals, pl: &PointLights, idx: &[u16], by_model: bool) {
 
 /// Dynamic lights per frame: the ones nearest the camera.
 const MAX_LIGHTS: usize = 32;
-/// REMASTER dynamic lights [design choice, not in the original]: each scene-object halo (blinkers,
-/// flashing cones) lights the road, walls and cars within this range (metres), in its colour
-/// times its texture's tint (`HaloInst::tint`) times the object's animated scale, so the
-/// light blinks with the halo.
-pub const PROP_LIGHT_RANGE: f32 = 7.0;
-const PROP_LIGHT_GAIN: f32 = 2.0;
+// REMASTER dynamic lights [design choice, not in the original]: each scene-object halo (blinkers,
+// flashing cones) lights the road, walls and cars within this range (metres), in its colour
+// times its texture's tint (`HaloInst::tint`) times the object's animated scale, so the
+// light blinks with the halo.
+motor_tune::tunable! {
+    /// Remaster dynamic lights: each scene-object halo (blinkers, flashing cones) lights the road, walls and cars within this range.
+    /// range: 1..40
+    /// unit: m
+    /// area: Graphics/Lights
+    pub PROP_LIGHT_RANGE: f32 = 7.0;
+    /// Remaster dynamic lights: gain of the scene-object halos' light.
+    /// range: 0..8
+    /// area: Graphics/Lights
+    PROP_LIGHT_GAIN: f32 = 2.0;
+}
 /// Car light spots per frame: two headlights and two tail lights per car for 8 cars.
 pub(crate) const MAX_SPOTS: usize = 32;
-/// REMASTER car lights [design choice, not in the original: its car halos light nothing]. The
-/// front halos of a car (all 10 cars: two warm-white headlights at game z > 0, two red tail
-/// lights at z < 0 [O: MYO halo records]) become spot lights with a procedural low-beam
-/// cookie (`headlight` in shader.wgsl), the rear ones short red spots facing backwards with a
-/// wide cone, so they light the road and the car behind but not their own body (a point
-/// light there turned the whole rear red). Both are scaled by the track's darkness (`Look::darkness`), so they show
-/// at night and fade out on daylight tracks. Braking raises the tail lights (light and halo)
-/// by `BRAKE_GAIN`.
-pub const HEADLIGHT_RANGE: f32 = 40.0;
-pub const TAIL_LIGHT_RANGE: f32 = 4.0;
+// REMASTER car lights [design choice, not in the original: its car halos light nothing]. The
+// front halos of a car (all 10 cars: two warm-white headlights at game z > 0, two red tail
+// lights at z < 0 [O: MYO halo records]) become spot lights with a procedural low-beam
+// cookie (`headlight` in shader.wgsl), the rear ones short red spots facing backwards with a
+// wide cone, so they light the road and the car behind but not their own body (a point
+// light there turned the whole rear red). Both are scaled by the track's darkness (`Look::darkness`), so they show
+// at night and fade out on daylight tracks. Braking raises the tail lights (light and halo)
+// by `BRAKE_GAIN`.
+motor_tune::tunable! {
+    /// Remaster car headlight spot range.
+    /// range: 5..150
+    /// unit: m
+    /// area: Graphics/Lights
+    pub HEADLIGHT_RANGE: f32 = 40.0;
+    /// Remaster car tail light spot range.
+    /// range: 0.5..20
+    /// unit: m
+    /// area: Graphics/Lights
+    pub TAIL_LIGHT_RANGE: f32 = 4.0;
+}
 
 /// REMASTER look of one kind of car lamp, headlights and tail lights tuned apart and apart from
 /// the world and scene-object halos [design choice]. A lamp's halo gain is
@@ -558,11 +707,23 @@ impl Default for CarLightTune {
     }
 }
 
-/// Horizontal field of view: camera zoom 1.0 set at race init (0x458988) gives
-/// atan(1/zoom) * 360/pi = 90 degrees (0x40b380) [I: horizontal].
-pub const FOV_X: f32 = 90.0;
-/// The sky image band is sized for a 480-line screen (0x443a68 works in screen pixels).
-const SKY_REF_LINES: f32 = 480.0;
+// Horizontal field of view: camera zoom 1.0 set at race init (0x458988) gives
+// atan(1/zoom) * 360/pi = 90 degrees (0x40b380) [I: horizontal].
+motor_tune::tunable! {
+    /// Horizontal field of view: camera zoom 1.0 gives 90 degrees (0x458988, 0x40b380) [I: horizontal].
+    /// range: 30..140
+    /// unit: deg
+    /// area: Graphics/View
+    pub FOV_X: f32 = 90.0;
+}
+// The sky image band is sized for a 480-line screen (0x443a68 works in screen pixels).
+motor_tune::tunable! {
+    /// Classic: the sky image band is sized for a 480-line screen (0x443a68).
+    /// range: 120..2160
+    /// unit: px
+    /// area: Graphics/View
+    SKY_REF_LINES: f32 = 480.0;
+}
 /// CLASSIC sky band: U advances by (heading step in degrees) / 100 per frame (0x443caf = 100.0,
 /// 0x4d3865 = 180.0, 0x443e10..0x443e43): one image per 100 degrees of turn [O].
 const SKY_U_PER_RAD: f32 = 180.0 / (std::f32::consts::PI * 100.0);
@@ -649,31 +810,56 @@ pub enum CarDetail {
     High,
 }
 
-/// CLASSIC the near/far switch of the body levels, metres at zoom 1 on a 512 px wide screen
-/// (`0x4cf243` = 20.0 times level + 1, `0x4d2fd5` = 1/512, `0x4395a8..0x4395d4`).
-const LOD_SWITCH: f32 = 20.0;
-const LOD_WIDTH: f32 = 512.0;
+// CLASSIC the near/far switch of the body levels, metres at zoom 1 on a 512 px wide screen
+// (`0x4cf243` = 20.0 times level + 1, `0x4d2fd5` = 1/512, `0x4395a8..0x4395d4`).
+motor_tune::tunable! {
+    /// Classic: near/far switch of the body levels, metres at zoom 1 on a 512 px wide screen (0x4cf243).
+    /// range: 1..200
+    /// unit: m
+    /// area: Graphics/View
+    LOD_SWITCH: f32 = 20.0;
+    /// Classic: the screen width `LOD_SWITCH` is measured at (0x4d2fd5).
+    /// range: 64..4096
+    /// unit: px
+    /// area: Graphics/View
+    LOD_WIDTH: f32 = 512.0;
+}
 
-/// REMASTER (design choice): a generated car is drawn with its original model (OBJ0 and the original
-/// wheels) once it is this many pixels long on screen at "Car detail distance" 100 %; the percent
-/// scales the switch distance (`RemasterView::CAR_LOD_DISTANCE`). The length is the cars' about 4.5 m.
-const GEN_SWITCH_PX: f32 = 30.0;
-const GEN_CAR_LENGTH: f32 = 4.5;
-/// the switch distance holds a band of this fraction either side, so a car on the line does not flicker
-const GEN_SWITCH_BAND: f32 = 0.15;
+// REMASTER (design choice): a generated car is drawn with its original model (OBJ0 and the original
+// wheels) once it is this many pixels long on screen at "Car detail distance" 100 %; the percent
+// scales the switch distance (`RemasterView::CAR_LOD_DISTANCE`). The length is the cars' about 4.5 m.
+motor_tune::tunable! {
+    /// Remaster: a generated car is drawn with its original model once it is this many pixels long at "Car detail distance" 100 %.
+    /// range: 4..300
+    /// unit: px
+    /// area: Graphics/View
+    GEN_SWITCH_PX: f32 = 30.0;
+    /// Remaster: the car length the generated-car switch distance assumes.
+    /// range: 2..10
+    /// unit: m
+    /// area: Graphics/View
+    GEN_CAR_LENGTH: f32 = 4.5;
+}
+// the switch distance holds a band of this fraction either side, so a car on the line does not flicker
+motor_tune::tunable! {
+    /// Remaster: the switch distance holds a band of this fraction either side, so a car on the line does not flicker.
+    /// range: 0..0.8
+    /// area: Graphics/View
+    GEN_SWITCH_BAND: f32 = 0.15;
+}
 
 /// REMASTER: the distance in metres past which a generated car is drawn with the original model, at
 /// `percent` of the default, for a screen `width` pixels wide and camera `zoom`.
 fn gen_switch_distance(percent: u32, zoom: f32, width: f32) -> f32 {
-    let px_per_m = zoom * width * 0.5 / (FOV_X.to_radians() * 0.5).tan();
-    GEN_CAR_LENGTH * px_per_m / GEN_SWITCH_PX * percent as f32 / 100.0
+    let px_per_m = zoom * width * 0.5 / (FOV_X.get().to_radians() * 0.5).tan();
+    GEN_CAR_LENGTH.get() * px_per_m / GEN_SWITCH_PX.get().max(0.1) * percent as f32 / 100.0
 }
 
 /// REMASTER: whether a car at `dist` metres takes the original model: past the switch distance, with the
 /// band either side keeping the `was_far` choice of the last frame (None: the plain threshold).
 fn gen_far(dist: f32, switch: f32, was_far: Option<bool>) -> bool {
     match was_far {
-        Some(was) if dist > switch * (1.0 - GEN_SWITCH_BAND) && dist < switch * (1.0 + GEN_SWITCH_BAND) => was,
+        Some(was) if dist > switch * (1.0 - GEN_SWITCH_BAND.get()) && dist < switch * (1.0 + GEN_SWITCH_BAND.get()) => was,
         _ => dist > switch,
     }
 }
@@ -690,7 +876,7 @@ impl CarDetail {
     /// The body mesh (0 = OBJ0, 1 = OBJ1, 2 = OBJ2) at `dist` metres from the camera: level 0 while
     /// `20 * zoom * width / 512 >= dist`, else level 1, both raised to the detail's first level.
     pub fn body_level(self, dist: f32, zoom: f32, width: f32) -> usize {
-        let far = LOD_SWITCH * zoom * width / LOD_WIDTH < dist;
+        let far = LOD_SWITCH.get() * zoom * width / LOD_WIDTH.get().max(1.0) < dist;
         (far as usize).max(2 - self as usize)
     }
 }
@@ -790,6 +976,9 @@ pub struct RemasterView {
     pub generated_cars: bool,
     /// generated world fill pieces (12-world-fill) drawn after the world
     pub world_fill: bool,
+    /// the tree pack's 3D models in place of the original's tree and bush cards (procgen/trees.rs,
+    /// #389); off: the cards
+    pub tree_models: bool,
     /// the procedural water surfaces (16-water) in place of the original's flat water textures;
     /// off: the textures. The water bodies are read from the fill file whatever World fill says
     pub water: bool,
@@ -863,6 +1052,7 @@ impl Default for RemasterView {
             skids_detailed: true,
             generated_cars: true,
             world_fill: true,
+            tree_models: true,
             water: true,
             water_ssr: true,
             // [design choice, #83 phase 4]: on; costs about 0.1 ms a frame at 1080p and 0.1 s at
@@ -1108,8 +1298,13 @@ impl PostAaKind {
     }
 }
 
-/// REMASTER TAA: strength of the unsharp mask after the resolve [design choice].
-const TAA_SHARPEN: f32 = 0.2;
+// REMASTER TAA: strength of the unsharp mask after the resolve [design choice].
+motor_tune::tunable! {
+    /// Remaster TAA: strength of the unsharp mask after the resolve.
+    /// range: 0..1
+    /// area: Graphics/Post
+    TAA_SHARPEN: f32 = 0.2;
+}
 /// REMASTER TAA: the sub-pixel offsets of the eight-frame Halton (2, 3) sequence, in pixels
 /// from the pixel centre (-0.5..0.5).
 const TAA_JITTER: [[f32; 2]; 8] = [[0.0, -0.1667], [-0.25, 0.1667], [0.25, -0.3889], [-0.375, -0.0556], [0.125, 0.2778], [-0.125, -0.2778], [0.375, 0.0556], [-0.4375, 0.3889]];
@@ -1151,7 +1346,7 @@ impl PostAa {
     /// TAA over the stop: the history's share of the blend, 0.85 to 0.95, and the sharpen that
     /// undoes the resolve's softening [design choice]
     pub fn taa_params(self) -> [f32; 2] {
-        [0.85 + 0.10 * self.stop() as f32 / 3.0, TAA_SHARPEN]
+        [0.85 + 0.10 * self.stop() as f32 / 3.0, TAA_SHARPEN.get()]
     }
     pub fn strength_text(self) -> String {
         match self.kind {
@@ -1208,9 +1403,14 @@ impl RemasterView {
     }
 }
 
-/// The view-distance option's top in Classic (0x428cfc / 0x428e88 clamp at 150 %); Remaster
-/// goes up to `View::MAX_DISTANCE` [design choice].
-pub const CLASSIC_MAX_DISTANCE: f32 = 1.5;
+// The view-distance option's top in Classic (0x428cfc / 0x428e88 clamp at 150 %); Remaster
+// goes up to `View::MAX_DISTANCE` [design choice].
+motor_tune::tunable! {
+    /// The view-distance option's top in Classic (0x428cfc clamps at 150 %).
+    /// range: 0.2..4
+    /// area: Graphics/View
+    pub CLASSIC_MAX_DISTANCE: f32 = 1.5;
+}
 
 #[derive(Clone, Copy)]
 pub struct View {
@@ -1286,6 +1486,8 @@ pub struct DebugView {
     pub hide_blades: bool,
     /// REMASTER: no sun shafts in the volumetric fog (the fog shadow map is not drawn)
     pub hide_shafts: bool,
+    /// the flashlight: a torch cone at the camera (Classic and Remaster; `Globals::flash`)
+    pub flashlight: bool,
     /// DEBUG: the sky replaced by this solid colour (gamma-space 0..255; the env probe keeps the real sky)
     pub backdrop: Option<[u8; 3]>,
 }
@@ -1301,7 +1503,7 @@ impl View {
     /// the view distance factor in use: Classic caps it at 150 %
     pub fn distance(&self) -> f32 {
         match self.mode {
-            RenderMode::Classic => self.distance.min(CLASSIC_MAX_DISTANCE),
+            RenderMode::Classic => self.distance.min(CLASSIC_MAX_DISTANCE.get()),
             RenderMode::Remaster => self.distance,
         }
     }
@@ -1336,6 +1538,10 @@ impl View {
     /// REMASTER: the world fill pieces are drawn
     pub fn world_fill(&self) -> bool {
         self.mode == RenderMode::Remaster && self.remaster.world_fill
+    }
+    /// REMASTER: the tree models replace the tree cards (Detail > Tree models, #389)
+    pub fn trees(&self) -> bool {
+        self.mode == RenderMode::Remaster && self.remaster.tree_models
     }
     /// REMASTER: the procedural water surfaces replace the water textures (Detail > Water,
     /// `--water`; the bodies are in the world fill file, which is loaded either way)
@@ -1376,24 +1582,45 @@ impl View {
     }
 }
 
-/// MotionBlur (driver +0x284, set from config +0x9dc at 0x458503): the frame is not cleared and
-/// the sky is drawn with constant alpha 0x80 over the old picture (Glide 0x48c8d3:
-/// grConstantColorValue(0x80000000), blend ONE_MINUS_SRC_ALPHA / SRC_ALPHA; D3D 0x482b94 skips
-/// the viewport clear and blends SRCALPHA / INVSRCALPHA). The world is drawn opaque on top, so
-/// the old frame shows through only where the sky is visible now.
-const MOTION_BLUR_ALPHA: f64 = 0.5;
+// MotionBlur (driver +0x284, set from config +0x9dc at 0x458503): the frame is not cleared and
+// the sky is drawn with constant alpha 0x80 over the old picture (Glide 0x48c8d3:
+// grConstantColorValue(0x80000000), blend ONE_MINUS_SRC_ALPHA / SRC_ALPHA; D3D 0x482b94 skips
+// the viewport clear and blends SRCALPHA / INVSRCALPHA). The world is drawn opaque on top, so
+// the old frame shows through only where the sky is visible now.
+motor_tune::tunable! {
+    /// Classic motion blur: opacity the old frame is blended in with, where the sky shows.
+    /// range: 0..1
+    /// area: Graphics/Post
+    MOTION_BLUR_ALPHA: f64 = 0.5;
+}
 
 /// Near plane of the views (the env probe has its own).
 const NEAR: f32 = 0.2;
 
-/// REMASTER velocity blur [design choice]: the blur length in frames of motion (1.5: stylised,
-/// three times a 180 degree film shutter, which was too subtle to notice; per frame, so the
-/// blur gets shorter at higher frame rates), the longest blur as a share of the target width, and the camera or car jump
-/// (metres, cos of the turn) that counts as a cut: no blur that frame.
-const VBLUR_SHUTTER: f32 = 1.5;
-const VBLUR_MAX: f32 = 0.1;
-pub(crate) const CUT_DISTANCE: f32 = 15.0;
-pub(crate) const CUT_COS: f32 = 0.8;
+// REMASTER velocity blur [design choice]: the blur length in frames of motion (1.5: stylised,
+// three times a 180 degree film shutter, which was too subtle to notice; per frame, so the
+// blur gets shorter at higher frame rates), the longest blur as a share of the target width, and the camera or car jump
+// (metres, cos of the turn) that counts as a cut: no blur that frame.
+motor_tune::tunable! {
+    /// Remaster velocity blur length in frames of motion (per frame, so shorter at higher frame rates).
+    /// range: 0..4
+    /// unit: frames
+    /// area: Graphics/Post
+    VBLUR_SHUTTER: f32 = 1.5;
+    /// Remaster velocity blur: the longest blur as a share of the target width.
+    /// range: 0.005..0.5
+    /// area: Graphics/Post
+    VBLUR_MAX: f32 = 0.1;
+    /// Remaster velocity blur: a camera or car jump of this many metres counts as a cut (no blur that frame). The Camera & drive page has its own value of this name.
+    /// range: 1..200
+    /// unit: m
+    /// area: Graphics/Post
+    pub(crate) CUT_DISTANCE: f32 = 15.0;
+    /// Remaster velocity blur: a turn with a smaller cosine than this counts as a cut.
+    /// range: -1..1
+    /// area: Graphics/Post
+    pub(crate) CUT_COS: f32 = 0.8;
+}
 
 /// The previous frame's scene for MotionBlur (the original reuses its back buffer).
 struct History {
@@ -1453,70 +1680,184 @@ enum Pass {
     WireXray,
 }
 
-/// Halo size: the object renderer sets record +0x38 = 0.5 and +0x2c = 0.6 (0x439134); the
-/// base half-size is size * screen width * 0.05 pixels (0x4354fc, 0x4d2e6d).
-/// CLASSIC Time Attack ghost car opacity (design choice).
-const GHOST_ALPHA: f64 = 0.4;
-const HALO_SIZE: f32 = 0.5;
-/// The object renderer's halo gain for scene objects (blinkers, cones) and the base of the
-/// Remaster brightness below (0x439134: +0x2c = 0.6).
-const HALO_GAIN: f32 = 0.6;
-/// REMASTER: extra halo brightness on top of HALO_GAIN for the world and scene objects (lamps,
-/// blinkers), matched by eye against the original's Goldbridge footage [design choice]. Classic
-/// uses the original's kinds below instead.
-const WORLD_HALO_BRIGHTNESS: f32 = 2.0;
-/// REMASTER: the same for car lights (head/tail lights) [design choice].
-const CAR_HALO_BRIGHTNESS: f32 = 0.2;
+// Halo size: the object renderer sets record +0x38 = 0.5 and +0x2c = 0.6 (0x439134); the
+// base half-size is size * screen width * 0.05 pixels (0x4354fc, 0x4d2e6d).
+// CLASSIC Time Attack ghost car opacity (design choice).
+motor_tune::tunable! {
+    /// Classic Time Attack ghost car opacity.
+    /// range: 0..1
+    /// area: Graphics/Post
+    GHOST_ALPHA: f64 = 0.4;
+    /// Classic halo size of scene objects (the object renderer sets record +0x38 = 0.5, 0x439134).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    HALO_SIZE: f32 = 0.5;
+}
+// The object renderer's halo gain for scene objects (blinkers, cones) and the base of the
+// Remaster brightness below (0x439134: +0x2c = 0.6).
+motor_tune::tunable! {
+    /// The object renderer's halo gain for scene objects (blinkers, cones; 0x439134) and the base of the Remaster brightness.
+    /// range: 0..4
+    /// area: Graphics/Halos
+    HALO_GAIN: f32 = 0.6;
+}
+// REMASTER: extra halo brightness on top of HALO_GAIN for the world and scene objects (lamps,
+// blinkers), matched by eye against the original's Goldbridge footage [design choice]. Classic
+// uses the original's kinds below instead.
+motor_tune::tunable! {
+    /// Remaster: extra halo brightness on top of `HALO_GAIN` for the world and scene objects (lamps, blinkers).
+    /// range: 0..8
+    /// area: Graphics/Halos
+    WORLD_HALO_BRIGHTNESS: f32 = 2.0;
+}
+// REMASTER: the same for car lights (head/tail lights) [design choice].
+motor_tune::tunable! {
+    /// Remaster: extra halo brightness for car lights (head and tail lights).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    CAR_HALO_BRIGHTNESS: f32 = 0.16;
+}
 /// CLASSIC halo colour byte (100, 100, 100) the object renderer writes into world and headlight
 /// halos before it draws them (0x43908c, 0x4396b1): the glow's colour comes from its texture only.
 const CLASSIC_GREY: f32 = 100.0 / 255.0;
-/// CLASSIC world halos (0x439077): gain 1.0, size 1.0, flags |= 0x24 (the u + 0.75 curve and the
-/// lens flare), flare intensity 0.65.
-const WORLD_HALO_SIZE: f32 = 1.0;
-const WORLD_FLARE: f32 = 0.65;
-/// CLASSIC head lights (car halos of texture 0, 0x4396aa): gain 0.4, size 1.0, flags 0xe (drawn,
-/// directional, lens flare, default curve), flare intensity 0.5, pointing along
-/// (+-sin(pi/16), 0, cos(pi/16)) in game coordinates, outwards by the side of the car (0x4393dd).
-const HEAD_HALO_GAIN: f32 = 0.4;
-const HEAD_HALO_SIZE: f32 = 1.0;
-const HEAD_FLARE: f32 = 0.5;
-const HEAD_HALO_TOE: f32 = std::f32::consts::PI / 16.0;
-/// CLASSIC tail lights (texture 1, 0x439733): colour (201, 0, 0), gain 0.5 and size 0.3, x 1.5
-/// and x 1.75 while braking (0x4d2fdd, 0x4d2fe5), flags 0x1a (drawn, directional, the
-/// (1-u)^4 curve), pointing backwards.
-const TAIL_HALO_RGB: f32 = 201.0 / 255.0;
-const TAIL_HALO_GAIN: f32 = 0.5;
-const TAIL_HALO_SIZE: f32 = 0.3;
-const TAIL_BRAKE_GAIN: f32 = 1.5;
-const TAIL_BRAKE_SIZE: f32 = 1.75;
-/// CLASSIC any other car halo (0x43989c): the file colour, gain 1.0, size 0.5.
-const OTHER_HALO_SIZE: f32 = 0.5;
-/// REMASTER: halo and lens-flare colour scale in the main view, the one brightness control of
-/// Remaster halos (the HDR core gains in shader.wgsl apply on top of it) [design choice]
-pub const REMASTER_HALO_SCALE: f32 = 0.5;
-/// REMASTER: halo quad size with bloom (`View::halo_bloom`), in place of `HALO_SIZE`: the core
-/// is small and the bloom makes the wide glow [design choice]
-const REMASTER_HALO_SIZE: f32 = 0.8 * HALO_SIZE;
-/// REMASTER: half-size of a smooth halo's starburst quad, relative to the halo quad's short
-/// half-axis (main view only: a lens effect, not in reflections or the mirror) [design choice]
-const HALO_BURST_SIZE: f32 = 2.5;
-/// REMASTER: the starburst turns by `HALO_SPIN` rad per unit of the halo's horizontal NDC, the
-/// same position that places its flare chain, so spikes and ghosts swing together as a lamp
-/// passes (about 20 degrees at the screen edge) [design choice, stateless]
-const HALO_SPIN: f32 = 0.65;
-/// REMASTER: the burst also turns as the lamp nears, by `HALO_SPIN` × `HALO_SPIN_NEAR` at the
-/// eye, falling to 0 at `HALO_SPIN_RANGE` metres, so it turns all along an approach even for
-/// lamps near the centre line [design choice]
-const HALO_SPIN_NEAR: f32 = 1.5;
-const HALO_SPIN_RANGE: f32 = 80.0;
-/// REMASTER: how much of the pixel-sized base (the halo's minimum glow) a lamp strip's width
-/// takes, so its core stays a thin line [design choice]
-const STRIP_BASE: f32 = 0.5;
-/// REMASTER: the most (m) a lamp strip's glow reaches past its dots' edge, plus a pixel allowance
-/// that grows with distance, so it stays on the lens
-const STRIP_REACH: f32 = 0.02;
-/// REMASTER: how far (in strip half-widths) two strips of a bend overlap and cross-fade
-const STRIP_JOIN: f32 = 2.0;
+// CLASSIC world halos (0x439077): gain 1.0, size 1.0, flags |= 0x24 (the u + 0.75 curve and the
+// lens flare), flare intensity 0.65.
+motor_tune::tunable! {
+    /// Classic world halo size (0x439077).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    WORLD_HALO_SIZE: f32 = 1.0;
+    /// Classic world halo lens-flare intensity (0x439077).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    WORLD_FLARE: f32 = 0.65;
+}
+// CLASSIC head lights (car halos of texture 0, 0x4396aa): gain 0.4, size 1.0, flags 0xe (drawn,
+// directional, lens flare, default curve), flare intensity 0.5, pointing along
+// (+-sin(pi/16), 0, cos(pi/16)) in game coordinates, outwards by the side of the car (0x4393dd).
+motor_tune::tunable! {
+    /// Classic head light halo gain (0x4396aa).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    HEAD_HALO_GAIN: f32 = 0.4;
+    /// Classic head light halo size (0x4396aa).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    HEAD_HALO_SIZE: f32 = 1.0;
+    /// Classic head light lens-flare intensity (0x4396aa).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    HEAD_FLARE: f32 = 0.5;
+    /// Classic head lights point outwards by this angle from straight ahead (pi/16, 0x4393dd).
+    /// range: 0..1.5
+    /// unit: rad
+    /// area: Graphics/Halos
+    HEAD_HALO_TOE: f32 = std::f32::consts::PI / 16.0;
+}
+// CLASSIC tail lights (texture 1, 0x439733): colour (201, 0, 0), gain 0.5 and size 0.3, x 1.5
+// and x 1.75 while braking (0x4d2fdd, 0x4d2fe5), flags 0x1a (drawn, directional, the
+// (1-u)^4 curve), pointing backwards.
+motor_tune::tunable! {
+    /// Classic tail light red channel (201 of 255, 0x439733).
+    /// range: 0..1
+    /// area: Graphics/Halos
+    TAIL_HALO_RGB: f32 = 201.0 / 255.0;
+    /// Classic tail light halo gain (0x439733).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    TAIL_HALO_GAIN: f32 = 0.5;
+    /// Classic tail light halo size (0x439733).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    TAIL_HALO_SIZE: f32 = 0.3;
+    /// Classic tail light gain factor while braking (0x4d2fdd).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    TAIL_BRAKE_GAIN: f32 = 1.5;
+    /// Classic tail light size factor while braking (0x4d2fe5).
+    /// range: 0..4
+    /// area: Graphics/Halos
+    TAIL_BRAKE_SIZE: f32 = 1.75;
+}
+// CLASSIC any other car halo (0x43989c): the file colour, gain 1.0, size 0.5.
+motor_tune::tunable! {
+    /// Classic size of any other car halo (0x43989c).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    OTHER_HALO_SIZE: f32 = 0.5;
+}
+// REMASTER: halo and lens-flare colour scale in the main view, the one brightness control of
+// Remaster halos (the HDR core gains in shader.wgsl apply on top of it) [design choice]
+motor_tune::tunable! {
+    /// Remaster: halo and lens-flare colour scale in the main view, the one brightness control of Remaster halos.
+    /// range: 0..4
+    /// area: Graphics/Halos
+    pub REMASTER_HALO_SCALE: f32 = 0.5;
+}
+// REMASTER: halo quad size with bloom (`View::halo_bloom`), in place of `HALO_SIZE`: the core
+// is small and the bloom makes the wide glow [design choice]
+motor_tune::tunable! {
+    /// Remaster: halo quad size with bloom (the core is small and the bloom makes the wide glow).
+    /// range: 0.05..4
+    /// area: Graphics/Halos
+    REMASTER_HALO_SIZE: f32 = 0.4;
+}
+// REMASTER: half-size of a smooth halo's starburst quad, relative to the halo quad's short
+// half-axis (main view only: a lens effect, not in reflections or the mirror) [design choice]
+motor_tune::tunable! {
+    /// Remaster: half-size of a smooth halo's starburst quad, relative to the halo quad's short half-axis.
+    /// range: 0..8
+    /// area: Graphics/Halos
+    HALO_BURST_SIZE: f32 = 2.5;
+}
+// REMASTER: the starburst turns by `HALO_SPIN` rad per unit of the halo's horizontal NDC, the
+// same position that places its flare chain, so spikes and ghosts swing together as a lamp
+// passes (about 20 degrees at the screen edge) [design choice, stateless]
+motor_tune::tunable! {
+    /// Remaster: the starburst turns by this many radians per unit of the halo's horizontal screen position.
+    /// range: 0..3
+    /// unit: rad
+    /// area: Graphics/Halos
+    HALO_SPIN: f32 = 0.65;
+}
+// REMASTER: the burst also turns as the lamp nears, by `HALO_SPIN` × `HALO_SPIN_NEAR` at the
+// eye, falling to 0 at `HALO_SPIN_RANGE` metres, so it turns all along an approach even for
+// lamps near the centre line [design choice]
+motor_tune::tunable! {
+    /// Remaster: the burst also turns as the lamp nears, by `HALO_SPIN` times this at the eye.
+    /// range: 0..6
+    /// area: Graphics/Halos
+    HALO_SPIN_NEAR: f32 = 1.5;
+    /// Remaster: the near-lamp turn of the burst falls to 0 at this distance.
+    /// range: 5..400
+    /// unit: m
+    /// area: Graphics/Halos
+    HALO_SPIN_RANGE: f32 = 80.0;
+}
+// REMASTER: how much of the pixel-sized base (the halo's minimum glow) a lamp strip's width
+// takes, so its core stays a thin line [design choice]
+motor_tune::tunable! {
+    /// Remaster: how much of the pixel-sized base a lamp strip's width takes, so its core stays a thin line.
+    /// range: 0..4
+    /// area: Graphics/Halos
+    STRIP_BASE: f32 = 0.5;
+}
+// REMASTER: the most (m) a lamp strip's glow reaches past its dots' edge, plus a pixel allowance
+// that grows with distance, so it stays on the lens
+motor_tune::tunable! {
+    /// Remaster: the most a lamp strip's glow reaches past its dots' edge, plus a pixel allowance that grows with distance.
+    /// range: 0..0.5
+    /// unit: m
+    /// area: Graphics/Halos
+    STRIP_REACH: f32 = 0.02;
+}
+// REMASTER: how far (in strip half-widths) two strips of a bend overlap and cross-fade
+motor_tune::tunable! {
+    /// Remaster: how far (in strip half-widths) two strips of a bend overlap and cross-fade.
+    /// range: 0..8
+    /// area: Graphics/Halos
+    STRIP_JOIN: f32 = 2.0;
+}
 
 /// The halo distance curve with u = 1 - z / far: (1-t)^3 x 2.5 + 0.2 by default, (1-t)^4 x 1.4 + 0.2
 /// with flag 0x10, (1-t) + 0.75 with flag 0x20 (0x43681b, 0x43684f, 0x4357a8) [O].
@@ -1551,7 +1892,7 @@ struct ClassicHalo {
 
 /// CLASSIC world halo (0x439077): grey, flags |= 0x24.
 fn classic_world_halo(h: &HaloInst) -> ClassicHalo {
-    ClassicHalo { halo: HaloInst { rgb: [CLASSIC_GREY; 3], flags: h.flags | 0x24, ..*h }, gain: 1.0, size: WORLD_HALO_SIZE }
+    ClassicHalo { halo: HaloInst { rgb: [CLASSIC_GREY; 3], flags: h.flags | 0x24, ..*h }, gain: 1.0, size: WORLD_HALO_SIZE.get() }
 }
 
 /// CLASSIC car halo by texture index (0x4393dd..0x43989c): 0 head light, 1 tail light (`brake`: the
@@ -1560,14 +1901,14 @@ fn classic_car_halo(h: &HaloInst, brake: bool) -> ClassicHalo {
     match h.texture {
         0 => {
             let side = if h.p0.x >= 0.0 { 1.0 } else { -1.0 };
-            let dir = Vec3::new(side * HEAD_HALO_TOE.sin(), 0.0, -HEAD_HALO_TOE.cos());
-            ClassicHalo { halo: HaloInst { rgb: [CLASSIC_GREY; 3], flags: 0xe, dir, ..*h }, gain: HEAD_HALO_GAIN, size: HEAD_HALO_SIZE }
+            let dir = Vec3::new(side * HEAD_HALO_TOE.get().sin(), 0.0, -HEAD_HALO_TOE.get().cos());
+            ClassicHalo { halo: HaloInst { rgb: [CLASSIC_GREY; 3], flags: 0xe, dir, ..*h }, gain: HEAD_HALO_GAIN.get(), size: HEAD_HALO_SIZE.get() }
         }
         1 => {
-            let (gain, size) = if brake { (TAIL_HALO_GAIN * TAIL_BRAKE_GAIN, TAIL_HALO_SIZE * TAIL_BRAKE_SIZE) } else { (TAIL_HALO_GAIN, TAIL_HALO_SIZE) };
-            ClassicHalo { halo: HaloInst { rgb: [TAIL_HALO_RGB, 0.0, 0.0], flags: 0x1a, dir: Vec3::Z, ..*h }, gain, size }
+            let (gain, size) = if brake { (TAIL_HALO_GAIN.get() * TAIL_BRAKE_GAIN.get(), TAIL_HALO_SIZE.get() * TAIL_BRAKE_SIZE.get()) } else { (TAIL_HALO_GAIN.get(), TAIL_HALO_SIZE.get()) };
+            ClassicHalo { halo: HaloInst { rgb: [TAIL_HALO_RGB.get(), 0.0, 0.0], flags: 0x1a, dir: Vec3::Z, ..*h }, gain, size }
         }
-        _ => ClassicHalo { halo: *h, gain: 1.0, size: OTHER_HALO_SIZE },
+        _ => ClassicHalo { halo: *h, gain: 1.0, size: OTHER_HALO_SIZE.get() },
     }
 }
 
@@ -1597,7 +1938,7 @@ fn halo_quads(out: &mut Vec<Vertex>, halos: &[HaloInst], model: Mat4, glow: Vec3
     let model_scale = model.x_axis.truncate().length();
     let model_scale = if (model_scale - 1.0).abs() < 1e-3 { 1.0 } else { model_scale };
     let base_k = size * 0.05 * 2.0 * (fov_x / 2.0).tan() * model_scale;
-    let k = size / HALO_SIZE;
+    let k = size / HALO_SIZE.get();
     for h in halos {
         let (p0, p1) = (model.transform_point3(h.p0), model.transform_point3(h.p1));
         let mid = (p0 + p1) * 0.5;
@@ -1618,8 +1959,8 @@ fn halo_quads(out: &mut Vec<Vertex>, halos: &[HaloInst], model: Mat4, glow: Vec3
             (HaloStrip::Strip { width: w, join: j }, Some([g, ws])) => {
                 // the glow's pixel-sized base grows with distance and would spill over the
                 // lens: capped at `STRIP_REACH` + 1.5 px (a 1280 px screen) beyond the dots
-                let reach = STRIP_REACH + 1.5 * 2.0 * tan_x * z / 1280.0;
-                hb = ws * (w + (STRIP_BASE * base).min(reach));
+                let reach = STRIP_REACH.get() + 1.5 * 2.0 * tan_x * z / 1280.0;
+                hb = ws * (w + (STRIP_BASE.get() * base).min(reach));
                 ha = (0.5 * len).max(hb);
                 (strip_gain, bar) = (g, Some(j));
             }
@@ -1647,7 +1988,7 @@ fn halo_quads(out: &mut Vec<Vertex>, halos: &[HaloInst], model: Mat4, glow: Vec3
             // a strip meeting the next at a bend reaches `STRIP_JOIN` widths past it and fades
             // out over that stretch while the next fades in: the sum stays even (colour is
             // interpolated along the bar)
-            let e = join.map(|j| if j { (STRIP_JOIN * hb).min(0.5 * len) } else { 0.0 });
+            let e = join.map(|j| if j { (STRIP_JOIN.get() * hb).min(0.5 * len) } else { 0.0 });
             let xs = [-ha - e[0], -ha + e[0], ha - e[1], ha + e[1]];
             let wt = [if join[0] { 0.0 } else { 1.0 }, 1.0, 1.0, if join[1] { 0.0 } else { 1.0 }];
             let vtx = |k: usize, sb: f32| Vertex { pos: (c + a * xs[k] + b * hb * sb).into(), uv: [0.0, (sb + 1.0) / 2.0], color: [m.x * wt[k], m.y * wt[k], m.z * wt[k], 4.0], layer: h.layer, normal: h.tint, env: 0.0 };
@@ -1664,8 +2005,8 @@ fn halo_quads(out: &mut Vec<Vertex>, halos: &[HaloInst], model: Mat4, glow: Vec3
             let color = [m.x * burst_gain, m.y * burst_gain, m.z * burst_gain, 2.0];
             // REMASTER: turn the burst with the lamp's horizontal screen position
             let ndc_x = (mid - cam.pos).dot(right) / (z * tan_x);
-            let near = (1.0 - z / HALO_SPIN_RANGE).clamp(0.0, 1.0);
-            let (sn, cs) = (spin * (ndc_x.clamp(-1.5, 1.5) + HALO_SPIN_NEAR * near)).sin_cos();
+            let near = (1.0 - z / HALO_SPIN_RANGE.get()).clamp(0.0, 1.0);
+            let (sn, cs) = (spin * (ndc_x.clamp(-1.5, 1.5) + HALO_SPIN_NEAR.get() * near)).sin_cos();
             let (bx, by) = (right * cs + up * sn, up * cs - right * sn);
             let v = |sa: f32, sb: f32, uv: [f32; 2]| Vertex { pos: (c + bx * rb * sa + by * rb * sb).into(), uv, color, layer: h.layer, normal: h.tint, env: 0.0 };
             let (q0, q1, q2, q3) = (v(-1.0, -1.0, [0.0, 0.0]), v(1.0, -1.0, [1.0, 0.0]), v(1.0, 1.0, [1.0, 1.0]), v(-1.0, 1.0, [0.0, 1.0]));
@@ -1691,13 +2032,27 @@ const FLARES: [(f32, f32, [f32; 3]); 7] = [
     (-0.8, 8.0, [0.5, 0.5, 0.5]),
     (-2.0, 5.0, [0.15, 0.45, 0.15]),
 ];
-/// REMASTER: the grey flare colour of the first Remaster flares, (100, 100, 100) x 0.65, times a gain
-/// so the dim hex texture (peak 64/255) shows [design choice]. Classic flares use the halo's own
-/// colour and intensity (`FLARES`), without this gain.
-const FLARE_RGB: f32 = 100.0 / 255.0 * 0.65;
-const FLARE_GAIN: f32 = 2.0;
-/// Flares are quads this far in front of the eye (near plane 0.2), so nothing hides them.
-const FLARE_DEPTH: f32 = 0.25;
+// REMASTER: the grey flare colour of the first Remaster flares, (100, 100, 100) x 0.65, times a gain
+// so the dim hex texture (peak 64/255) shows [design choice]. Classic flares use the halo's own
+// colour and intensity (`FLARES`), without this gain.
+motor_tune::tunable! {
+    /// Remaster: grey of the first Remaster flares, (100/255) x 0.65.
+    /// range: 0..1
+    /// area: Graphics/Flares
+    FLARE_RGB: f32 = 100.0 / 255.0 * 0.65;
+    /// Remaster: gain on the first flares so the dim hex texture shows.
+    /// range: 0..8
+    /// area: Graphics/Flares
+    FLARE_GAIN: f32 = 2.0;
+}
+// Flares are quads this far in front of the eye (near plane 0.2), so nothing hides them.
+motor_tune::tunable! {
+    /// Flares are quads this far in front of the eye (near plane 0.2), so nothing hides them.
+    /// range: 0.21..2
+    /// unit: m
+    /// area: Graphics/Flares
+    FLARE_DEPTH: f32 = 0.25;
+}
 
 /// CLASSIC flare quads for halos `halos` drawn with `model`, `intensity` = the halo's +0x3c (see
 /// `FLARES`), and per light its `FlareLight`: `flare_vis_pass` then scales the quads by how much of
@@ -1709,7 +2064,7 @@ fn flare_quads(out: &mut Vec<Vertex>, lights: &mut Vec<FlareLight>, halos: &[Hal
     let (tx, ty) = ((fov.0 / 2.0).tan(), (fov.1 / 2.0).tan());
     let w = vp[2];
     // one pixel at FLARE_DEPTH, world units
-    let px = 2.0 * FLARE_DEPTH * tx / w;
+    let px = 2.0 * FLARE_DEPTH.get() * tx / w;
     for hl in halos {
         let p = model.transform_point3((hl.p0 + hl.p1) * 0.5);
         let Some((ndc, fs)) = flare_screen_with(1.0, p, cam, view_proj, (vp[2], vp[3]), far, fade_start) else { continue };
@@ -1722,7 +2077,7 @@ fn flare_quads(out: &mut Vec<Vertex>, lights: &mut Vec<FlareLight>, halos: &[Hal
         let first = out.len();
         for &(k, s, rgb) in &FLARES {
             let (ex, ey) = (ndc.x * k, ndc.y * k);
-            let centre = cam.pos + (f + right * ex * tx + up * ey * ty) * FLARE_DEPTH;
+            let centre = cam.pos + (f + right * ex * tx + up * ey * ty) * FLARE_DEPTH.get();
             let half = s * w / 512.0 * px;
             let t = hl.tint;
             // alpha 0: a flare, not a light (fs_halo); the colour byte is at most 255
@@ -1750,25 +2105,44 @@ impl FlareLight {
     fn new(ndc: glam::Vec2, depth: f32, verts: std::ops::Range<usize>, vp: [f32; 4], target: (f32, f32), tx: f32) -> FlareLight {
         let x = (vp[0] + (ndc.x * 0.5 + 0.5) * vp[2]) / target.0;
         let y = (vp[1] + (0.5 - ndc.y * 0.5) * vp[3]) / target.1;
-        // FLARE_TAP_SPREAD metres across, in pixels at this depth, within FLARE_TAP_PX
-        let r = (FLARE_TAP_SPREAD * vp[2] * 0.5 / (depth.max(0.01) * tx)).clamp(FLARE_TAP_PX.0, FLARE_TAP_PX.1) / target.0;
+        // FLARE_TAP_SPREAD metres across, in pixels at this depth, within FLARE_TAP_PX_MIN..MAX
+        let r = (FLARE_TAP_SPREAD.get() * vp[2] * 0.5 / (depth.max(0.01) * tx)).max(FLARE_TAP_PX_MIN.get()).min(FLARE_TAP_PX_MAX.get()) / target.0;
         FlareLight { p: [x, y, depth, r], v: [verts.start as u32, verts.len() as u32, 0, 0] }
     }
 }
 
-/// Flare visibility (`flare_vis_pass`) [design choice]: the half-size of the square of depth
-/// taps round a light, metres at its depth within (min, max) pixels, and how far in front of
-/// the light (m) the drawn scene may be and still count as the light's own lamp housing.
-const FLARE_TAP_SPREAD: f32 = 0.3;
-const FLARE_TAP_PX: (f32, f32) = (2.0, 12.0);
-const FLARE_CLEARANCE: f32 = 1.0;
+// Flare visibility (`flare_vis_pass`) [design choice]: the half-size of the square of depth
+// taps round a light, metres at its depth within (min, max) pixels, and how far in front of
+// the light (m) the drawn scene may be and still count as the light's own lamp housing.
+motor_tune::tunable! {
+    /// Flare visibility: half-size of the square of depth taps round a light, metres at its depth.
+    /// range: 0..2
+    /// unit: m
+    /// area: Graphics/Flares
+    FLARE_TAP_SPREAD: f32 = 0.3;
+    /// Flare visibility: the smallest the tap square gets, in pixels.
+    /// range: 0..32
+    /// unit: px
+    /// area: Graphics/Flares
+    FLARE_TAP_PX_MIN: f32 = 2.0;
+    /// Flare visibility: the largest the tap square gets, in pixels.
+    /// range: 1..64
+    /// unit: px
+    /// area: Graphics/Flares
+    FLARE_TAP_PX_MAX: f32 = 12.0;
+    /// Flare visibility: how far in front of the light the drawn scene may be and still count as the light's own lamp housing.
+    /// range: 0..8
+    /// unit: m
+    /// area: Graphics/Flares
+    FLARE_CLEARANCE: f32 = 1.0;
+}
 
 /// Where a light's flare chain starts: its NDC point and strength `m` (the sin(pi/2 (r - d)
 /// / r) screen-centre falloff times the distance fade), or None when it is behind the eye,
 /// beyond `far`, off screen or farther than half the screen width from the centre [O, see
 /// `FLARES`]. Shared by the Classic and Remaster flares.
 pub fn flare_screen(p: Vec3, cam: &Camera, view_proj: Mat4, size: (f32, f32), far: f32, fade_start: f32) -> Option<(glam::Vec2, f32)> {
-    flare_screen_with(FLARE_RGB * FLARE_GAIN, p, cam, view_proj, size, far, fade_start)
+    flare_screen_with(FLARE_RGB.get() * FLARE_GAIN.get(), p, cam, view_proj, size, far, fade_start)
 }
 
 /// `flare_screen` with the strength `k` in place of the grey flare colour (Classic passes 1: its
@@ -1813,11 +2187,27 @@ const FLARES_PROC: [(f32, f32, f32, f32, [f32; 3]); 9] = [
     (1.6, 8.0, 1.0, 0.0, [0.4, 0.9, 0.9]),
     (2.3, 14.0, 1.0, 1.0, [0.6, 0.4, 0.9]),
 ];
-/// REMASTER computed flares: gain on the Classic strength, as the shapes peak at 1 where the
-/// hex.iff ghosts peak at 64/255 [design choice]
-pub const FLARE_PROC_GAIN: f32 = 0.3;
-/// car-light flares fade in between these distances (m)
-const CAR_FLARE_NEAR: (f32, f32) = (6.0, 20.0);
+// REMASTER computed flares: gain on the Classic strength, as the shapes peak at 1 where the
+// hex.iff ghosts peak at 64/255 [design choice]
+motor_tune::tunable! {
+    /// Remaster computed flares: gain on the Classic strength.
+    /// range: 0..4
+    /// area: Graphics/Flares
+    pub FLARE_PROC_GAIN: f32 = 0.3;
+}
+// car-light flares fade in between these distances (m)
+motor_tune::tunable! {
+    /// Car-light flares start to fade in at this distance.
+    /// range: 0..100
+    /// unit: m
+    /// area: Graphics/Flares
+    CAR_FLARE_NEAR_MIN: f32 = 6.0;
+    /// Car-light flares are at full strength from this distance.
+    /// range: 1..200
+    /// unit: m
+    /// area: Graphics/Flares
+    CAR_FLARE_NEAR_MAX: f32 = 20.0;
+}
 /// REMASTER flare range, metres from the eye [design choice]: a light's flare fades in from
 /// 0 at `.0` to full at `.1`, and out from full at `.2` to 0 at `.3` (lamps, blinkers, car lights)
 pub const FLARE_RANGE: (f32, f32, f32, f32) = (16.25, 32.5, 75.0, 150.0);
@@ -1833,7 +2223,7 @@ fn flare_quads_proc(out: &mut Vec<Vertex>, lights: &mut Vec<FlareLight>, srcs: &
     let up = right.cross(f);
     let (tx, ty) = ((fov.0 / 2.0).tan(), (fov.1 / 2.0).tan());
     let w = vp[2];
-    let px = 2.0 * FLARE_DEPTH * tx / w;
+    let px = 2.0 * FLARE_DEPTH.get() * tx / w;
     let mut seen: Vec<(f32, &FlareSource, glam::Vec2, f32)> = srcs
         .iter()
         .filter_map(|s| flare_screen(s.p, cam, view_proj, (vp[2], vp[3]), far, fade_start).map(|(ndc, m)| ((s.p - cam.pos).dot(f), s, ndc, m * s.strength)))
@@ -1842,14 +2232,14 @@ fn flare_quads_proc(out: &mut Vec<Vertex>, lights: &mut Vec<FlareLight>, srcs: &
     seen.sort_by(|a, b| a.0.total_cmp(&b.0));
     seen.truncate(MAX_FLARES);
     for (z, s, ndc, m) in seen {
-        let m = m * FLARE_PROC_GAIN;
+        let m = m * FLARE_PROC_GAIN.get();
         if m < 0.001 {
             continue;
         }
         let first = out.len();
         for &(k, sz, aspect, kind, rgb) in &FLARES_PROC {
             let (ex, ey) = (ndc.x * k, ndc.y * k);
-            let centre = cam.pos + (f + right * ex * tx + up * ey * ty) * FLARE_DEPTH;
+            let centre = cam.pos + (f + right * ex * tx + up * ey * ty) * FLARE_DEPTH.get();
             let half = sz * w / 512.0 * px;
             let t = s.tint;
             let color = [rgb[0] * m, rgb[1] * m, rgb[2] * m, -(kind + 1.0)];
@@ -1901,9 +2291,9 @@ fn dynamic_lights(g: &mut Globals, s: &GpuScene, f: &Frame, eye: Vec3, far: f32,
         let Some(halos) = s.prop_halos.get(mesh).filter(|h| !h.is_empty()) else { continue };
         let glow = f.prop_glow.get(i).copied().unwrap_or(Vec3::ONE);
         for h in halos {
-            let rgb = Vec3::from(h.rgb) * Vec3::from(h.tint) * glow * PROP_LIGHT_GAIN;
+            let rgb = Vec3::from(h.rgb) * Vec3::from(h.tint) * glow * PROP_LIGHT_GAIN.get();
             let pos = m.transform_point3((h.p0 + h.p1) * 0.5);
-            points.push((pos.distance(eye), pos, PROP_LIGHT_RANGE, rgb));
+            points.push((pos.distance(eye), pos, PROP_LIGHT_RANGE.get(), rgb));
         }
     }
     // (distance, position, range, rgb, kind, beam axis, up, shadow layer)
@@ -1923,9 +2313,9 @@ fn dynamic_lights(g: &mut Globals, s: &GpuScene, f: &Frame, eye: Vec3, far: f32,
                 let pos = m.transform_point3(mid);
                 let rgb = Vec3::from(h.rgb) * Vec3::from(h.tint) * night;
                 let light = if mid.z < 0.0 {
-                    (HEADLIGHT_RANGE, rgb * t.head.spot_gain(brake), 0.0, fwd)
+                    (HEADLIGHT_RANGE.get(), rgb * t.head.spot_gain(brake), 0.0, fwd)
                 } else {
-                    (TAIL_LIGHT_RANGE, rgb * t.tail.spot_gain(brake), 1.0, -fwd)
+                    (TAIL_LIGHT_RANGE.get(), rgb * t.tail.spot_gain(brake), 1.0, -fwd)
                 };
                 let (range, rgb, kind, axis) = light;
                 let layer = if kind < 0.5 { layer } else { -1.0 };
@@ -1940,7 +2330,7 @@ fn dynamic_lights(g: &mut Globals, s: &GpuScene, f: &Frame, eye: Vec3, far: f32,
             for h in &pl.lamps {
                 let pos = m.transform_point3((h.p0 + h.p1) * 0.5);
                 let rgb = Vec3::from(h.rgb) * Vec3::from(h.tint) * night * t.head.spot_gain(0.0);
-                spots.push(((pos + fwd * HEADLIGHT_RANGE * 0.5).distance(eye) - HEADLIGHT_RANGE * 0.5, pos, HEADLIGHT_RANGE, rgb, 0.0, fwd, up, -1.0));
+                spots.push(((pos + fwd * HEADLIGHT_RANGE.get() * 0.5).distance(eye) - HEADLIGHT_RANGE.get() * 0.5, pos, HEADLIGHT_RANGE.get(), rgb, 0.0, fwd, up, -1.0));
             }
         }
     }
@@ -2022,7 +2412,7 @@ impl SpotAlloc {
         for slot in self.layers.iter_mut() {
             if let Some(l) = slot {
                 l.on = wanted.contains(&l.key);
-                l.fade = (l.fade + if l.on { dt } else { -dt } / SPOT_FADE).clamp(0.0, 1.0);
+                l.fade = (l.fade + if l.on { dt } else { -dt } / SPOT_FADE.get()).clamp(0.0, 1.0);
                 if !l.on && l.fade <= 0.0 {
                     *slot = None;
                 }
@@ -2160,13 +2550,13 @@ fn fit_window(view: Mat4, max: [f32; 4], casters: &[Vec3], size: u32, pcf: u32) 
     for &c in casters {
         let v = view.transform_point3(c);
         let d = -v.z;
-        if d - CASTER_RADIUS < 0.5 {
+        if d - CASTER_RADIUS.get() < 0.5 {
             return max;
         }
         for (a, (lo, hi)) in [(v.x, (0, 1)), (v.y, (2, 3))] {
-            let (near, far) = (d - CASTER_RADIUS, d + CASTER_RADIUS);
-            w[lo] = w[lo].min(((a - CASTER_RADIUS) / near).min((a - CASTER_RADIUS) / far));
-            w[hi] = w[hi].max(((a + CASTER_RADIUS) / near).max((a + CASTER_RADIUS) / far));
+            let (near, far) = (d - CASTER_RADIUS.get(), d + CASTER_RADIUS.get());
+            w[lo] = w[lo].min(((a - CASTER_RADIUS.get()) / near).min((a - CASTER_RADIUS.get()) / far));
+            w[hi] = w[hi].max(((a + CASTER_RADIUS.get()) / near).max((a + CASTER_RADIUS.get()) / far));
         }
     }
     let mut out = [0.0; 4];
@@ -2358,8 +2748,14 @@ pub struct TrailStamp {
     pub _pad: [f32; 2],
 }
 
-/// REMASTER grass trail: seconds a flattened trail takes to spring back up (sim time)
-pub const TRAIL_RELAX: f32 = 5.0;
+// REMASTER grass trail: seconds a flattened trail takes to spring back up (sim time)
+motor_tune::tunable! {
+    /// Remaster grass trail: seconds a flattened trail takes to spring back up (sim time).
+    /// range: 0.1..60
+    /// unit: s
+    /// area: Graphics/View
+    pub TRAIL_RELAX: f32 = 5.0;
+}
 /// REMASTER grass trail: texels per edge-map texel per axis (0.25 m at the map's 0.5 m), and the
 /// most texels a side (16 MB of R8)
 const TRAIL_TEXEL_DIV: u32 = 2;
@@ -2850,7 +3246,7 @@ fn ground_flatten(hubs: &[Vec3]) -> Option<Mat4> {
     }
     let det = xx * zz - xz * xz;
     let (a, b) = if det.abs() > 1e-4 { ((xy * zz - zy * xz) / det, (zy * xx - xy * xz) / det) } else { (0.0, 0.0) };
-    let c = mid.y - VEL_WHEEL_R - a * mid.x - b * mid.z;
+    let c = mid.y - VEL_WHEEL_R.get() - a * mid.x - b * mid.z;
     Some(Mat4::from_cols(Vec4::new(1.0, a, 0.0, 0.0), Vec4::ZERO, Vec4::new(0.0, b, 1.0, 0.0), Vec4::new(0.0, c, 0.0, 1.0)))
 }
 
@@ -2858,8 +3254,14 @@ fn ground_flatten(hubs: &[Vec3]) -> Option<Mat4> {
 const VEL_MAX: usize = 128;
 /// Added to the ghost's mesh indices in the velocity pass (a multiple of `CAR_MESHES`, above any mesh).
 const VEL_GHOST_KEY: usize = CAR_MESHES * 1_000_000;
-/// Wheel radius under the wheel hubs for the shadow footprint's ground plane, m [APPROX].
-const VEL_WHEEL_R: f32 = 0.33;
+// Wheel radius under the wheel hubs for the shadow footprint's ground plane, m [APPROX].
+motor_tune::tunable! {
+    /// Wheel radius under the wheel hubs for the shadow footprint's ground plane [APPROX].
+    /// range: 0.1..1
+    /// unit: m
+    /// area: Graphics/View
+    VEL_WHEEL_R: f32 = 0.33;
+}
 
 /// REMASTER post pass (post.wgsl): HDR tonemap and bloom composite, colour grade.
 struct Post {
@@ -2967,9 +3369,18 @@ type SceneFrostTargets = ((u32, u32), wgpu::TextureView, [wgpu::TextureView; 2])
 /// the glow's half-size size and its two ping-pong targets
 type GlowTargets = ((u32, u32), [wgpu::TextureView; 2]);
 
-/// the glow's blur radius (gaussian sigma, canvas px) and the gain of the added light
-const GLOW_SIGMA: f32 = 4.0;
-const GLOW_COMPOSITE: f32 = 1.0;
+// the glow's blur radius (gaussian sigma, canvas px) and the gain of the added light
+motor_tune::tunable! {
+    /// Glow blur radius (gaussian sigma, canvas pixels).
+    /// range: 0.5..32
+    /// unit: px
+    /// area: Graphics/Post
+    GLOW_SIGMA: f32 = 4.0;
+    /// Gain of the glow light added to the canvas.
+    /// range: 0..4
+    /// area: Graphics/Post
+    GLOW_COMPOSITE: f32 = 1.0;
+}
 
 /// REMASTER bloom (bloom.wgsl): a dual-filter chain, 13-tap downsamples (the first with a
 /// soft threshold and Karis average) then additive tent upsamples [design choice].
@@ -3026,7 +3437,13 @@ struct EnvProbe {
 
 /// Probe face size in pixels and its far plane in metres [design choice].
 const PROBE_SIZE: u32 = 128;
-const PROBE_FAR: f32 = 400.0;
+motor_tune::tunable! {
+    /// Far plane of the env probe faces.
+    /// range: 50..2000
+    /// unit: m
+    /// area: Graphics/View
+    PROBE_FAR: f32 = 400.0;
+}
 
 impl EnvProbe {
     fn new(d: &wgpu::Device) -> Self {
@@ -3111,7 +3528,10 @@ struct GpuScene {
     fill: Option<(wgpu::Buffer, u32)>,
     /// REMASTER water surface (`Scene::water`) and the world without the triangles tagged as water
     water: Option<(wgpu::Buffer, u32)>,
-    tris_dry: Option<(wgpu::Buffer, u32)>,
+    tris_dry: Option<GpuWorld>,
+    /// REMASTER the world with the water texture but with the tree models (water off, trees on); None
+    /// without trees
+    tris_trees: Option<GpuWorld>,
     water_params: Vec<[[f32; 4]; crate::procgen::water::ROWS]>,
     /// REMASTER grass shells (`Scene::grass`) and their bodies' parameters
     grass: Option<(wgpu::Buffer, u32)>,
@@ -3189,11 +3609,19 @@ struct GpuScene {
 impl GpuScene {
     /// The world triangles to draw: REMASTER without the ones the water surface replaces (every
     /// world draw goes through here, so the texture never shows under or beside the water).
-    fn world(&self, v: &View) -> (&wgpu::Buffer, u32) {
-        match self.tris_dry.as_ref().filter(|_| v.water()) {
-            Some((b, n)) => (b, *n),
-            None => (&self.tris, self.n_tris),
+    /// With trees, the tree models in place of the cards (`WorldVerts`).
+    fn world(&self, v: &View) -> (&wgpu::Buffer, std::ops::Range<u32>) {
+        let trees = v.trees();
+        fn pick(w: &GpuWorld, trees: bool) -> (&wgpu::Buffer, std::ops::Range<u32>) {
+            (&w.0, if trees { w.2.clone() } else { w.1.clone() })
         }
+        if let Some(w) = self.tris_dry.as_ref().filter(|_| v.water()) {
+            return pick(w, trees);
+        }
+        if let Some(w) = self.tris_trees.as_ref().filter(|_| trees) {
+            return pick(w, trees);
+        }
+        (&self.tris, 0..self.n_tris)
     }
     /// Whether car mesh `mesh` draws its generated model: `generated`, turned over for the
     /// swapped car (DEBUG `car_swap`; in Classic that shows the generated body through the
@@ -3282,7 +3710,9 @@ pub struct SceneUpload {
     mips: Vec<Vec<Vec<u8>>>,
     /// the same for the texture pack's layers (none for the 1x1 dummy without a pack)
     pack_mips: Vec<Vec<Vec<u8>>>,
-    dry: Option<Vec<Vertex>>,
+    dry: Option<WorldVerts>,
+    /// the world for water off with trees on (None without trees)
+    wet_trees: Option<WorldVerts>,
     holo: Vec<Vec<Vertex>>,
     holo_gen: Vec<Option<Vec<Vertex>>>,
     world_box: (Vec3, Vec3),
@@ -3294,7 +3724,8 @@ impl SceneUpload {
         SceneUpload {
             mips: s.layers.iter().map(|l| below(l, TEX)).collect(),
             pack_mips: s.pack.layers.iter().map(|l| below(l, s.pack.size)).collect(),
-            dry: dry_world(&s.tris, &s.water_hide, &s.water_bed),
+            dry: remaster_world(&s.tris, &s.water_hide, &s.water_bed, &s.tree_hide, &s.trees),
+            wet_trees: remaster_world(&s.tris, &[], &[], &s.tree_hide, &s.trees).filter(|_| !s.tree_hide.is_empty()),
             holo: s.cars.iter().map(|c| edges(c, HOLO_LINE)).collect(),
             holo_gen: s.remaster_cars.iter().map(|c| (!c.is_empty()).then(|| edges(c, HOLO_LINE_GEN))).collect(),
             world_box: s.tris.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(Vec3::from(v.pos)), hi.max(Vec3::from(v.pos)))),
@@ -3354,6 +3785,7 @@ enum VSrc {
     Fill,
     Water,
     Dry,
+    WetTrees,
     Grass,
     Lines,
     Car(usize),
@@ -3369,7 +3801,8 @@ impl VSrc {
             VSrc::Tris => &s.tris,
             VSrc::Fill => &s.fill,
             VSrc::Water => &s.water,
-            VSrc::Dry => up.dry.as_deref().unwrap_or_default(),
+            VSrc::Dry => up.dry.as_ref().map_or(&[], |w| &w.verts[..]),
+            VSrc::WetTrees => up.wet_trees.as_ref().map_or(&[], |w| &w.verts[..]),
             VSrc::Grass => &s.grass,
             VSrc::Lines => &s.lines,
             VSrc::Car(i) => &s.cars[i],
@@ -3386,6 +3819,7 @@ impl VSrc {
             VSrc::Fill => "world fill",
             VSrc::Water => "water",
             VSrc::Dry => "world without water",
+            VSrc::WetTrees => "world with tree models",
             VSrc::Grass => "grass",
             VSrc::Lines => "lines",
             VSrc::Car(_) => "car",
@@ -3436,7 +3870,7 @@ impl Gpu {
             .collect();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(SHADER_SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(crate::shaders::scene().into()),
         });
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
@@ -3656,7 +4090,7 @@ impl Gpu {
             }),
             blur_shader: device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("motion blur shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("blur.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(crate::shaders::src("blur.wgsl")),
             }),
             blur_layout: device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("motion blur"), bind_group_layouts: &[Some(&blur_layout)], immediate_size: 0 }),
             water_layouts: water_groups.each_ref().map(|wg| {
@@ -3831,6 +4265,63 @@ impl Gpu {
     /// grass: the preview draws cars only)
     fn studio_pipes(&self, samples: u32) -> &Pipes {
         self.studio_pipes.get_or_init(|| scene_pipes(&self.device, &self.src, self.color_format, samples, true, None, None, true))
+    }
+
+    /// DEBUG Constants page (#398): build every shader again from `shaders` (the WGSL overrides of
+    /// `motor_tune::wgsl` put in). Every source is compiled first under an error scope: a value
+    /// that does not compile is reported and nothing changes. Then the scene and blur shaders, the
+    /// Classic pipelines and the UI pipeline are rebuilt, and everything built on first use
+    /// (Remaster pipelines, post passes, shadows, water, grass, frost …) is dropped, with the
+    /// targets and histories that hold its bind groups: the next frame builds them from the new
+    /// shaders. Bind group layouts and the scene's data stay.
+    pub fn rebuild_shaders(&mut self) -> Result<usize, String> {
+        let t0 = std::time::Instant::now();
+        let n = check_shaders(&self.device)?;
+        let d = &self.device;
+        self.src.shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shader"), source: wgpu::ShaderSource::Wgsl(crate::shaders::scene().into()) });
+        self.src.blur_shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("motion blur shader"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("blur.wgsl")) });
+        self.classic = scene_pipes(d, &self.src, self.color_format, 1, false, None, None, false);
+        self.ui_pipe = ui_pipeline_for(d, self.color_format, false, Some(&self.ui_layout)).0;
+        self.remaster = Default::default();
+        self.studio_pipes = OnceCell::new();
+        self.shadow = OnceCell::new();
+        self.shaft = OnceCell::new();
+        self.spot = Default::default();
+        self.post = OnceCell::new();
+        self.bloom = OnceCell::new();
+        self.aa = OnceCell::new();
+        self.smaa = OnceCell::new();
+        self.taa = OnceCell::new();
+        self.ssao = OnceCell::new();
+        self.volfog = OnceCell::new();
+        self.water = OnceCell::new();
+        self.grass = OnceCell::new();
+        self.trail = OnceCell::new();
+        self.blades = OnceCell::new();
+        self.vel_blur = OnceCell::new();
+        self.dissolve = OnceCell::new();
+        self.flare_vis = Default::default();
+        self.ui_sharp = OnceCell::new();
+        self.glow = OnceCell::new();
+        self.holo_frost = OnceCell::new();
+        self.scene_frost = OnceCell::new();
+        self.underwater = OnceCell::new();
+        self.studio = OnceCell::new();
+        self.shadow_ready.set(false);
+        self.spot_ready.set(false);
+        // bind groups made with the dropped objects' layouts or buffers
+        *self.targets.get_mut() = None;
+        *self.history.get_mut() = None;
+        *self.prev_view.get_mut() = None;
+        self.taa_frame.set(0);
+        for v in self.views.get_mut().iter_mut() {
+            *v = ViewState::default();
+        }
+        if let Some(s) = &mut self.scene {
+            *s.blade_bind.get_mut() = None;
+        }
+        println!("shaders: {n} sources rebuilt in {:.0} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        Ok(n)
     }
 
     /// Pin the animation clock (water, grass wind) at `t` seconds, or let it run again (None):
@@ -4101,7 +4592,7 @@ impl Gpu {
     /// its own), built on first use
     fn grass_shader(&self) -> &wgpu::ShaderModule {
         self.grass.get_or_init(|| {
-            let src = format!("{}\n{}", SHADER_SRC, include_str!("grass.wgsl"));
+            let src = format!("{}\n{}", crate::shaders::scene(), crate::shaders::src("grass.wgsl"));
             self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grass shader"), source: wgpu::ShaderSource::Wgsl(src.into()) })
         })
     }
@@ -4112,7 +4603,7 @@ impl Gpu {
             let d = &self.device;
             let modules = [false, true].map(|msaa| {
                 let ty = if msaa { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
-                let src = format!("{}\n{}", SHADER_SRC, include_str!("water.wgsl").replace("DEPTH_TEX", ty));
+                let src = format!("{}\n{}", crate::shaders::scene(), crate::shaders::src("water.wgsl").replace("DEPTH_TEX", ty));
                 d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("water shader"), source: wgpu::ShaderSource::Wgsl(src.into()) })
             });
             // tuxalin's maps (assets/textures/water, MIT): 512 squared RGBA with mips
@@ -4171,7 +4662,7 @@ impl Gpu {
     fn trail_gpu(&self) -> &TrailGpu {
         self.trail.get_or_init(|| {
             let d = &self.device;
-            let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grass trail"), source: wgpu::ShaderSource::Wgsl(include_str!("trail.wgsl").into()) });
+            let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("grass trail"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("trail.wgsl")) });
             let group = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("grass trail"),
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -4231,7 +4722,7 @@ impl Gpu {
             Some(t) if now >= t => (false, t),
             _ => (true, f32::NEG_INFINITY),
         };
-        let step = if clear { 0.0 } else { ((now - since) / TRAIL_RELAX + st.carry).min(1.0) };
+        let step = if clear { 0.0 } else { ((now - since) / TRAIL_RELAX.get() + st.carry).min(1.0) };
         let quantised = (step * 255.0).floor() / 255.0;
         st.carry = if clear { 0.0 } else { step - quantised };
         st.time = Some(now);
@@ -4242,7 +4733,7 @@ impl Gpu {
             return;
         }
         let t = self.trail_gpu();
-        self.queue.write_buffer(&t.uniform, 0, bytemuck::cast_slice(&[map, [quantised, now, 1.0 / TRAIL_RELAX, 0.0]]));
+        self.queue.write_buffer(&t.uniform, 0, bytemuck::cast_slice(&[map, [quantised, now, 1.0 / TRAIL_RELAX.get(), 0.0]]));
         let buf = (!stamps.is_empty()).then(|| self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("grass trail stamps"), contents: bytemuck::cast_slice(stamps), usage: wgpu::BufferUsages::VERTEX }));
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("grass trail"),
@@ -4367,7 +4858,7 @@ impl Gpu {
         let (layout, pipe) = self.flare_vis[msaa as usize].get_or_init(|| {
             let d = &self.device;
             let ty = if msaa { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
-            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("flare visibility"), source: wgpu::ShaderSource::Wgsl(include_str!("flarevis.wgsl").replace("DEPTH_TEX", ty).into()) });
+            let module = d.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("flare visibility"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("flarevis.wgsl").replace("DEPTH_TEX", ty).into()) });
             let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
             let storage = |read_only| wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only }, has_dynamic_offset: false, min_binding_size: None };
             let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -4384,7 +4875,7 @@ impl Gpu {
             (layout, pipe)
         });
         let d = &self.device;
-        let params = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("flare visibility"), contents: bytemuck::cast_slice(&[NEAR, far, FLARE_CLEARANCE, 0.0]), usage: wgpu::BufferUsages::UNIFORM });
+        let params = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("flare visibility"), contents: bytemuck::cast_slice(&[NEAR, far, FLARE_CLEARANCE.get(), 0.0]), usage: wgpu::BufferUsages::UNIFORM });
         let lights_buf = d.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("flare lights"), contents: bytemuck::cast_slice(lights), usage: wgpu::BufferUsages::STORAGE });
         let bind = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("flare visibility"),
@@ -4450,18 +4941,38 @@ fn dome_sun(v: &View, s: &GpuScene) -> Option<crate::sky::Dome> {
 /// camera's side of the car), with its diffuse gain and a grey fill. Gamma-space gains like the Classic
 /// light model. The env cube is linear light: grey sides, a bright top, a dark floor.
 const STUDIO_KEY_DIR: [f32; 3] = [-0.42, 0.78, -0.46];
-const STUDIO_KEY: f32 = 0.85;
-const STUDIO_FILL: f32 = 0.52;
-const STUDIO_SPEC: f32 = 1.0;
-const STUDIO_SIDE: f64 = 0.16;
-const STUDIO_TOP: f64 = 1.1;
-const STUDIO_FLOOR: f64 = 0.03;
+motor_tune::tunable! {
+    /// Car preview studio: diffuse gain of the key light (gamma space).
+    /// range: 0..3
+    /// area: Graphics/Studio
+    STUDIO_KEY: f32 = 0.85;
+    /// Car preview studio: grey fill light.
+    /// range: 0..3
+    /// area: Graphics/Studio
+    STUDIO_FILL: f32 = 0.52;
+    /// Car preview studio: specular gain.
+    /// range: 0..3
+    /// area: Graphics/Studio
+    STUDIO_SPEC: f32 = 1.0;
+    /// Car preview studio env cube: brightness of the grey sides (linear light).
+    /// range: 0..2
+    /// area: Graphics/Studio
+    STUDIO_SIDE: f64 = 0.16;
+    /// Car preview studio env cube: brightness of the top.
+    /// range: 0..4
+    /// area: Graphics/Studio
+    STUDIO_TOP: f64 = 1.1;
+    /// Car preview studio env cube: brightness of the floor.
+    /// range: 0..1
+    /// area: Graphics/Studio
+    STUDIO_FLOOR: f64 = 0.03;
+}
 
 /// `look` with the studio's light for a camera: neutral key and fill, no fog.
 fn studio_look(look: &mut crate::scene::Look, cam: &Camera) {
     let [x, y, z] = STUDIO_KEY_DIR;
     look.sun_dir = (cam.right() * x + cam.up() * y + cam.forward() * z).normalize().to_array();
-    (look.sun, look.object_ambient, look.specular) = ([STUDIO_KEY; 3], [STUDIO_FILL; 3], STUDIO_SPEC);
+    (look.sun, look.object_ambient, look.specular) = ([STUDIO_KEY.get(); 3], [STUDIO_FILL.get(); 3], STUDIO_SPEC.get());
 }
 
 /// The track's lighting; with a dome and `SkyTune::sun` the sun direction is the one of the
@@ -4527,7 +5038,7 @@ fn fog_colour(v: &View, s: &GpuScene, l: &crate::scene::Look, t: &FogTune) -> [f
         FogColour::Track => lin(l.fog_colour),
         FogColour::Rgb(c) => lin(c),
     };
-    std::array::from_fn(|i| (base[i] * t.brightness * t.tint[i]).clamp(0.0, FOG_COLOUR_MAX))
+    std::array::from_fn(|i| (base[i] * t.brightness * t.tint[i]).clamp(0.0, FOG_COLOUR_MAX.get()))
 }
 
 /// CHEAT the cloud-ceiling looks (`0x439e84`, `0x443570`): lemmy / ace "Hell mode" (#316) and ramlosa / h2o "Underwater"
@@ -4638,14 +5149,35 @@ fn ceiling_globals(g: &mut Globals, c: Ceiling, cam: &Camera, v: &View, mirror: 
 /// The scene pipelines (sky, meshes, shadows, halos, particles, lines, motion blur) for one
 /// sample count. `remaster` picks the REMASTER shader entry points; its multisampled mesh
 /// pipelines turn colour keys into coverage.
-/// The world without the triangles tagged as water (`Scene::water_hide`), or None when none is.
-/// The water's generated bed (`bed`) goes in their place (and an area's bed, which hides nothing,
-/// is added to the whole world).
-fn dry_world(tris: &[Vertex], hide: &[bool], bed: &[Vertex]) -> Option<Vec<Vertex>> {
-    if hide.is_empty() && bed.is_empty() {
+/// A REMASTER world buffer: the world's tree cards first, then the rest, then the tree models, so one
+/// buffer draws either: `off` (cards, no models) or `on` (models, no cards). Without trees both are the
+/// whole buffer.
+struct WorldVerts {
+    verts: Vec<Vertex>,
+    off: std::ops::Range<u32>,
+    on: std::ops::Range<u32>,
+}
+
+/// `WorldVerts` on the GPU: the buffer, `off`, `on`
+type GpuWorld = (wgpu::Buffer, std::ops::Range<u32>, std::ops::Range<u32>);
+
+/// The world without the triangles tagged as water (`hide`, `Scene::water_hide`) laid out as
+/// `WorldVerts` with the tree cards (`trees_hide`, `Scene::tree_hide`) and models (`trees`), or None when
+/// there is no water and no tree. The water's generated bed (`bed`) goes in place of its triangles
+/// (and an area's bed, which hides nothing, is added to the whole world).
+fn remaster_world(tris: &[Vertex], hide: &[bool], bed: &[Vertex], trees_hide: &[bool], trees: &[Vertex]) -> Option<WorldVerts> {
+    if hide.is_empty() && bed.is_empty() && trees_hide.is_empty() {
         return None;
     }
-    Some(tris.chunks(3).enumerate().filter(|(i, _)| !hide.get(*i).copied().unwrap_or(false)).flat_map(|(_, t)| t.iter().copied()).chain(bed.iter().copied()).collect())
+    let flag = |m: &[bool], i: usize| m.get(i).copied().unwrap_or(false);
+    let kept = || tris.chunks(3).enumerate().filter(|(i, _)| !flag(hide, *i));
+    let mut verts: Vec<Vertex> = kept().filter(|(i, _)| flag(trees_hide, *i)).flat_map(|(_, t)| t.iter().copied()).collect();
+    let cards = verts.len() as u32;
+    verts.extend(kept().filter(|(i, _)| !flag(trees_hide, *i)).flat_map(|(_, t)| t.iter().copied()).chain(bed.iter().copied()));
+    let world = verts.len() as u32;
+    verts.extend_from_slice(trees);
+    let end = verts.len() as u32;
+    Some(WorldVerts { verts, off: 0..world, on: cards..end })
 }
 
 /// REMASTER Ultra grass blades: workgroups per grass triangle (grass.wgsl `BLADE_SLICES`, each
@@ -4869,12 +5401,30 @@ struct ShaftMap {
 
 /// Edge of the fog shadow map (texels).
 const SHAFT_SIZE: u32 = 1024;
-/// How far from the camera the shafts reach (m); further froxels are lit.
-const SHAFT_RANGE: f32 = 150.0;
-/// Depth bias of the fog shadow lookup (m).
-const SHAFT_BIAS: f32 = 0.6;
-/// The map's window grows in steps of this many metres, so it does not breathe as the camera turns.
-const SHAFT_STEP: f32 = 8.0;
+// How far from the camera the shafts reach (m); further froxels are lit.
+motor_tune::tunable! {
+    /// How far from the camera the light shafts of the volumetric fog reach; further froxels are lit.
+    /// range: 20..400
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHAFT_RANGE: f32 = 150.0;
+}
+// Depth bias of the fog shadow lookup (m).
+motor_tune::tunable! {
+    /// Depth bias of the fog shadow lookup.
+    /// range: 0..3
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHAFT_BIAS: f32 = 0.6;
+}
+// The map's window grows in steps of this many metres, so it does not breathe as the camera turns.
+motor_tune::tunable! {
+    /// The fog shadow map's window grows in steps of this many metres, so it does not breathe as the camera turns.
+    /// range: 1..40
+    /// unit: m
+    /// area: Graphics/Shadows
+    SHAFT_STEP: f32 = 8.0;
+}
 
 /// The sun's orthographic view of the view frustum between `NEAR` and `range` (`corners`: its 8 points) and of the
 /// casters up to `world` (min, max): world -> light clip space and the depth range in metres. `sun` points towards the sun.
@@ -4891,7 +5441,7 @@ fn shaft_matrix(corners: &[Vec3; 8], world: (Vec3, Vec3), sun: Vec3) -> Option<(
     let (w_lo, w_hi) = world;
     let (_, box_hi) = bounds(&mut (0..8).map(|i| Vec3::new(if i & 1 == 0 { w_lo.x } else { w_hi.x }, if i & 2 == 0 { w_lo.y } else { w_hi.y }, if i & 4 == 0 { w_lo.z } else { w_hi.z })));
     // x, y: the frustum's box, a square of whole steps; z: from the casters nearest the sun to the frustum's far side
-    let half = (((hi.x - lo.x).max(hi.y - lo.y) * 0.5 + 1.0) / SHAFT_STEP).ceil() * SHAFT_STEP;
+    let half = (((hi.x - lo.x).max(hi.y - lo.y) * 0.5 + 1.0) / SHAFT_STEP.get().max(0.1)).ceil() * SHAFT_STEP.get().max(0.1);
     let texel = 2.0 * half / SHAFT_SIZE as f32;
     let (cx, cy) = (((lo.x + hi.x) * 0.5 / texel).round() * texel, ((lo.y + hi.y) * 0.5 / texel).round() * texel);
     // view space looks down -z: a larger z is nearer the sun
@@ -4915,14 +5465,14 @@ fn shadow_matrix(cars: &[(usize, Mat4)], cam: Vec3, sun: Vec3) -> Option<(Mat4, 
         .iter()
         .filter(|(mesh, _)| mesh % CAR_MESHES == 0)
         .map(|(_, m)| m.w_axis.truncate())
-        .filter(|p| p.distance(cam) < SHADOW_RANGE)
+        .filter(|p| p.distance(cam) < SHADOW_RANGE.get())
         .collect();
     if pts.is_empty() || sun.y < 0.05 {
         return None;
     }
     let (lo, hi) = pts.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), &p| (lo.min(p), hi.max(p)));
     let centre = (lo + hi) * 0.5;
-    let r = ((hi - lo).length() * 0.5 + SHADOW_MARGIN).max(SHADOW_MIN_RADIUS);
+    let r = ((hi - lo).length() * 0.5 + SHADOW_MARGIN.get()).max(SHADOW_MIN_RADIUS.get());
     let sun = sun.normalize();
     let up = if sun.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
     let v0 = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, -sun, up);
@@ -5326,8 +5876,8 @@ impl Gpu {
         let mut u = [0.0f32; 20];
         u[..16].copy_from_slice(&vp.to_cols_array());
         // w: soft radius in map uv (overhead mode only; `shadow_matrix` sets depth = 2 r + 16)
-        let soft = if overhead { OVERHEAD_SOFT / (depth - 16.0) } else { 0.0 };
-        u[16..].copy_from_slice(&[depth, 1.0 / SHADOW_SIZE as f32, SHADOW_BIAS / depth, soft]);
+        let soft = if overhead { OVERHEAD_SOFT.get() / (depth - 16.0) } else { 0.0 };
+        u[16..].copy_from_slice(&[depth, 1.0 / SHADOW_SIZE as f32, SHADOW_BIAS.get() / depth, soft]);
         self.queue.write_buffer(&m.uniform, 0, bytemuck::cast_slice(&u));
         let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("car shadow map"),
@@ -5419,6 +5969,7 @@ impl Gpu {
         buf(VSrc::Fill, !s.fill.is_empty());
         buf(VSrc::Water, !s.water.is_empty());
         buf(VSrc::Dry, up.dry.is_some());
+        buf(VSrc::WetTrees, up.wet_trees.is_some());
         buf(VSrc::Grass, !s.grass.is_empty());
         buf(VSrc::Lines, true);
         for i in 0..s.cars.len() {
@@ -5580,7 +6131,8 @@ impl Gpu {
             world_box: l.up.world_box,
             fill: take(VSrc::Fill),
             water: take(VSrc::Water),
-            tris_dry: take(VSrc::Dry),
+            tris_dry: take(VSrc::Dry).zip(l.up.dry.as_ref()).map(|((b, _), w)| (b, w.off.clone(), w.on.clone())),
+            tris_trees: take(VSrc::WetTrees).zip(l.up.wet_trees.as_ref()).map(|((b, _), w)| (b, w.off.clone(), w.on.clone())),
             water_params: s.water_params.clone(),
             grass: take(VSrc::Grass),
             grass_params: s.grass_params.clone(),
@@ -5746,8 +6298,8 @@ impl Gpu {
         if self.local_want.0 != sun {
             self.local_want = (sun, std::time::Instant::now());
         }
-        let turned = self.local_sun.is_some_and(|b| Vec3::from(b).dot(Vec3::from(sun)) < LOCAL_SUN_TURN);
-        let settled = self.local_wait || self.local_want.1.elapsed().as_secs_f32() >= LOCAL_SUN_SETTLE;
+        let turned = self.local_sun.is_some_and(|b| Vec3::from(b).dot(Vec3::from(sun)) < LOCAL_SUN_TURN.get());
+        let settled = self.local_wait || self.local_want.1.elapsed().as_secs_f32() >= LOCAL_SUN_SETTLE.get();
         if self.local_sun.is_none() || (turned && settled) {
             let (src, fade) = (src.clone(), g.local.origin.is_none());
             self.local_sun = Some(sun);
@@ -5800,7 +6352,7 @@ impl Gpu {
         let Some(g) = &mut self.scene else { return };
         let mk = |d: &Vec<Vertex>, label| (self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(d), usage: wgpu::BufferUsages::VERTEX }), d.len() as u32);
         g.water = (!m.verts.is_empty()).then(|| mk(&m.verts, "water"));
-        g.tris_dry = dry_world(&s.tris, &m.hide, &m.bed).map(|d| mk(&d, "world without water"));
+        g.tris_dry = remaster_world(&s.tris, &m.hide, &m.bed, &s.tree_hide, &s.trees).map(|w| (mk(&w.verts, "world without water").0, w.off, w.on));
         g.water_params = m.params.clone();
     }
 
@@ -6082,7 +6634,7 @@ impl Gpu {
     fn draw_scene_frosted(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera, v: &View, f: &Frame, fr: SceneFrost) {
         let g = self.glow();
         let sf = self.scene_frost.get_or_init(|| {
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("scene frost"), source: wgpu::ShaderSource::Wgsl(include_str!("scenefrost.wgsl").into()) });
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("scene frost"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("scenefrost.wgsl")) });
             let tex = |binding| wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -6179,7 +6731,7 @@ impl Gpu {
     fn draw_underwater(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera, v: &View, f: &Frame, phi: f32) {
         use motor_sim::cheats::{WOBBLE_AMP_PX, WOBBLE_BREATH, WOBBLE_WAVES, WOBBLE_ZOOM};
         let uw = self.underwater.get_or_init(|| {
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("underwater"), source: wgpu::ShaderSource::Wgsl(include_str!("underwater.wgsl").into()) });
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("underwater"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("underwater.wgsl")) });
             let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("underwater"),
                 entries: &[
@@ -6267,7 +6819,7 @@ impl Gpu {
         let (Some(s), Some(clip)) = (&self.scene, f.holo_clip) else { return };
         let g = self.glow();
         let fr = self.holo_frost.get_or_init(|| {
-            let src = format!("{}\n{}", SHADER_SRC, include_str!("holofrost.wgsl"));
+            let src = format!("{}\n{}", crate::shaders::scene(), crate::shaders::src("holofrost.wgsl"));
             let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("hologram frost"), source: wgpu::ShaderSource::Wgsl(src.into()) });
             let tex = |binding| wgpu::BindGroupLayoutEntry {
                 binding,
@@ -6352,7 +6904,7 @@ impl Gpu {
     /// hologram (`draw_hologram_frosted`) blurs with the same gaussian.
     fn glow(&self) -> &Glow {
         self.glow.get_or_init(|| {
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("glow"), source: wgpu::ShaderSource::Wgsl(include_str!("glow.wgsl").into()) });
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("glow"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("glow.wgsl")) });
             let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("glow"),
                 entries: &[
@@ -6444,12 +6996,12 @@ impl Gpu {
             p.draw(0..verts.len() as u32, 0..1);
         }
         // sigma in half-size texels; taps are sigma / 4 apart (glow.wgsl)
-        let sigma = (GLOW_SIGMA * sx.min(sy) * 0.5).max(0.5);
+        let sigma = (GLOW_SIGMA.get() * sx.min(sy) * 0.5).max(0.5);
         let step = (sigma / 4.0).max(0.25);
         let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
         self.glow_fullscreen(enc, &g.blur, &views[0], [1.0 / half.0 as f32, 0.0, step, sigma], &views[1], clear);
         self.glow_fullscreen(enc, &g.blur, &views[1], [0.0, 1.0 / half.1 as f32, step, sigma], &views[0], clear);
-        self.glow_fullscreen(enc, &g.comp, &views[0], [0.0, 0.0, 0.0, GLOW_COMPOSITE], target, wgpu::LoadOp::Load);
+        self.glow_fullscreen(enc, &g.comp, &views[0], [0.0, 0.0, 0.0, GLOW_COMPOSITE.get()], target, wgpu::LoadOp::Load);
     }
 
     /// A half-size `HDR` render target the glow passes read and write.
@@ -6529,7 +7081,7 @@ impl Gpu {
                 let p = mid(h, m);
                 let to_eye = (cam.pos - p).normalize_or_zero();
                 // the car the camera follows must not flare over itself: ramp in with distance
-                let near = ((cam.pos.distance(p) - CAR_FLARE_NEAR.0) / (CAR_FLARE_NEAR.1 - CAR_FLARE_NEAR.0)).clamp(0.0, 1.0);
+                let near = ((cam.pos.distance(p) - CAR_FLARE_NEAR_MIN.get()) / (CAR_FLARE_NEAR_MAX.get() - CAR_FLARE_NEAR_MIN.get()).max(1e-3)).clamp(0.0, 1.0);
                 let front = h.p0.z + h.p1.z <= 0.0;
                 // headlights flare into the lens they face, tail lights the ones behind them
                 let (lt, axis) = if front { (&v.remaster.car_lights.head, fwd) } else { (&v.remaster.car_lights.tail, -fwd) };
@@ -6570,7 +7122,7 @@ impl Gpu {
             return true;
         }
         let sa = self.studio.get_or_init(|| {
-            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("studio aa"), source: wgpu::ShaderSource::Wgsl(include_str!("studioaa.wgsl").into()) });
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("studio aa"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("studioaa.wgsl")) });
             let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("studio aa"),
                 entries: &[wgpu::BindGroupLayoutEntry {
@@ -6680,6 +7232,7 @@ impl Gpu {
                 water: false,
                 grass: GrassLevel::Off,
                 world_fill: false,
+                tree_models: false,
                 generated_cars: false,
                 retro_signs: false,
                 local_light: false,
@@ -6700,7 +7253,13 @@ impl Gpu {
         let far = s.view_distance * v.distance();
         // CLASSIC (0x40b564): the TV camera scales the far plane within 60..300 m; REMASTER keeps
         // a longer view-distance option
-        let far = if cam.far_k == 1.0 { far } else { (far * cam.far_k).clamp(motor_sim::tvcam::FAR_MIN, motor_sim::tvcam::FAR_MAX.max(far)) };
+        let far = if cam.far_k == 1.0 {
+            far
+        } else {
+            // `.max(lo)`: a typed FAR_MAX under FAR_MIN must not make clamp panic
+            let lo = motor_sim::tvcam::FAR_MIN.get();
+            (far * cam.far_k).clamp(lo, motor_sim::tvcam::FAR_MAX.get().max(far).max(lo))
+        };
         // DEBUG: the clip distance (fog, halos and lights keep `far`)
         let clip_far = if v.debug.unlimited { UNLIMITED_FAR.max(far) } else { far };
         // the TV camera's zoom (0x40b498) narrows the 90 degree field: tan(fov_x / 2) = 1 / zoom
@@ -6781,7 +7340,7 @@ impl Gpu {
         };
         // design choice: the image keeps its shape on wider screens (one image per screen at 4:3)
         let u_per_screen = aspect * 0.75;
-        let band = s.sky_size.1 as f32 / SKY_REF_LINES;
+        let band = s.sky_size.1 as f32 / SKY_REF_LINES.get();
         let u_per_screen = if f.mirror { -u_per_screen } else { u_per_screen };
         let sky_geom = [horizon_y - 0.5 + l.horizon - band / 2.0, band, sky_u, u_per_screen];
         let mut g = Globals {
@@ -6826,7 +7385,7 @@ impl Gpu {
             grass_map: s.grass_edge.map_or([0.0; 4], |e| e.0),
             sky_sh: sky_sh(v, s, l),
             local: match s.local.origin {
-                Some(_) if v.local_light() => [s.local.shown.map_or(1.0, |t| (t.elapsed().as_secs_f32() / LOCAL_FADE).min(1.0)), v.remaster.local_tune.bounce, v.remaster.local_tune.occlusion, 0.0],
+                Some(_) if v.local_light() => [s.local.shown.map_or(1.0, |t| (t.elapsed().as_secs_f32() / LOCAL_FADE.get()).min(1.0)), v.remaster.local_tune.bounce, v.remaster.local_tune.occlusion, 0.0],
                 _ => [0.0; 4],
             },
             local_box: s.local.origin.map_or([0.0; 4], |o| [o[0] as f32, o[1] as f32, o[2] as f32, 0.0]),
@@ -6836,6 +7395,8 @@ impl Gpu {
             gain: [v.brightness, v.brightness, v.brightness, 0.0],
             hell: [[0.0; 4]; 16],
             tron: [0.0; 4],
+            flash: [0.0; 4],
+            flash_col: [0.0; 4],
             water_t: [self.clock_pin.get().unwrap_or_else(|| self.water_clock.elapsed().as_secs_f32()), 0.0, 0.0, 0.0],
             // hologram clip (shader holo_gain): z = 1 keep inside, 2 keep outside, 3 frosted; w = gain
             myw_n: f.holo_clip.map_or([0.0; 4], |c| [0.0, 0.0, c.mode(), c.gain]),
@@ -6910,6 +7471,12 @@ impl Gpu {
             }
             dynamic_lights(&mut g, s, f, cam.pos, far, v.generated_cars(), &v.remaster.car_lights, &self.head_alloc.borrow());
             street_lamps(&mut g, s, cam.pos, far, &v.remaster.lamp_lights, &self.spot_alloc.borrow());
+        }
+        // the flashlight: a torch at the camera, for dark tracks (not in the mirror, the overlay or a viewport)
+        if v.debug.flashlight && !f.overlay && !f.mirror && f.viewport.is_none() {
+            let fw = cam.forward();
+            g.flash = [fw.x, fw.y, fw.z, FLASH_COS_OUTER.get()];
+            g.flash_col = [FLASH_COLOUR[0], FLASH_COLOUR[1], FLASH_COLOUR[2], FLASH_RANGE.get()];
         }
         let wire = f.wire.on() && s.wire.is_some();
         // scene objects: one lit, world-space buffer (they are small: under 1000 vertices per
@@ -7001,7 +7568,7 @@ impl Gpu {
         let real_shadows = v.car_shadows() && !wire && !f.overlay;
         if main {
             // REMASTER: dim tracks cast straight down (OVERHEAD_DARKNESS)
-            let overhead = s.look.darkness > OVERHEAD_DARKNESS;
+            let overhead = s.look.darkness > OVERHEAD_DARKNESS.get();
             let sun = if overhead { Vec3::Y } else { Vec3::from(l.sun_dir) };
             self.shadow_ready.set(real_shadows && self.draw_shadow_map(enc, s, cars, cam.pos, (sun, overhead), v.generated_cars()));
         }
@@ -7018,7 +7585,7 @@ impl Gpu {
         }
         // REMASTER volumetric fog sun shafts: the world seen from the sun (the froxel injection reads it)
         let shafts = (fogvol && !v.debug.hide_shafts && (g.fog2[3] > 0.0 || fog_tune.shafts > 0.0))
-            .then(|| self.draw_shaft_map(enc, s, v, cars, props.as_ref().map(|b| (b, prop_v.len() as u32)), (proj_still * view).inverse(), cam.forward(), cam.pos, far.min(SHAFT_RANGE), Vec3::from(l.sun_dir), v.generated_cars()))
+            .then(|| self.draw_shaft_map(enc, s, v, cars, props.as_ref().map(|b| (b, prop_v.len() as u32)), (proj_still * view).inverse(), cam.forward(), cam.pos, far.min(SHAFT_RANGE.get()), Vec3::from(l.sun_dir), v.generated_cars()))
             .flatten();
         // REMASTER: with bloom, smooth halos shrink to a hot core and the bloom spreads it
         let halo_bloom = hdr && v.remaster.halo_bloom();
@@ -7030,12 +7597,12 @@ impl Gpu {
         }
         // REMASTER Neon grid (#320): the edge width in pixels of the target the scene is drawn into
         if f.tron {
-            g.tron[0] = 0.5 * NEON_EDGE_PX * render.height as f32 / NEON_REF_H;
+            g.tron[0] = 0.5 * NEON_EDGE_PX.get() * render.height as f32 / NEON_REF_H.get().max(1.0);
         }
-        let halo_size = if halo_bloom { REMASTER_HALO_SIZE } else { HALO_SIZE };
+        let halo_size = if halo_bloom { REMASTER_HALO_SIZE.get() } else { HALO_SIZE.get() };
         // the starburst keeps its size and strength with and without bloom
-        let burst = if remaster && main && v.remaster.smooth_halos { HALO_BURST_SIZE * REMASTER_HALO_SIZE / halo_size } else { 0.0 };
-        let spin = HALO_SPIN;
+        let burst = if remaster && main && v.remaster.smooth_halos { HALO_BURST_SIZE.get() * REMASTER_HALO_SIZE.get() / halo_size } else { 0.0 };
+        let spin = HALO_SPIN.get();
         // Enhanced needs this frame's cube: views without a probe of their own (the menu car)
         // fall back to Reflection, the rear mirror reuses the main view's
         // (CLASSIC: Reflection is the sphere-mapped env layer, Gouraud none)
@@ -7105,7 +7672,7 @@ impl Gpu {
             let fade_start = (l.fog_start + (1.0 - l.fog_start) * 0.85) * far;
             let fx = 2.0 * ((v.fov_x.to_radians() / 2.0).tan() / cam.zoom).atan();
             if remaster {
-                halo_quads(&mut halo_v, &s.world_halos, Mat4::IDENTITY, Vec3::splat(WORLD_HALO_BRIGHTNESS), HALO_GAIN, cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
+                halo_quads(&mut halo_v, &s.world_halos, Mat4::IDENTITY, Vec3::splat(WORLD_HALO_BRIGHTNESS.get()), HALO_GAIN.get(), cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
             } else {
                 // CLASSIC 0x439077: every world halo grey, size 1.0, the u + 0.75 curve
                 for h in s.world_halos.iter().map(classic_world_halo) {
@@ -7126,12 +7693,12 @@ impl Gpu {
                     let facing = m.transform_vector3(Vec3::NEG_Z).normalize_or_zero().dot(to_eye).max(0.0).powi(4);
                     let t = &v.remaster.car_lights;
                     for (lamps, lt, facing) in [(&front, &t.head, facing), (&rear, &t.tail, 0.0)] {
-                        let glow = Vec3::splat(CAR_HALO_BRIGHTNESS * lt.halo_gain(night, facing, brake) * lt.scale);
+                        let glow = Vec3::splat(CAR_HALO_BRIGHTNESS.get() * lt.halo_gain(night, facing, brake) * lt.scale);
                         let size = halo_size * lt.halo_size(night, facing, brake);
-                        halo_quads(&mut car_v, lamps, m, glow, HALO_GAIN, cam, fx, far, fade_start, far, size, burst * lt.burst_size(brake), lt.burst_gain(brake), spin, v.remaster.smooth_halos.then_some([lt.strip, lt.strip_width]));
+                        halo_quads(&mut car_v, lamps, m, glow, HALO_GAIN.get(), cam, fx, far, fade_start, far, size, burst * lt.burst_size(brake), lt.burst_gain(brake), spin, v.remaster.smooth_halos.then_some([lt.strip, lt.strip_width]));
                     }
                 } else if remaster {
-                    halo_quads(&mut halo_v, h, m, Vec3::splat(CAR_HALO_BRIGHTNESS), HALO_GAIN, cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
+                    halo_quads(&mut halo_v, h, m, Vec3::splat(CAR_HALO_BRIGHTNESS.get()), HALO_GAIN.get(), cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
                 } else {
                     // CLASSIC 0x439134: head lights, tail lights (brake boost) and others by texture
                     let braking = f.car_brake.get(mesh / CAR_MESHES).is_some_and(|&b| b > 0.0);
@@ -7144,8 +7711,8 @@ impl Gpu {
             for (i, &(mesh, m)) in f.props.iter().enumerate() {
                 if let Some(h) = s.prop_halos.get(mesh) {
                     // CLASSIC 0x4398f5: gain 0.6, size 0.5, the object's animated scale on the colour
-                    let glow = f.prop_glow.get(i).copied().unwrap_or(Vec3::ONE) * if remaster { WORLD_HALO_BRIGHTNESS } else { 1.0 };
-                    halo_quads(&mut halo_v, h, m, glow, HALO_GAIN, cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
+                    let glow = f.prop_glow.get(i).copied().unwrap_or(Vec3::ONE) * if remaster { WORLD_HALO_BRIGHTNESS.get() } else { 1.0 };
+                    halo_quads(&mut halo_v, h, m, glow, HALO_GAIN.get(), cam, fx, far, fade_start, far, halo_size, burst, 1.0, spin, None);
                 }
                 // REMASTER headlamps (`PROP_HEADLAMPS`): glare inside the beam like a car's headlights
                 if let Some(pl) = s.prop_lamps.get(mesh).filter(|p| remaster && !p.lamps.is_empty()) {
@@ -7154,16 +7721,16 @@ impl Gpu {
                     let to_eye = (cam.pos - m.transform_point3(lamp)).normalize_or_zero();
                     let facing = m.transform_vector3(pl.forward).normalize_or_zero().dot(to_eye).max(0.0).powi(4);
                     let head = &v.remaster.car_lights.head;
-                    let glow = Vec3::splat(CAR_HALO_BRIGHTNESS * head.halo_gain(night, facing, 0.0) * head.scale);
+                    let glow = Vec3::splat(CAR_HALO_BRIGHTNESS.get() * head.halo_gain(night, facing, 0.0) * head.scale);
                     let size = halo_size * head.halo_size(night, facing, 0.0);
-                    halo_quads(&mut car_v, &pl.lamps, m, glow, HALO_GAIN, cam, fx, far, fade_start, far, size, burst * head.burst_size(0.0), head.burst_gain(0.0), spin, None);
+                    halo_quads(&mut car_v, &pl.lamps, m, glow, HALO_GAIN.get(), cam, fx, far, fade_start, far, size, burst * head.burst_size(0.0), head.burst_gain(0.0), spin, None);
                 }
             }
         }
         // REMASTER: halos and lens flares at half strength (overblown at the Classic values)
         let dim = |q: &mut [Vertex]| {
             if remaster {
-                q.iter_mut().for_each(|x| x.color[..3].iter_mut().for_each(|c| *c *= REMASTER_HALO_SCALE));
+                q.iter_mut().for_each(|x| x.color[..3].iter_mut().for_each(|c| *c *= REMASTER_HALO_SCALE.get()));
             }
         };
         dim(&mut halo_v);
@@ -7187,11 +7754,11 @@ impl Gpu {
             } else if let Some(layer) = s.fx.flare {
                 // CLASSIC: hex.iff flares of the world halos (0x439077) and of the car head lights (0x4396aa)
                 let world: Vec<HaloInst> = s.world_halos.iter().map(|h| classic_world_halo(h).halo).collect();
-                flare_quads(&mut flare_v, &mut flare_lights, &world, Mat4::IDENTITY, WORLD_FLARE, layer as f32, cam, proj_still * view, vp, target, (fov_x, fov), far, fade_start);
+                flare_quads(&mut flare_v, &mut flare_lights, &world, Mat4::IDENTITY, WORLD_FLARE.get(), layer as f32, cam, proj_still * view, vp, target, (fov_x, fov), far, fade_start);
                 for &(mesh, m) in cars.iter().take(MAX_CARS) {
                     let Some(h) = s.halos(mesh, v.generated_cars()) else { continue };
                     let heads: Vec<HaloInst> = h.iter().filter(|h| h.texture == 0).map(|h| classic_car_halo(h, false).halo).collect();
-                    flare_quads(&mut flare_v, &mut flare_lights, &heads, m, HEAD_FLARE, layer as f32, cam, proj_still * view, vp, target, (fov_x, fov), far, fade_start);
+                    flare_quads(&mut flare_v, &mut flare_lights, &heads, m, HEAD_FLARE.get(), layer as f32, cam, proj_still * view, vp, target, (fov_x, fov), far, fade_start);
                 }
             }
             dim(&mut flare_v);
@@ -7393,7 +7960,7 @@ impl Gpu {
             // sky * (1 - a) + previous frame * a, the same as blending the sky over the old frame
             pass.set_pipeline(&pipes.blur);
             pass.set_bind_group(0, &h.bind, &[]);
-            pass.set_blend_constant(wgpu::Color { r: MOTION_BLUR_ALPHA, g: MOTION_BLUR_ALPHA, b: MOTION_BLUR_ALPHA, a: 1.0 });
+            pass.set_blend_constant(wgpu::Color { r: MOTION_BLUR_ALPHA.get(), g: MOTION_BLUR_ALPHA.get(), b: MOTION_BLUR_ALPHA.get(), a: 1.0 });
             pass.draw(0..3, 0..1);
             pass.set_bind_group(0, &s.bind, &[]);
         }
@@ -7418,9 +7985,9 @@ impl Gpu {
                 pass.set_pipeline(tri_pipe);
                 if !(v.debug.hide_world || f.cars_only) {
                     // REMASTER: the world minus the triangles that the water surface replaces
-                    let (b, n) = s.world(v);
+                    let (b, r) = s.world(v);
                     pass.set_vertex_buffer(0, b.slice(..));
-                    pass.draw(0..n, 0..1);
+                    pass.draw(r, 0..1);
                     // REMASTER world fill: same pipeline, so fog, SSAO, shadows and lights apply
                     if let Some((b, n)) = s.fill.as_ref().filter(|_| v.world_fill()) {
                         pass.set_vertex_buffer(0, b.slice(..));
@@ -7564,12 +8131,12 @@ impl Gpu {
                         scr: [render.width as f32, render.height as f32, 0.0, 0.0],
                         lamp_n: [g.lamp_n[0], g.lamp_n[1], g.lamp_n[2], fog_tune.lamps],
                         lamps: g.lamps,
-                        spot_n: [heads.len() as f32, 0.0, 0.0, fog_tune.lamps * volfog::HEAD_SCATTER],
+                        spot_n: [heads.len() as f32, 0.0, 0.0, fog_tune.lamps * volfog::HEAD_SCATTER.get()],
                         spots: heads_packed,
                         prev_vp,
                         jit,
                         shaft_vp: shafts.map_or(Mat4::IDENTITY, |m| m.0).to_cols_array_2d(),
-                        shaft: shafts.map_or([0.0; 4], |(_, depth)| [1.0, SHAFT_BIAS / depth, fog_tune.shafts, 0.0]),
+                        shaft: shafts.map_or([0.0; 4], |(_, depth)| [1.0, SHAFT_BIAS.get() / depth, fog_tune.shafts, 0.0]),
                     },
                 );
                 vf.inject(enc);
@@ -7636,7 +8203,7 @@ impl Gpu {
                 } else if let (Some(pipe), Some((vb, n))) = (&pipes.ghost, ghost_lv.as_ref().map_or(Some(0), |lv| lv[k]).and_then(|level| s.car_level(mesh, level, false))) {
                     // CLASSIC (design choice)
                     pass.set_pipeline(pipe);
-                    pass.set_blend_constant(wgpu::Color { r: GHOST_ALPHA, g: GHOST_ALPHA, b: GHOST_ALPHA, a: 1.0 });
+                    pass.set_blend_constant(wgpu::Color { r: GHOST_ALPHA.get(), g: GHOST_ALPHA.get(), b: GHOST_ALPHA.get(), a: 1.0 });
                     pass.set_vertex_buffer(0, vb.slice(..));
                     pass.draw(0..*n, 0..1);
                 }
@@ -7699,7 +8266,7 @@ impl Gpu {
             // projected ones move with their cars
             let luma = |c: [f32; 3]| 0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2];
             let share = luma(l.sun) / (luma(l.sun) + luma(l.object_ambient) + 1e-3);
-            let dark = if s.look.darkness > OVERHEAD_DARKNESS { OVERHEAD_WORLD } else { (share * 1.5).min(0.6) };
+            let dark = if s.look.darkness > OVERHEAD_DARKNESS.get() { OVERHEAD_WORLD.get() } else { (share * 1.5).min(0.6) };
             let shadow = if self.shadow_ready.get() && v.car_shadows() {
                 VelShadow::Map(dark)
             } else if !v.car_shadows() && !f.shadows.is_empty() {
@@ -7754,7 +8321,7 @@ impl Gpu {
             let rs = work.map_or(out.0.size(), |s| s.0.size());
             let [hist, sharpen] = v.remaster.post_aa.taa_params();
             // the velocity blur's shutter is in the motion when it ran
-            let shutter = if vblur { 1.0 / VBLUR_SHUTTER } else { 1.0 };
+            let shutter = if vblur { 1.0 / VBLUR_SHUTTER.get() } else { 1.0 };
             let u = [w, h, rs.width as f32, rs.height as f32, hist, sharpen, tt.valid.get() as u32 as f32, shutter, hdr as u32 as f32, 0.0, 0.0, 0.0];
             self.queue.write_buffer(&t.uniform, 0, bytemuck::cast_slice(&u));
             let (read, write) = (tt.read.get(), 1 - tt.read.get());
@@ -7781,7 +8348,7 @@ impl Gpu {
         let bloom = tg.as_ref().and_then(|t| t.bloom.as_ref()).filter(|_| r.bloom > 0);
         if let Some((mips, down, up)) = bloom {
             let b = self.bloom_pipes();
-            self.queue.write_buffer(&b.uniform, 0, bytemuck::cast_slice(&[BLOOM_THRESHOLD, BLOOM_KNEE, BLOOM_MAX, 0.0]));
+            self.queue.write_buffer(&b.uniform, 0, bytemuck::cast_slice(&[BLOOM_THRESHOLD.get(), BLOOM_KNEE.get().max(1e-3), BLOOM_MAX.get(), 0.0]));
             let mut run = |pipe: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, dst: &wgpu::TextureView, load: wgpu::LoadOp<wgpu::Color>| {
                 let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("bloom"),
@@ -7809,7 +8376,7 @@ impl Gpu {
             self.frame_no.set(n);
             let pct = |p: u32| p.min(100) as f32 / 100.0;
             // the bloom mip sums one layer per level
-            let bloom_k = bloom.map_or(0.0, |(mips, _, _)| pct(r.bloom) * BLOOM_STRENGTH / mips.len() as f32);
+            let bloom_k = bloom.map_or(0.0, |(mips, _, _)| pct(r.bloom) * BLOOM_STRENGTH.get() / mips.len() as f32);
             let tonemap = if hdr { 1.0 + r.tonemap as u32 as f32 } else { 0.0 };
             let u = [(n % 4096) as f32, pct(r.grade), pct(r.vignette), pct(r.grain), r.exposure as f32 / 100.0, bloom_k, tonemap, 0.0];
             self.queue.write_buffer(&post.uniform, 0, bytemuck::cast_slice(&u));
@@ -7874,8 +8441,8 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     fn ssao_passes(&self, enc: &mut wgpu::CommandEncoder, st: &SsaoTargets, msaa: bool, proj: &Mat4, far: f32, size: wgpu::Extent3d, percent: u32, hdr: bool) {
         let s = self.ssao_pipes();
-        let strength = percent.min(100) as f32 / 100.0 * SSAO_MAX;
-        let u = [proj.x_axis.x, proj.y_axis.y, NEAR, far, SSAO_RADIUS, SSAO_FADE[0], SSAO_FADE[1], strength, size.width as f32, size.height as f32, hdr as u32 as f32, 0.0];
+        let strength = percent.min(100) as f32 / 100.0 * SSAO_MAX.get();
+        let u = [proj.x_axis.x, proj.y_axis.y, NEAR, far, SSAO_RADIUS.get(), SSAO_FADE_NEAR.get(), SSAO_FADE_FAR.get(), strength, size.width as f32, size.height as f32, hdr as u32 as f32, 0.0];
         self.queue.write_buffer(&s.uniform, 0, bytemuck::cast_slice(&u));
         let mut run = |label, pipe: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, dst: &wgpu::TextureView| {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -7901,15 +8468,15 @@ impl Gpu {
     #[allow(clippy::too_many_arguments)]
     fn draw_probe(&self, s: &GpuScene, base: Globals, v: &View, f: &Frame, centre: Vec3, skip: &std::ops::Range<usize>, props: Option<(&wgpu::Buffer, u32)>, view_far: f32) {
         let pipes = self.remaster_pipes(1, true);
-        let (near, far) = (0.2, view_far.min(PROBE_FAR));
+        let (near, far) = (0.2, view_far.min(PROBE_FAR.get()));
         let proj = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)) * glam::camera::rh::proj::directx::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
         let l = &s.look;
         // the sky band where `fs_sky` puts it for a level camera on a 4:3 screen (FOV_X wide,
         // tan of half the vertical fov = 0.75), by elevation; it repeats as often around 360
         // degrees (z: repeats, w: that tan)
-        let tan_v = (FOV_X.to_radians() / 2.0).tan() * 0.75;
-        let repeats = (std::f32::consts::TAU / FOV_X.to_radians()).round();
-        let band = s.sky_size.1 as f32 / SKY_REF_LINES;
+        let tan_v = (FOV_X.get().to_radians() / 2.0).tan() * 0.75;
+        let repeats = (std::f32::consts::TAU / FOV_X.get().to_radians()).round();
+        let band = s.sky_size.1 as f32 / SKY_REF_LINES.get();
         let sky_geom = if s.sky_size.1 == 0 || !v.sky_image { [0.5, 0.0, repeats, tan_v] } else { [l.horizon - band / 2.0, band, repeats, tan_v] };
         let fade_start = (l.fog_start + (1.0 - l.fog_start) * 0.85) * view_far;
         let cars = || f.cars.iter().enumerate().take(MAX_CARS).filter(|(_, (mesh, _))| !skip.contains(mesh));
@@ -7934,7 +8501,9 @@ impl Gpu {
                 // colour inside tunnels (no scene copy: the water samples none here).
                 water_t: [base.water_t[0], 0.0, near, far],
                 // REMASTER Neon grid (#320): the grid's sides in the faces' own pixels
-                tron: [0.5 * NEON_PROBE_EDGE_PX, 0.0, 0.0, 0.0],
+                tron: [0.5 * NEON_PROBE_EDGE_PX.get(), 0.0, 0.0, 0.0],
+                // no flashlight in the reflections
+                flash_col: [0.0; 4],
                 ..base
             };
             self.queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&g));
@@ -7950,16 +8519,16 @@ impl Gpu {
             if v.halos {
                 let cam = Camera::new(centre, dir.x.atan2(-dir.z), dir.y.clamp(-1.0, 1.0).asin());
                 let fx = std::f32::consts::FRAC_PI_2;
-                halo_quads(&mut halo_v, &s.world_halos, Mat4::IDENTITY, Vec3::splat(WORLD_HALO_BRIGHTNESS), HALO_GAIN, &cam, fx, far, fade_start, view_far, HALO_SIZE, 0.0, 1.0, 0.0, Some([1.0, 1.0]));
+                halo_quads(&mut halo_v, &s.world_halos, Mat4::IDENTITY, Vec3::splat(WORLD_HALO_BRIGHTNESS.get()), HALO_GAIN.get(), &cam, fx, far, fade_start, view_far, HALO_SIZE.get(), 0.0, 1.0, 0.0, Some([1.0, 1.0]));
                 for (_, &(mesh, m)) in cars() {
                     if let Some(h) = s.halos(mesh, v.generated_cars()) {
-                        halo_quads(&mut halo_v, h, m, Vec3::splat(CAR_HALO_BRIGHTNESS), HALO_GAIN, &cam, fx, far, fade_start, view_far, HALO_SIZE, 0.0, 1.0, 0.0, Some([1.0, 1.0]));
+                        halo_quads(&mut halo_v, h, m, Vec3::splat(CAR_HALO_BRIGHTNESS.get()), HALO_GAIN.get(), &cam, fx, far, fade_start, view_far, HALO_SIZE.get(), 0.0, 1.0, 0.0, Some([1.0, 1.0]));
                     }
                 }
                 for (i, &(mesh, m)) in f.props.iter().enumerate() {
                     if let Some(h) = s.prop_halos.get(mesh) {
-                        let glow = f.prop_glow.get(i).copied().unwrap_or(Vec3::ONE) * WORLD_HALO_BRIGHTNESS;
-                        halo_quads(&mut halo_v, h, m, glow, HALO_GAIN, &cam, fx, far, fade_start, view_far, HALO_SIZE, 0.0, 1.0, 0.0, Some([1.0, 1.0]));
+                        let glow = f.prop_glow.get(i).copied().unwrap_or(Vec3::ONE) * WORLD_HALO_BRIGHTNESS.get();
+                        halo_quads(&mut halo_v, h, m, glow, HALO_GAIN.get(), &cam, fx, far, fade_start, view_far, HALO_SIZE.get(), 0.0, 1.0, 0.0, Some([1.0, 1.0]));
                     }
                 }
             }
@@ -8001,9 +8570,9 @@ impl Gpu {
             }
             pass.set_pipeline(&pipes.tri_mirror);
             // REMASTER: the probe's sky shows where the water texture was (a sky reflection is what the water gives)
-            let (b, n) = s.world(v);
+            let (b, r) = s.world(v);
             pass.set_vertex_buffer(0, b.slice(..));
-            pass.draw(0..n, 0..1);
+            pass.draw(r, 0..1);
             if let Some((b, n)) = s.fill.as_ref().filter(|_| v.world_fill()) {
                 pass.set_vertex_buffer(0, b.slice(..));
                 pass.draw(0..*n, 0..1);
@@ -8038,7 +8607,7 @@ impl Gpu {
     fn draw_studio_cube(&self) {
         let mut enc = self.device.create_command_encoder(&Default::default());
         // +X -X +Y -Y +Z -Z
-        let faces = [STUDIO_SIDE, STUDIO_SIDE, STUDIO_TOP, STUDIO_FLOOR, STUDIO_SIDE, STUDIO_SIDE];
+        let faces = [STUDIO_SIDE.get(), STUDIO_SIDE.get(), STUDIO_TOP.get(), STUDIO_FLOOR.get(), STUDIO_SIDE.get(), STUDIO_SIDE.get()];
         for (view, c) in self.probe.faces.iter().zip(faces) {
             drop(enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("studio cube"),
@@ -8090,7 +8659,7 @@ impl Gpu {
         let b = self.vel_blur();
         let mut prev = self.prev_view.borrow_mut();
         // a camera cut (first frame, respawn, another camera, look back) has no motion to blur
-        let last = prev.as_ref().filter(|p| p.pos.distance(cam.pos) < CUT_DISTANCE && p.fwd.dot(cam.forward()) > CUT_COS);
+        let last = prev.as_ref().filter(|p| p.pos.distance(cam.pos) < CUT_DISTANCE.get() && p.fwd.dot(cam.forward()) > CUT_COS.get());
         let cut = last.is_none();
         let prev_vp = last.map_or(view_proj, |p| jm * p.view_proj);
         let old = |mesh: usize| last.and_then(|p| p.cars.get(&mesh)).copied();
@@ -8109,7 +8678,7 @@ impl Gpu {
                 _ => old(mesh).unwrap_or(m),
             };
             // a respawned car jumps
-            let pm = if pm.w_axis.distance(m.w_axis) < CUT_DISTANCE { pm } else { m };
+            let pm = if pm.w_axis.distance(m.w_axis) < CUT_DISTANCE.get() { pm } else { m };
             draws.push((Src::Car(mesh), m, pm));
             match shadow {
                 // (the ghost casts none)
@@ -8134,7 +8703,7 @@ impl Gpu {
         let mut prop_v: Vec<Vertex> = Vec::new();
         for (k, &(mesh, m)) in props.iter().enumerate() {
             let Some(&(pmesh, pm)) = last.and_then(|p| p.props.get(k)) else { continue };
-            let moved = pmesh == mesh && pm != m && pm.w_axis.distance(m.w_axis) < CUT_DISTANCE;
+            let moved = pmesh == mesh && pm != m && pm.w_axis.distance(m.w_axis) < CUT_DISTANCE.get();
             let Some(src) = s.props.get(mesh).filter(|_| moved && (m.w_axis.truncate() - cam.pos).length() < far) else { continue };
             let start = prop_v.len() as u32;
             prop_v.extend_from_slice(src);
@@ -8154,7 +8723,7 @@ impl Gpu {
         let size = scene.0.size();
         let mut u: Vec<f32> = [view_proj.inverse(), prev_vp].iter().flat_map(|m| m.to_cols_array()).collect();
         // (TAA alone wants the whole motion)
-        let (shutter, longest) = if blur { (VBLUR_SHUTTER, VBLUR_MAX * size.width as f32) } else { (1.0, f32::MAX) };
+        let (shutter, longest) = if blur { (VBLUR_SHUTTER.get(), VBLUR_MAX.get() * size.width as f32) } else { (1.0, f32::MAX) };
         u.extend([shutter, longest, NEAR, far, (self.frame_no.get() % 4096) as f32, samples as f32, shadow_dark, if hdr { 2.2 } else { 1.0 }]);
         u.extend(view_proj.to_cols_array());
         self.queue.write_buffer(&b.uniform, 0, bytemuck::cast_slice(&u));
@@ -8353,7 +8922,7 @@ impl Gpu {
         let pipe = self.dissolve.get_or_init(|| {
             let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("dissolve shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("blur.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(crate::shaders::src("blur.wgsl")),
             });
             let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("dissolve"), bind_group_layouts: &[Some(&self.blur_layout)], immediate_size: 0 });
             self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -8517,6 +9086,41 @@ impl Gpu {
 
 /// The UI pipeline: CLASSIC `vs_ui` / `fs_ui`, or with `sharp` the REMASTER sharp HUD
 /// (`fs_ui_remaster`, the field atlas at binding 3, `UiVertex::aux`).
+/// DEBUG (#398, `Gpu::rebuild_shaders`): compile every shader source the renderer builds (each
+/// depth kind of the `DEPTH_TEX` ones) under a validation error scope. Ok(number of sources), or
+/// the first compile error.
+fn check_shaders(device: &wgpu::Device) -> Result<usize, String> {
+    use crate::shaders::{scene, src};
+    let depth = ["texture_depth_2d", "texture_depth_multisampled_2d"];
+    let mut all: Vec<(&str, String)> = vec![("shader.wgsl", scene())];
+    for f in ["grass.wgsl", "holofrost.wgsl"] {
+        all.push((f, format!("{}\n{}", scene(), src(f))));
+    }
+    for ty in depth {
+        all.push(("water.wgsl", format!("{}\n{}", scene(), src("water.wgsl").replace("DEPTH_TEX", ty))));
+        for f in ["flarevis.wgsl", "ssao.wgsl", "volfog.wgsl"] {
+            all.push((f, src(f).replace("DEPTH_TEX", ty)));
+        }
+        all.push(("vblur.wgsl", src("vblur.wgsl").replace("DEPTH_TEX", ty).replace("MAX_CARS", &VEL_MAX.to_string())));
+    }
+    all.push(("ui.wgsl", format!("{}{}", crate::revmeter::wgsl(), src("ui.wgsl"))));
+    for f in ["blur.wgsl", "trail.wgsl", "scenefrost.wgsl", "underwater.wgsl", "glow.wgsl", "studioaa.wgsl", "aa.wgsl", "taa.wgsl", "smaa.wgsl", "post.wgsl", "bloom.wgsl"] {
+        all.push((f, src(f).into_owned()));
+    }
+    for (name, text) in &all {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let _ = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(name), source: wgpu::ShaderSource::Wgsl(text.as_str().into()) });
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            // the compiler's message and the source line it quotes, without wgpu's wrapping
+            let e = e.to_string();
+            let keep = |t: &str| !t.is_empty() && t != "│" && t != "Validation Error" && t != "Caused by:" && !t.starts_with("In Device::");
+            let detail: Vec<&str> = e.lines().map(str::trim_end).filter(|l| keep(l.trim())).take(4).collect();
+            return Err(format!("{name}: {}", detail.join("\n")));
+        }
+    }
+    Ok(all.len())
+}
+
 fn ui_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat, sharp: bool) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
     ui_pipeline_for(device, color_format, sharp, None)
 }
@@ -8527,7 +9131,7 @@ fn ui_pipeline_for(device: &wgpu::Device, color_format: wgpu::TextureFormat, sha
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("ui shader"),
         // the REMASTER rev meter's spine table goes in front of the shader (revmeter.rs)
-        source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::revmeter::wgsl(), include_str!("ui.wgsl")).into()),
+        source: wgpu::ShaderSource::Wgsl(format!("{}{}", crate::revmeter::wgsl(), crate::shaders::src("ui.wgsl")).into()),
     });
     let fields = wgpu::BindGroupLayoutEntry {
         binding: 3,
@@ -8818,7 +9422,7 @@ fn fullscreen_pipeline(device: &wgpu::Device, label: &str, shader: &wgpu::Shader
 fn aa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Aa {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("aa shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("aa.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::shaders::src("aa.wgsl")),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("aa"),
@@ -8835,7 +9439,7 @@ fn aa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Aa {
 fn taa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Taa {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("taa shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("taa.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::shaders::src("taa.wgsl")),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("taa"),
@@ -8851,7 +9455,7 @@ fn taa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Taa
 fn smaa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Smaa {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("smaa shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("smaa.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::shaders::src("smaa.wgsl")),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("smaa"),
@@ -8874,7 +9478,7 @@ fn smaa_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Sm
 fn post_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Post {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("post shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("post.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::shaders::src("post.wgsl")),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("post"),
@@ -8907,7 +9511,7 @@ fn post_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Po
 fn bloom_pipeline(device: &wgpu::Device) -> Bloom {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bloom shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("bloom.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(crate::shaders::src("bloom.wgsl")),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("bloom"),
@@ -8937,7 +9541,7 @@ fn bloom_pipeline(device: &wgpu::Device) -> Bloom {
 fn ssao_pipeline(device: &wgpu::Device) -> Ssao {
     let shaders = [false, true].map(|msaa| {
         let ty = if msaa { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
-        device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("ssao shader"), source: wgpu::ShaderSource::Wgsl(include_str!("ssao.wgsl").replace("DEPTH_TEX", ty).into()) })
+        device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("ssao shader"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("ssao.wgsl").replace("DEPTH_TEX", ty).into()) })
     });
     let gtao_layouts = [false, true].map(|msaa| {
         let depth = wgpu::BindGroupLayoutEntry {
@@ -8972,7 +9576,7 @@ fn vel_blur_pipeline(device: &wgpu::Device) -> VelBlur {
         let ty = if msaa { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
         device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("velocity blur shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("vblur.wgsl").replace("DEPTH_TEX", ty).replace("MAX_CARS", &VEL_MAX.to_string()).into()),
+            source: wgpu::ShaderSource::Wgsl(crate::shaders::src("vblur.wgsl").replace("DEPTH_TEX", ty).replace("MAX_CARS", &VEL_MAX.to_string()).into()),
         })
     });
     let depth_map = wgpu::BindGroupLayoutEntry {

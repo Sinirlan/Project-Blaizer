@@ -368,9 +368,9 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
                 label_centre(b, &["h:race", "h:time"], cx, 41.0);
                 number_centre(b, &fmt_time(f), cx, 59.0);
             }
-        } else if let Some((_, ms, best)) = r.lap_flash.filter(|_| if modern { some && s.hud.lap_delay > 0 } else { info }) {
+        } else if let Some((_, ms, best, delta)) = r.lap_flash.filter(|_| if modern { some && s.hud.lap_delay > 0 } else { info }) {
             if modern {
-                msgs.push(Msg::Lap { best, ms, pb: best && pb });
+                msgs.push(Msg::Lap { best, ms, pb: best && pb, delta: delta.filter(|_| s.hud.sector_delay > 0) });
                 if time_attack && info {
                     let done = p.finished_ms.map_or(p.lap - 1, |_| p.laps);
                     splits = Some(Splits { caption: format!("LAP {done} · {}", glass_time(ms)), rows: ta_rows(r), live: false });
@@ -400,6 +400,11 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
                     split_list(r, idx, b, s.checkpoint_info == 1);
                 }
             }
+        }
+        // REMASTER (#409, design choice [I]): the delta of the time so far this lap against the best earlier lap at this
+        // checkpoint (no time shown), for "Sector delta" seconds, whatever the splits block shows
+        if let (true, true, None, Some((_, n, delta))) = (modern, some, p.finished_ms, r.sector_flash) {
+            msgs.push(Msg::Sector { n, delta });
         }
         if live_on && splits.is_none() {
             splits = Some(live_block(r, pos, s.checkpoint_info == 2));
@@ -662,7 +667,9 @@ fn plate_points(r: &RaceState, w: f32, h: f32, wobble: Option<f32>) -> Vec<(usiz
         if i == r.sess.focus || rc.progress.eliminated_ms.is_some() {
             continue;
         }
-        let p = glam::Vec3::new(rc.car.pos.x, rc.car.pos.y + 1.8 * rc.car.p.scale, -rc.car.pos.z);
+        // #374: over the car where it is drawn
+        let at = r.sess.race.view_pose(i).pos;
+        let p = glam::Vec3::new(at.x, at.y + 1.8 * rc.car.p.scale, -at.z);
         let d = p - cam.pos;
         let z = d.dot(f);
         if !(4.0..140.0).contains(&z) {

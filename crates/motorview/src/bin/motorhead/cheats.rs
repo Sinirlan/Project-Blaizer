@@ -61,7 +61,7 @@ impl Cheats {
 
     /// Size and handling feel of every car for `Race::set_car_scale`: (1.0, 1.0) off.
     pub fn car_size(&self) -> (f32, f32) {
-        if self.gulliver { (GULLIVER_SCALE, GULLIVER_FEEL) } else { (1.0, 1.0) }
+        if self.gulliver { (GULLIVER_SCALE.get(), GULLIVER_FEEL.get()) } else { (1.0, 1.0) }
     }
 
     /// Turn the cheats named in a comma separated list on (`--cheat`); the unknown names.
@@ -102,7 +102,7 @@ mod tests {
         let mut c = Cheats::default();
         assert_eq!(c.car_size(), (1.0, 1.0));
         c.type_text("gulliver");
-        assert_eq!(c.car_size(), (GULLIVER_SCALE, GULLIVER_FEEL));
+        assert_eq!(c.car_size(), (GULLIVER_SCALE.get(), GULLIVER_FEEL.get()));
         assert_eq!(c.type_text("gulliver"), Some((Cheat::Gulliver, false)));
         assert_eq!(c.car_size(), (1.0, 1.0));
     }

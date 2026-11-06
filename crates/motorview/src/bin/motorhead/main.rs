@@ -3,7 +3,7 @@
 //!
 //!   motorhead <installed_game> [--demo]
 //!   motorhead <installed_game> --shot main|single|track|car|options|graphics|sound|controls|personal|statistics|credits|loading|race|pause|pausegfx|pausesfx|pausehud|results|rankings|league|leaguetable|leagueload|leagueresults|leaguemovie out.png
-//!             [--size WxH] [--car N] [--track N] [--sim-seconds S]
+//!             [--size WxH] [--car N] [--track N] [--sim-seconds S] [--frame-hz HZ]
 //!
 //! Menus: arrows move, Enter selects, Esc goes back (a gamepad's d-pad, A and B too).
 //! Race: the control layout's keys (Keyboard.clo: arrows drive, A/S gears, Space horn,
@@ -28,6 +28,7 @@ mod menu_fx;
 mod movie;
 mod playback;
 mod proximity;
+mod rumble;
 mod stats;
 
 use front::{Display, Game, Screen};
@@ -51,7 +52,7 @@ fn parse_aa<K>(v: &str, kind: fn(&str) -> Option<K>) -> Result<(K, Option<u32>),
     Ok((kind(k).ok_or_else(|| format!("unknown anti-aliasing method {k:?}"))?, strength))
 }
 
-const USAGE: &str = "usage: motorhead [installed_game] [--demo] [--shot SCREEN out.png [--size WxH] [--knockout] [--laps N] [--time-attack [--ghost run.ghl|run.mhr] [--save-ghost out.ghl --autopilot]] [--threaded-load [--cancel-load] [--cancel-upload]] [--league] [--league-div 0-3] [--locked none|TRACK,TRACK] [--league-name TEXT] [--season-end 1-7] [--stats FILE [--stats-page 0-3]] [--hiscores DIR] [--player-name NAME] [--team TEAM] [--sound-devices NAME;NAME;.. [--sound-device NAME]] [--leagues DIR] [--demos DIR] [--car N] [--track N] [--sim-seconds S] [--mirror] [--cheat casper,gulliver] [--free-look X,Y] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--msaa 1|2|4|8] [--aa-render off|msaa|ssaa[:2x|4x|8x|16x]] [--aa-post off|fxaa|smaa|taa[:2x|4x|8x|16x]] [--colour-grade] [--no-hdr] [--tonemap neutral|aces|agx] [--exposure P] [--bloom P] [--ssao P] [--halos classic|smooth] [--flares classic|smooth] [--hud classic|modern] [--rev-meter G,I,A,S,B,T,D,R] [--hud-scale P] [--hud-margin P] [--hud-map circuit|close[,rotate]] [--hud-hide cluster,clocks,lap,pos,map,proximity,numbers,frame] [--hud-show live] [--name-plates off|flat|see-through] [--shadows classic|real] [--blur classic|velocity] [--skids off|on|detailed] [--car-models original|generated]] [--motion-blur] [--view-distance PERCENT] [--no-fill] [--no-intro] [--water on|off] [--water-reflect sky|scene] [--local-light on|off] [--texture-pack on|off] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--car-colours R,G,B/R,G,B/R,G,B] [--car-finish gloss|metallic|pearl[,F,F]]]";
+const USAGE: &str = "usage: motorhead [installed_game] [--demo] [--shot SCREEN out.png [--size WxH] [--knockout] [--laps N] [--time-attack [--ghost run.ghl|run.mhr] [--save-ghost out.ghl --autopilot]] [--threaded-load [--cancel-load] [--cancel-upload]] [--league] [--league-div 0-3] [--locked none|TRACK,TRACK] [--league-name TEXT] [--season-end 1-7] [--stats FILE [--stats-page 0-3]] [--hiscores DIR] [--player-name NAME] [--team TEAM] [--sound-devices NAME;NAME;.. [--sound-device NAME]] [--leagues DIR] [--demos DIR] [--car N] [--track N] [--sim-seconds S] [--frame-hz HZ] [--mirror] [--cheat casper,gulliver] [--free-look X,Y] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--msaa 1|2|4|8] [--aa-render off|msaa|ssaa[:2x|4x|8x|16x]] [--aa-post off|fxaa|smaa|taa[:2x|4x|8x|16x]] [--colour-grade] [--no-hdr] [--tonemap neutral|aces|agx] [--exposure P] [--bloom P] [--ssao P] [--halos classic|smooth] [--flares classic|smooth] [--hud classic|modern] [--rev-meter G,I,A,S,B,T,D,R] [--hud-scale P] [--hud-margin P] [--hud-map circuit|close[,rotate]] [--hud-hide cluster,clocks,lap,pos,map,proximity,numbers,frame,delta] [--hud-show live|sector|sector-slow] [--name-plates off|flat|see-through] [--shadows classic|real] [--blur classic|velocity] [--skids off|on|detailed] [--car-models original|generated]] [--motion-blur] [--view-distance PERCENT] [--no-fill] [--no-intro] [--trees on|off] [--water on|off] [--water-reflect sky|scene] [--local-light on|off] [--texture-pack on|off] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--car-colours R,G,B/R,G,B/R,G,B] [--car-finish gloss|metallic|pearl[,F,F]]]";
 
 struct Args {
     root: PathBuf,
@@ -60,6 +61,8 @@ struct Args {
     car: usize,
     track: usize,
     sim_seconds: f32,
+    /// race shots: the frame rate the race is stepped at (60; #374: other rates draw between physics ticks)
+    frame_hz: f32,
     demo: bool,
     /// race shots: play this recording (.mhr) back / drive with the up key held and save the
     /// recording here
@@ -79,6 +82,8 @@ struct Args {
     cancel_upload: bool,
     /// race in Time Attack (alone, with the record gaps)
     time_attack: bool,
+    /// `--hud-show sector|sector-slow`: seed a sample sector delta after the race's frames (shots only, #409)
+    sector_sample: Option<bool>,
     knockout: bool,
     /// --laps N: the shot's race length (default: the track's)
     laps: Option<u32>,
@@ -150,6 +155,8 @@ struct Args {
     texture_pack: Option<bool>,
     /// `--water`: REMASTER water surfaces on/off (off: the original water textures)
     water: Option<bool>,
+    /// `--trees`: REMASTER tree models on/off (off: the original tree cards)
+    trees: Option<bool>,
     shadow_quality: Option<ShadowQuality>,
     /// --bench N: after the shot, time N more frames of the same view
     bench: usize,
@@ -212,7 +219,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut a = Args { root: PathBuf::new(), shot: None, size: (1280, 800), car: 1, track: 1, sim_seconds: 20.0, demo: false, replay: None, playback: None, save_replay: None, ghost_demo: None, save_demo: None, ghost: None, save_ghost: None, autopilot: false, threaded_load: false, cancel_load: false, cancel_upload: false, time_attack: false, knockout: false, laps: None, league: false, league_div: None, locked: None, league_name: None, season_end: None, stats: None, stats_page: 0, mirror: false, difficulty: None, motion_blur: false, car_shading: None, car_detail: None, remaster: false, msaa: None, render_aa: None, post_aa: None, grade: false, no_hdr: false, tonemap: None, smooth_halos: None, fog_style: None, fog_tune: None, sky_hdri: None, sky_exposure: None, sky_yaw: None, no_sky_sun: false, no_sky_ambient: false, sky_ambient_tint: None, smooth_flares: None, retro_signs: None, car_shadows: None, velocity_blur: None, skids: None, ssao: None, generated_cars: None, no_fill: false, no_intro: false, prefetch: false, light_shadows: None, grass: None, grass_range: None, car_lod_distance: None, fog_strength: None, water_ssr: None, local_light: None, texture_pack: None, water: None, shadow_quality: None, bench: 0, bench_move: false, modern_hud: None, name_plates: None, modern_menu: None, menu_stretch: None, hud: Default::default(), exposure: None, bloom: None, view_distance: None, car_colours: None, car_finish: None, free_look: None, record_audio: None, engine_sound: false, menu_time: 0.5, pause_hold: None, load_progress: None, mode_dissolve: None, confirm_exit: false, save_requester: None, cheats: None, keep_display: false, glyphs: None, font_specimen: None, rev_meter_sheet: None, rev_meter: None, keys: Vec::new(), type_text: None, hiscores: None, leagues: None, demos: None, player_name: None, team: None, sound_devices: None, sound_device: None };
+    let mut a = Args { root: PathBuf::new(), shot: None, size: (1280, 800), car: 1, track: 1, sim_seconds: 20.0, frame_hz: 60.0, demo: false, replay: None, playback: None, save_replay: None, ghost_demo: None, save_demo: None, ghost: None, save_ghost: None, autopilot: false, threaded_load: false, cancel_load: false, cancel_upload: false, time_attack: false, sector_sample: None, knockout: false, laps: None, league: false, league_div: None, locked: None, league_name: None, season_end: None, stats: None, stats_page: 0, mirror: false, difficulty: None, motion_blur: false, car_shading: None, car_detail: None, remaster: false, msaa: None, render_aa: None, post_aa: None, grade: false, no_hdr: false, tonemap: None, smooth_halos: None, fog_style: None, fog_tune: None, sky_hdri: None, sky_exposure: None, sky_yaw: None, no_sky_sun: false, no_sky_ambient: false, sky_ambient_tint: None, smooth_flares: None, retro_signs: None, car_shadows: None, velocity_blur: None, skids: None, ssao: None, generated_cars: None, no_fill: false, no_intro: false, prefetch: false, light_shadows: None, grass: None, grass_range: None, car_lod_distance: None, fog_strength: None, water_ssr: None, local_light: None, texture_pack: None, water: None, trees: None, shadow_quality: None, bench: 0, bench_move: false, modern_hud: None, name_plates: None, modern_menu: None, menu_stretch: None, hud: Default::default(), exposure: None, bloom: None, view_distance: None, car_colours: None, car_finish: None, free_look: None, record_audio: None, engine_sound: false, menu_time: 0.5, pause_hold: None, load_progress: None, mode_dissolve: None, confirm_exit: false, save_requester: None, cheats: None, keep_display: false, glyphs: None, font_specimen: None, rev_meter_sheet: None, rev_meter: None, keys: Vec::new(), type_text: None, hiscores: None, leagues: None, demos: None, player_name: None, team: None, sound_devices: None, sound_device: None };
     let mut root = None;
     while let Some(x) = it.next() {
         let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
@@ -230,6 +237,7 @@ fn parse_args() -> Result<Args, String> {
             "--car" => a.car = val("--car")?.parse().map_err(|_| "bad --car")?,
             "--track" => a.track = val("--track")?.parse().map_err(|_| "bad --track")?,
             "--sim-seconds" => a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?,
+            "--frame-hz" => a.frame_hz = val("--frame-hz")?.parse::<f32>().ok().filter(|&h| (1.0..=1000.0).contains(&h)).ok_or("bad --frame-hz")?,
             "--demo" => a.demo = true,
             "--replay" => a.replay = Some(val("--replay")?.into()),
             "--playback" => a.playback = Some(val("--playback")?),
@@ -386,6 +394,14 @@ fn parse_args() -> Result<Args, String> {
                 let (lo, hi) = RemasterView::FOG_STRENGTH;
                 a.fog_strength = Some(val("--fog-strength")?.parse::<u32>().map_err(|e| e.to_string())?.clamp(lo, hi));
             }
+            "--trees" => {
+                let v = val("--trees")?;
+                a.trees = Some(match v.to_ascii_lowercase().as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("unknown trees {v} (on|off)")),
+                });
+            }
             "--water" => {
                 let v = val("--water")?;
                 a.water = Some(match v.to_ascii_lowercase().as_str() {
@@ -490,6 +506,7 @@ fn parse_args() -> Result<Args, String> {
                         "proximity" => h.proximity = false,
                         "numbers" => h.map_numbers = false,
                         "frame" => h.plate_frame = false,
+                        "delta" => h.sector_delay = 0,
                         _ => return Err(format!("unknown --hud-hide element {e}")),
                     }
                 }
@@ -498,6 +515,8 @@ fn parse_args() -> Result<Args, String> {
                 for e in val("--hud-show")?.split(',') {
                     match e.to_ascii_lowercase().as_str() {
                         "live" => a.hud.live_gaps = true,
+                        "sector" => a.sector_sample = Some(false),
+                        "sector-slow" => a.sector_sample = Some(true),
                         _ => return Err(format!("unknown --hud-show element {e}")),
                     }
                 }
@@ -691,6 +710,7 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
     r.car_lod_distance = a.car_lod_distance.unwrap_or(r.car_lod_distance);
     r.fog_strength = a.fog_strength.unwrap_or(r.fog_strength);
     r.water = a.water.unwrap_or(r.water);
+    r.tree_models = a.trees.unwrap_or(r.tree_models);
     r.water_ssr = a.water_ssr.unwrap_or(r.water_ssr);
     r.local_light = a.local_light.unwrap_or(r.local_light);
     r.texture_pack = a.texture_pack.unwrap_or(r.texture_pack);
@@ -853,6 +873,8 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
             game.screen = Screen::Race;
             game.prepare(&mut gpu);
             let limit = if screen == Screen::Results { 3600.0 } else { a.sim_seconds };
+            // the race's frames at `--frame-hz` (60 by default: the loading above stays at 1/60)
+            let dt = 1.0 / a.frame_hz;
             let mut t = 0.0;
             while t < limit && game.screen == Screen::Race {
                 game.update(dt, &keys);
@@ -864,6 +886,10 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
                 if (a.motion_blur && t > limit - 10.0 * dt || (taa || volumetric) && t > limit - 16.0 * dt) && t + dt < limit {
                     gpu.offscreen(w, h, |g, enc, target, depth| game.render(g, enc, target, depth, (w, h)));
                 }
+            }
+            // `--hud-show sector`: sector 1 ahead of the best lap with a best-lap message; `sector-slow`: sector 2 behind it
+            if let (Some(slow), Some(r)) = (a.sector_sample.filter(|_| a.hud.sector_delay > 0), game.race.as_mut()) {
+                (r.sector_flash, r.lap_flash) = if slow { (Some((4.0, 2, 1_234)), None) } else { (Some((4.0, 1, -214)), Some((4.0, 83_120, true, Some(-540)))) };
             }
             if matches!(screen, Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam) {
                 game.key(KeyCode::Escape);
@@ -1240,7 +1266,7 @@ impl ApplicationHandler for App {
         self.game.monitors = self.monitors.iter().enumerate().map(|(i, m)| m.name().unwrap_or_else(|| format!("Screen {}", i + 1))).collect();
         let (w, h) = self.game.settings.display.size;
         let window = Arc::new(
-            el.create_window(Window::default_attributes().with_title(format!("Motorhead {}", motor_version::DISPLAY)).with_inner_size(winit::dpi::PhysicalSize::new(w, h)))
+            el.create_window(motorview::app_icon::apply(Window::default_attributes()).with_title(format!("Motorhead {}", motor_version::DISPLAY)).with_inner_size(winit::dpi::PhysicalSize::new(w, h)))
                 .expect("create window"),
         );
         let inst = instance();
@@ -1516,6 +1542,8 @@ fn main() {
         }
         return;
     }
+    // #398: live values tuned on motorview's Constants page (none: the source's values)
+    motorview::consts::load_overrides();
     let mut game = Game::new(args.root.clone());
     game.demo = args.demo;
     game.prefetch = true;

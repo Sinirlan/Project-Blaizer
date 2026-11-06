@@ -45,15 +45,14 @@ pub enum Delta {
     Scale { axis: usize, dir: Vec3, factor: f32 },
 }
 
-/// Which of X, Y, Z the piece can use in `mode`. Hills sit on the ground (no height to move, only
-/// yaw), skirts have no position. Scale: blocks all sides, walls length and height, plants one
-/// uniform size (any axis), flat pieces their plan.
+/// Which of X, Y, Z the piece can use in `mode`. Hills turn about Y only, skirts have no position. Scale: blocks all sides, walls length and height, plants and models one
+/// uniform size (any axis; a model also turns about Y), flat pieces their plan.
 pub fn enabled(p: &Piece, mode: Mode) -> [bool; 3] {
     match (mode, &p.shape) {
         (Mode::Handles, _) | (_, Shape::Skirt { .. }) => [false; 3],
-        (Mode::Move, Shape::Hill { .. }) => [true, false, true],
         (Mode::Rotate, Shape::Hill { .. }) => [false, true, false],
         (Mode::Rotate, Shape::Plant { .. }) => [false; 3],
+        (Mode::Rotate, Shape::Model { .. }) => [false, true, false],
         (Mode::Scale, Shape::Wall { .. }) => [true, true, false],
         (Mode::Scale, Shape::Ground { .. }) => [true, false, true],
         _ => [true; 3],
@@ -106,9 +105,20 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
     };
     let put = |p: &mut Piece, i: usize, to: Vec3| {
         set_handle(p, i, to);
-        if let (true, Shape::Ground { points }) = (pin, &mut p.shape) {
-            if let Some(q) = points.get_mut(i).filter(|q| q.1.is_none()) {
-                q.1 = Some(to.y);
+        if pin {
+            // a draped point gets a height once the change has a vertical part
+            match &mut p.shape {
+                Shape::Ground { points } => {
+                    if let Some(q) = points.get_mut(i).filter(|q| q.1.is_none()) {
+                        q.1 = Some(to.y);
+                    }
+                }
+                Shape::Hill { points, .. } => {
+                    if let Some(q) = points.get_mut(i).filter(|q| q.1.is_none()) {
+                        q.1 = Some(to.y);
+                    }
+                }
+                _ => {}
             }
         }
     };
@@ -120,7 +130,11 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
             }
         }
         Delta::Rotate(q) => {
-            if let Shape::Block { centre, yaw, pitch, roll, .. } = &mut p.shape {
+            if let Shape::Model { yaw, .. } = &mut p.shape {
+                // about Y only (the gizmo offers no other axis): the turn adds to the model's yaw
+                let (a, _, _) = q.to_euler(glam::EulerRot::YXZ);
+                *yaw = (*yaw + a.to_degrees()).rem_euclid(360.0);
+            } else if let Shape::Block { centre, yaw, pitch, roll, .. } = &mut p.shape {
                 let r = q * block_rotation(*yaw, *pitch, *roll);
                 *centre = (pv + q * (Vec3::from(*centre) - pv)).into();
                 (*yaw, *pitch, *roll) = block_angles(r);
@@ -134,7 +148,7 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
             let f = factor.clamp(0.05, 20.0);
             match &mut p.shape {
                 Shape::Block { size, .. } => size[axis] = (size[axis] * f).max(0.1),
-                Shape::Plant { scale, .. } => *scale = (*scale * f).clamp(0.05, 50.0),
+                Shape::Plant { scale, .. } | Shape::Model { scale, .. } => *scale = (*scale * f).clamp(0.05, 50.0),
                 Shape::Wall { height, .. } if axis == 1 => *height = (*height * f).max(0.1),
                 Shape::Hill { height, .. } if axis == 1 => *height = (*height * f).max(0.5),
                 Shape::Skirt { .. } => {}
@@ -148,6 +162,32 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
         }
     }
     p
+}
+
+/// `apply` for a hill whose draped ridge points are shown at `crest` (the heights of the last mesh,
+/// one per point): they are pinned there for the change and freed again where it left them alone, so a
+/// point stays draped unless the change had a vertical part. Other pieces, or a `crest` of the wrong
+/// length, go to `apply` as they are.
+pub fn apply_crest(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32, crest: &[f32]) -> Piece {
+    let Shape::Hill { points, .. } = &base.shape else { return apply(base, delta, vertex, y) };
+    if crest.len() != points.len() {
+        return apply(base, delta, vertex, y);
+    }
+    let mut baked = base.clone();
+    if let Shape::Hill { points: bp, .. } = &mut baked.shape {
+        for (q, &c) in bp.iter_mut().zip(crest) {
+            q.1.get_or_insert(c);
+        }
+    }
+    let mut out = apply(&baked, delta, vertex, y);
+    if let Shape::Hill { points: op, .. } = &mut out.shape {
+        for ((o, b), &c) in op.iter_mut().zip(points).zip(crest) {
+            if b.1.is_none() && o.1.is_some_and(|v| (v - c).abs() < 1e-3) {
+                o.1 = None;
+            }
+        }
+    }
+    out
 }
 
 /// Gizmo length for a pivot seen from `eye`.
@@ -424,6 +464,32 @@ mod tests {
     }
 
     #[test]
+    fn a_hill_moves_up_and_pins_only_what_moved() {
+        let p = piece("Piece hill Texture A Point 0 0 Point 10 0 Point 20 0 Height 4 Width 6\n");
+        assert_eq!(enabled(&p, Mode::Move), [true; 3]);
+        let crest = [5.0, 7.0, 9.0];
+        let pts = |q: Piece| match q.shape {
+            Shape::Hill { points, .. } => points,
+            _ => panic!(),
+        };
+        // one vertex up 3: it gets its meshed height + 3, the others stay draped
+        let q = pts(apply_crest(&p, Delta::Move(Vec3::new(0.0, 3.0, 0.0)), Some(1), 0.0, &crest));
+        assert_eq!((q[0].1, q[1].1, q[2].1), (None, Some(10.0), None));
+        // the whole piece up 3: every point pins at its own meshed height + 3
+        let q = pts(apply_crest(&p, Delta::Move(Vec3::new(0.0, 3.0, 0.0)), None, 0.0, &crest));
+        assert_eq!((q[0].1, q[1].1, q[2].1), (Some(8.0), Some(10.0), Some(12.0)));
+        // a sideways move or a yaw leaves them draped
+        let q = pts(apply_crest(&p, Delta::Move(Vec3::new(4.0, 0.0, 2.0)), None, 0.0, &crest));
+        assert!(q.iter().all(|p| p.1.is_none()) && q[0].0 == [4.0, 2.0]);
+        let q = pts(apply_crest(&p, Delta::Rotate(Quat::from_rotation_y(0.7)), None, 0.0, &crest));
+        assert!(q.iter().all(|p| p.1.is_none()));
+        // a pinned point keeps following a vertical move
+        let p = piece("Piece hill Texture A Point 0 0 2 Point 10 0 Height 4 Width 6\n");
+        let q = pts(apply_crest(&p, Delta::Move(Vec3::new(0.0, -1.0, 0.0)), Some(0), 0.0, &[2.0, 7.0]));
+        assert_eq!((q[0].1, q[1].1), (Some(1.0), None));
+    }
+
+    #[test]
     fn yaw_keeps_ground_draped() {
         let p = piece("Piece ground Texture A Point 0 0 Point 10 0 Point 10 10\n");
         let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(0.7)), None, 0.0);
@@ -461,12 +527,25 @@ mod tests {
     }
 
     #[test]
+    fn a_model_turns_about_y_and_scales_uniformly() {
+        let p = piece("Piece model Name Tree-01-1 Centre 3 1 4 Scale 2 Yaw 350\n");
+        assert_eq!(enabled(&p, Mode::Rotate), [false, true, false]);
+        let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(30f32.to_radians())), None, 0.0);
+        let Shape::Model { yaw, centre, scale: sc, .. } = q.shape else { panic!() };
+        assert!((yaw - 20.0).abs() < 1e-3 && centre == [3.0, 1.0, 4.0] && sc == 2.0, "{yaw}");
+        for axis in 0..3 {
+            let Shape::Model { scale: k, yaw, .. } = scale(&p, axis, 2.0).shape else { panic!() };
+            assert_eq!((k, yaw), (4.0, 350.0));
+        }
+    }
+
+    #[test]
     fn scaling_a_hill_changes_its_height_or_plan() {
         let p = piece("Piece hill Texture A Point 0 0 Point 10 0 Height 4 Width 6\n");
         let Shape::Hill { height, .. } = scale(&p, 1, 2.0).shape else { panic!() };
         assert_eq!(height, 8.0);
         let Shape::Hill { points, .. } = scale(&p, 0, 2.0).shape else { panic!() };
-        assert_eq!(points, vec![[-5.0, 0.0], [15.0, 0.0]]);
+        assert_eq!(points.iter().map(|q| q.0).collect::<Vec<_>>(), vec![[-5.0, 0.0], [15.0, 0.0]]);
     }
 
     #[test]

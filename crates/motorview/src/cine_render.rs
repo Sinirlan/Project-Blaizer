@@ -207,7 +207,7 @@ struct Sound {
 impl Sound {
     fn new(root: &Path, seq: &Sequence, sess: &Session, fps: u32) -> Sound {
         let mixer = motor_audio::Audio::silent();
-        mixer.with(|m| m.master = MASTER);
+        mixer.with(|m| m.master = MASTER.get());
         let mut race = RaceAudio::new(root, mixer.share());
         race.start(seq.race.track, &sess.race);
         Sound { mixer, race, doppler: seq.audio.doppler, pcm: Vec::new(), buf: Vec::new(), heard: None, fps }

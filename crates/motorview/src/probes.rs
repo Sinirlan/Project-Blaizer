@@ -24,22 +24,48 @@ pub const SIDE: usize = CELLS as usize + 1;
 pub const BRICK: f32 = STEP * CELLS as f32;
 /// Rays per probe [APPROX: design choice; irradiance is low-frequency].
 pub const RAYS: usize = 64;
-/// Ray length, metres: anything further counts as sky [APPROX].
-pub const MAX_T: f32 = 150.0;
-/// A probe whose upward rays (`UP_CONE`) meet a back face first more often than this is under
-/// or inside geometry; its value comes from its neighbours. Upward rays only, because the
-/// world's walls are one-sided: a big wall facing away covers half of any probe's sphere with
-/// back faces, but at most half of its upward cone, while the ground seen from below covers
-/// all of it [APPROX: design choice; the usual test, a quarter of all rays, assumes closed meshes].
-pub const INVALID_BACK: f32 = 0.75;
-/// The upward cone of the inside test: ray direction y above this (a quarter of the sphere).
-const UP_CONE: f32 = 0.5;
+// Ray length, metres: anything further counts as sky [APPROX].
+motor_tune::tunable! {
+    /// Light probe ray length: anything further counts as sky [APPROX]. The probe cache key hashes it, so a change rebakes.
+    /// range: 10..1000
+    /// unit: m
+    /// applies: reload
+    /// area: Graphics/Probes
+    pub MAX_T: f32 = 150.0;
+}
+// A probe whose upward rays (`UP_CONE`) meet a back face first more often than this is under
+// or inside geometry; its value comes from its neighbours. Upward rays only, because the
+// world's walls are one-sided: a big wall facing away covers half of any probe's sphere with
+// back faces, but at most half of its upward cone, while the ground seen from below covers
+// all of it [APPROX: design choice; the usual test, a quarter of all rays, assumes closed meshes].
+motor_tune::tunable! {
+    /// A probe whose upward rays meet a back face first more often than this share is under or inside geometry; its value comes from its neighbours [APPROX].
+    /// range: 0..1
+    /// applies: reload
+    /// area: Graphics/Probes
+    pub INVALID_BACK: f32 = 0.75;
+}
+// The upward cone of the inside test: ray direction y above this (a quarter of the sphere).
+motor_tune::tunable! {
+    /// The upward cone of the inside test: ray direction y above this.
+    /// range: 0..1
+    /// applies: reload
+    /// area: Graphics/Probes
+    UP_CONE: f32 = 0.5;
+}
 const GAMMA: f32 = 2.2;
 /// Rays per probe towards the sun (#192), spread over a cone of `SUN_CONE` radians round it:
 /// `Probe::sun` is the share that reach the sky, so the mouth of a tunnel fades over about one
 /// probe step instead of flipping between probes [APPROX: design choice; the real sun is 0.27°].
 pub const SUN_RAYS: usize = 16;
-pub const SUN_CONE: f32 = 0.05;
+motor_tune::tunable! {
+    /// Radius of the cone of rays a probe sends towards the sun [APPROX; the real sun is 0.27 degrees].
+    /// range: 0.005..0.5
+    /// unit: rad
+    /// applies: reload
+    /// area: Graphics/Probes
+    pub SUN_CONE: f32 = 0.05;
+}
 
 /// One probe: L1 SH with the cosine lobe and the basis constants folded in, so
 /// `c[0] + c[1] y + c[2] z + c[3] x` is the irradiance towards normal (x, y, z), divided by pi
@@ -61,7 +87,7 @@ impl Probe {
     pub const OPEN: Probe = Probe { vis: [1.0, 0.0, 0.0, 0.0], bounce: [[0.0; 4]; 3], back: 0.0, sun: 1.0 };
 
     pub fn valid(&self) -> bool {
-        self.back <= INVALID_BACK
+        self.back <= INVALID_BACK.get()
     }
 
     /// (sky visibility, bounced rgb) towards unit normal `n`.
@@ -273,8 +299,8 @@ impl BakeWorld {
             let d = rot * d0;
             // back faces are culled, as the world is drawn [O 05-formats "Back-face culling"]:
             // the ray goes on through them (a first hit on one still counts towards `back`)
-            let (hit, back_first) = self.bvh.cast_by(p, d, MAX_T, |t| self.normal[t].dot(d) <= 0.0);
-            if d.y > UP_CONE {
+            let (hit, back_first) = self.bvh.cast_by(p, d, MAX_T.get(), |t| self.normal[t].dot(d) <= 0.0);
+            if d.y > UP_CONE.get() {
                 up += 1;
                 back += back_first as u32;
             }
@@ -291,7 +317,7 @@ impl BakeWorld {
         pr.back = back as f32 / up.max(1) as f32;
         if !sun.is_empty() {
             // the same culled world as the sky rays: a tunnel roof faces the probe below it
-            let lit = sun.iter().filter(|&&d| self.bvh.cast_by(p, d, MAX_T, |t| self.normal[t].dot(d) <= 0.0).0.is_none()).count();
+            let lit = sun.iter().filter(|&&d| self.bvh.cast_by(p, d, MAX_T.get(), |t| self.normal[t].dot(d) <= 0.0).0.is_none()).count();
             pr.sun = lit as f32 / sun.len() as f32;
         }
         pr
@@ -310,7 +336,7 @@ pub fn sun_rays(sun: Vec3) -> Vec<Vec3> {
     let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
     (0..SUN_RAYS)
         .map(|i| {
-            let r = SUN_CONE * ((i as f32 + 0.5) / SUN_RAYS as f32).sqrt();
+            let r = SUN_CONE.get() * ((i as f32 + 0.5) / SUN_RAYS as f32).sqrt();
             let t = golden * i as f32;
             (s + (a * t.cos() + b * t.sin()) * r).normalize()
         })
@@ -658,7 +684,7 @@ fn cache_key(w: &BakeWorld, bricks: &[[i32; 3]]) -> u64 {
         h ^= x as u64;
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     };
-    for x in [CACHE_VERSION as u32, STEP.to_bits(), CELLS as u32, RAYS as u32, MAX_T.to_bits(), INVALID_BACK.to_bits(), UP_CONE.to_bits(), GAMMA.to_bits(), SUN_RAYS as u32, SUN_CONE.to_bits()] {
+    for x in [CACHE_VERSION as u32, STEP.to_bits(), CELLS as u32, RAYS as u32, MAX_T.get().to_bits(), INVALID_BACK.get().to_bits(), UP_CONE.get().to_bits(), GAMMA.to_bits(), SUN_RAYS as u32, SUN_CONE.get().to_bits()] {
         put(x);
     }
     put(w.colour.len() as u32);

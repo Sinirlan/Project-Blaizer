@@ -405,6 +405,23 @@ mod tests {
         assert_eq!(r.gaps(&s, 8), [Some(-10_000), Some(-10_000), Some(0)]);
     }
 
+    /// The sector delta (#409) is `gaps()[0]`: the time into the lap against the split of the best earlier lap, with the
+    /// slots as the game writes them (+0 lap start, +1 never, +2 / +3 checkpoints, the next lap's +0 the line).
+    #[test]
+    fn sector_delta_against_the_best_earlier_lap() {
+        let s: Vec<Option<u32>> = [Some(0), None, Some(25), Some(50), Some(80), None, Some(102), Some(134), Some(156), None, Some(180)].iter().map(|x| x.map(|t| t * 1000)).collect();
+        let r = Records::default();
+        // lap 1 has no earlier lap
+        assert_eq!(r.gaps(&s, 2)[0], None);
+        assert_eq!(r.gaps(&s, 4)[0], None);
+        // lap 2 against lap 1: sector 1 22 s vs 25 s, sectors 1 + 2 54 s vs 50 s, the line 76 s vs 80 s
+        assert_eq!(r.gaps(&s, 6)[0], Some(-3000));
+        assert_eq!(r.gaps(&s, 7)[0], Some(4000));
+        assert_eq!(r.gaps(&s, 8)[0], Some(-4000));
+        // lap 3 against the best of laps 1 and 2 (lap 2): 24 s vs 22 s
+        assert_eq!(r.gaps(&s, 10)[0], Some(2000));
+    }
+
     fn entry(name: &str, ms: u32) -> Entry {
         Entry { name: name.into(), car: "TITAN".into(), lap_ms: ms, race_ms: ms, ..Entry::default() }
     }

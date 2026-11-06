@@ -467,7 +467,8 @@ impl Playback {
             sess.race.step_as(h, Input::default(), None);
         }
         let ms = demo::race_ms(&sess.race);
-        if let Some(s) = demo.state(block, ms) {
+        // #374: the recorded car is posed at the view time (the other cars are drawn up to a tick behind the clock)
+        if let Some(s) = demo.state(block, demo::view_ms(&sess.race)) {
             demo::drive_remote(&mut sess.race.racers[player], &s, h, &sess.race.world.materials);
         }
         self.key(&sess.race, ms);

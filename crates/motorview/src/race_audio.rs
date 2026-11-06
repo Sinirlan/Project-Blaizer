@@ -13,9 +13,16 @@ use motor_sim::world::MatSound;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Engine pitch from rpm (0x483efe): rpm * 0.00017 + 0.31746.
-const PITCH_PER_RPM: f32 = 0.00017;
-const PITCH_BASE: f32 = 0.31746;
+motor_tune::tunable! {
+    /// Engine pitch slope: pitch = rpm x this + `PITCH_BASE` (0x483efe) [O].
+    /// range: 0..0.001
+    /// area: Audio/Engine
+    PITCH_PER_RPM: f32 = 0.00017;
+    /// Engine pitch at 0 rpm (0x483efe) [O].
+    /// range: 0..1
+    /// area: Audio/Engine
+    PITCH_BASE: f32 = 0.31746;
+}
 /// Load-time volumes of the six engine samples (0x483630..0x48379d: 0x4c490c = 1.5,
 /// 0x4c4910 = 1.0, 0x4c4914 = 0.9, the R channels x0.8 where noted).
 const ENGINE_SAMPLES: [(&str, f32, f32); 6] = [
@@ -26,44 +33,92 @@ const ENGINE_SAMPLES: [(&str, f32, f32); 6] = [
     ("gasrtl.wav", 0.9, -1.0),
     ("gasrtr.wav", 0.9, 1.0),
 ];
-/// Loop-sample boost relative to the one-shots (0x4d83a7 = 1.8).
-const LOOP_GAIN: f32 = 1.8;
-/// `b` of the engine update (P+0xc28, 0x483d7b): fades the four L/R loops in. Only the loader
-/// writes it (0 at 0x483cbd), so the loops never sound (07-audio 7.2) [D].
-const LOOP_FADE: f32 = 0.0;
-/// Pitch slope of the other cars' engines (0x4d835f; the car you hear: 0.00017).
-const AI_PITCH_PER_RPM: f32 = 0.00016512;
+motor_tune::tunable! {
+    /// Loop-sample boost relative to the one-shots (0x4d83a7 = 1.8) [O].
+    /// range: 0..4
+    /// area: Audio/Engine
+    LOOP_GAIN: f32 = 1.8;
+    /// `b` of the engine update (P+0xc28, 0x483d7b): fades the four L/R loops in. Only the loader
+    /// writes it (0 at 0x483cbd), so the loops never sound (07-audio 7.2) [D].
+    /// range: 0..1
+    /// area: Audio/Engine
+    LOOP_FADE: f32 = 0.0;
+    /// Pitch slope of the other cars' engines (0x4d835f; the car you hear: `PITCH_PER_RPM`) [O].
+    /// range: 0..0.001
+    /// area: Audio/Engine
+    AI_PITCH_PER_RPM: f32 = 0.00016512;
+    /// Level of the simulated engine's loops (baked to a 0.9 peak) [design choice, tuned by ear].
+    /// range: 0..3
+    /// area: Audio/Engine
+    SIM_VOLUME: f32 = 1.0;
+}
 /// slide1.wav's loop (0x483596: start 9952, end 1 = to the sample's end [I]).
 const SLIDE1_LOOP: Option<(usize, usize)> = Some((9952, usize::MAX));
-/// Level of the simulated engine's loops (baked to a 0.9 peak) [design choice, tuned by ear].
-const SIM_VOLUME: f32 = 1.0;
-/// World hit impulse (kg m/s) from which SndHardImpulse plays instead of SndWeakImpulse
-/// (0x4d83e7); the weak sound's volume is `volume * impulse / HARD_IMPULSE * HIT_GAIN` (0x4d83ef).
-const HARD_IMPULSE: f32 = 16500.0;
-/// Level factor of the hit sounds (0x4c4900, 0x4c4904).
-const HIT_GAIN: f32 = 0.7;
-/// extra gain of the `ObjectEnvSound` voices over the `EnvSound` points [design choice: at the
-/// .esd volumes the passing aircraft were barely audible next to the engines]
-const OBJECT_GAIN: f32 = 1.0;
-/// Stereo offset of a scrape at the left (hull points 0, 3) or right of the car (0x4844f7).
-const SCRAPE_PAN: f32 = 0.7;
-/// Overall level: the game's sample volumes go up to 1.8, so keep headroom.
-pub const MASTER: f32 = 0.45;
-/// REMASTER cine: distances (m) over which the car you hear fades when the camera is outside it
-/// (the other cars: 10..100) [design choice, tuned by ear].
-const FOCUS_NEAR: f32 = 10.0;
-const FOCUS_FAR: f32 = 150.0;
-/// REMASTER cine: the level `place` gives a source straight ahead (spread 0.6 / 0.6), so the car
-/// you hear keeps its game level when it is close in front of the camera.
-const AHEAD_LEVEL: f32 = 0.6;
-/// REMASTER cine Doppler: the speed of sound (game units are metres), the smoothing time of the
-/// approach speed and the pitch factor's range.
-const SOUND_SPEED: f32 = 343.0;
-const DOPPLER_SMOOTH: f32 = 0.05;
-const DOPPLER_RANGE: (f32, f32) = (0.5, 2.0);
+motor_tune::tunable! {
+    /// World hit impulse from which SndHardImpulse plays instead of SndWeakImpulse (0x4d83e7); the
+    /// weak sound's volume is `volume x impulse / this x HIT_GAIN` (0x4d83ef) [O].
+    /// range: 1000..60000
+    /// unit: kg m/s
+    /// area: Audio/Hits
+    HARD_IMPULSE: f32 = 16500.0;
+    /// Level factor of the hit sounds (0x4c4900, 0x4c4904) [O].
+    /// range: 0..2
+    /// area: Audio/Hits
+    HIT_GAIN: f32 = 0.7;
+    /// Extra gain of the `ObjectEnvSound` voices over the `EnvSound` points [design choice: at the
+    /// .esd volumes the passing aircraft were barely audible next to the engines].
+    /// range: 0..4
+    /// area: Audio/Hits
+    OBJECT_GAIN: f32 = 1.0;
+    /// Stereo offset of a scrape at the left (hull points 0, 3) or right of the car (0x4844f7) [O].
+    /// range: 0..1
+    /// area: Audio/Hits
+    SCRAPE_PAN: f32 = 0.7;
+    /// Overall level: the game's sample volumes go up to 1.8, so keep headroom. Read when the
+    /// mixer is made.
+    /// range: 0..1.5
+    /// applies: restart
+    /// area: Audio/Engine
+    pub MASTER: f32 = 0.45;
+    /// REMASTER cine: the car you hear is at full level up to this distance when the camera is
+    /// outside it (the other cars: 10..100) [design choice, tuned by ear].
+    /// range: 0..100
+    /// unit: m
+    /// area: Audio/Cine
+    FOCUS_NEAR: f32 = 10.0;
+    /// REMASTER cine: the car you hear is silent beyond this distance when the camera is outside it
+    /// [design choice, tuned by ear].
+    /// range: 1..500
+    /// unit: m
+    /// area: Audio/Cine
+    FOCUS_FAR: f32 = 150.0;
+    /// REMASTER cine: the level `place` gives a source straight ahead (spread 0.6 / 0.6), so the car
+    /// you hear keeps its game level when it is close in front of the camera.
+    /// range: 0.05..1
+    /// area: Audio/Cine
+    AHEAD_LEVEL: f32 = 0.6;
+    /// REMASTER cine Doppler: the speed of sound (game units are metres).
+    /// range: 50..1000
+    /// unit: m/s
+    /// area: Audio/Cine
+    SOUND_SPEED: f32 = 343.0;
+    /// REMASTER cine Doppler: the smoothing time of the approach speed.
+    /// range: 0.001..1
+    /// unit: s
+    /// area: Audio/Cine
+    DOPPLER_SMOOTH: f32 = 0.05;
+    /// REMASTER cine Doppler: the lowest pitch factor.
+    /// range: 0.1..1
+    /// area: Audio/Cine
+    DOPPLER_MIN: f32 = 0.5;
+    /// REMASTER cine Doppler: the highest pitch factor.
+    /// range: 1..4
+    /// area: Audio/Cine
+    DOPPLER_MAX: f32 = 2.0;
+}
 
-fn engine_pitch(rpm: f32) -> f32 {
-    (rpm * PITCH_PER_RPM + PITCH_BASE).max(0.05)
+pub fn engine_pitch(rpm: f32) -> f32 {
+    (rpm * PITCH_PER_RPM.get() + PITCH_BASE.get()).max(0.05)
 }
 
 /// The engine's on/off levels (0x483f16, 0x484645): only gason while the driving pedal P+0xf0 is
@@ -86,7 +141,7 @@ fn engine_levels(pedal: f32, rpm: f32, in_car: bool) -> (f32, f32) {
 // CLASSIC 0x483d4c
 fn engine_volumes(on: f32, off: f32, b: f32) -> [f32; 6] {
     let b = b.clamp(0.0, 1.0);
-    let (lon, loff) = (b * on * LOOP_GAIN, b * off * LOOP_GAIN);
+    let (lon, loff) = (b * on * LOOP_GAIN.get(), b * off * LOOP_GAIN.get());
     [(1.0 - b) * on, (1.0 - b) * off, lon, lon, loff, loff]
 }
 
@@ -337,9 +392,10 @@ pub struct CineEar {
 }
 
 /// The pitch factor of a source approaching at `-v` m/s (`v` > 0: moving away).
-fn doppler_factor(v: f32) -> f32 {
+pub fn doppler_factor(v: f32) -> f32 {
     // faster than sound towards the ear (a jump): the top of the range, not a negative pitch
-    (SOUND_SPEED / (SOUND_SPEED + v).max(1.0)).clamp(DOPPLER_RANGE.0, DOPPLER_RANGE.1)
+    let (lo, hi) = (DOPPLER_MIN.get(), DOPPLER_MAX.get());
+    (SOUND_SPEED.get() / (SOUND_SPEED.get() + v).max(1.0)).clamp(lo.min(hi), hi.max(lo))
 }
 
 /// REMASTER cine: how the car you hear sounds from the camera, applied to its voices.
@@ -624,7 +680,7 @@ impl RaceAudio {
                 if c.cut || ra.doppler.len() != n_src {
                     ra.doppler = vec![None; n_src];
                 }
-                let k = 1.0 - (-dt.max(1e-6) / DOPPLER_SMOOTH).exp();
+                let k = 1.0 - (-dt.max(1e-6) / DOPPLER_SMOOTH.get().max(1e-4)).exp();
                 let racers = race.racers.iter().map(|rc| rc.car.pos);
                 let env = ra.env.iter().map(|e| e.prop.and_then(|i| race.props.props.get(i)).map_or(e.pos, |p| p.pose.pos));
                 racers.chain(env).zip(ra.doppler.iter_mut()).map(|(pos, h)| {
@@ -643,8 +699,8 @@ impl RaceAudio {
         self.focus_mix = match ear.cine {
             None => None,
             Some(_) => {
-                let (gain, pan) = if in_car { (1.0, 0.0) } else { place(me.car.pos, FOCUS_NEAR, FOCUS_FAR, 1.0) };
-                let gain = if in_car { 1.0 } else { gain / AHEAD_LEVEL };
+                let (gain, pan) = if in_car { (1.0, 0.0) } else { place(me.car.pos, FOCUS_NEAR.get(), FOCUS_FAR.get(), 1.0) };
+                let gain = if in_car { 1.0 } else { gain / AHEAD_LEVEL.get().max(0.01) };
                 Some(FocusMix { gain, pan, pitch: if in_car { 1.0 } else { dop[ear.focus] } })
             }
         };
@@ -661,12 +717,12 @@ impl RaceAudio {
                 mix[tap.index] = (tap.gain, tap.pitch);
             }
             for (v, (gain, pitch)) in sim.voices.iter().zip(mix) {
-                self.audio.set(*v, self.focus(Params { volume: gain * SIM_VOLUME * self.sfx, pitch, pan: 0.0, looping: true }));
+                self.audio.set(*v, self.focus(Params { volume: gain * SIM_VOLUME.get() * self.sfx, pitch, pan: 0.0, looping: true }));
             }
         } else {
             // CLASSIC
             let (on, off) = engine_levels(me.car.pedal, t.rpm, in_car);
-            let vols = engine_volumes(on, off, LOOP_FADE);
+            let vols = engine_volumes(on, off, LOOP_FADE.get());
             for (k, v) in ra.engine.iter().enumerate() {
                 let (_, base, pan) = ENGINE_SAMPLES[k];
                 self.set(*v, self.focus(Params { volume: vols[k] * base * 0.5, pitch, pan, looping: true }));
@@ -675,7 +731,7 @@ impl RaceAudio {
         // turbo whine: volume rpm*5.3e-5 - 0.3, pitch rpm*1.1e-4 + 0.1 (0x484063)
         self.set(ra.turbo, self.focus(Params { volume: (t.rpm * 5.3e-5 - 0.3).clamp(0.0, 1.0) * 0.6, pitch: t.rpm * 1.1e-4 + 0.1, pan: 0.0, looping: true }));
         // interior hum, in-car only: volume 0.25 * (1 - 0.3 b), pitch rpm * 2.628e-5 + 0.9 (0x4840b0)
-        let hum = if in_car { 0.25 * (1.0 - 0.3 * LOOP_FADE) } else { 0.0 };
+        let hum = if in_car { 0.25 * (1.0 - 0.3 * LOOP_FADE.get()) } else { 0.0 };
         self.set(ra.inside, Params { volume: hum, pitch: t.rpm * 2.628e-5 + 0.9, pan: 0.0, looping: true });
         // overrun backfire: one of eburst1/2 (0.9, 0x4837b0) while P+0xb0 is set and neither plays (0x4840f6)
         if me.car.overrun && !ra.burst.is_some_and(|v| self.audio.with(|m| m.is_playing(v))) {
@@ -689,7 +745,7 @@ impl RaceAudio {
             let silent = i == ear.focus || rc.progress.eliminated_ms.is_some();
             let (volume, pan) = if silent { (0.0, 0.0) } else { place(rc.car.pos, 10.0, 100.0, 0.6) };
             if let Some(v) = ra.ai.get(i).copied().flatten() {
-                self.audio.set(v, Params { volume: volume * self.sfx, pitch: (rc.telemetry.rpm * AI_PITCH_PER_RPM + PITCH_BASE).max(0.05) * dop[i], pan, looping: true });
+                self.audio.set(v, Params { volume: volume * self.sfx, pitch: (rc.telemetry.rpm * AI_PITCH_PER_RPM.get() + PITCH_BASE.get()).max(0.05) * dop[i], pan, looping: true });
             }
             // spin.wav from 36102, pitch 0.93, (slide * 0.15 + 0.1) * 0.7 while sliding (0x4845fd)
             let c = &rc.car;
@@ -707,7 +763,7 @@ impl RaceAudio {
         // ---- ambience
         for (k, e) in ra.env.iter().enumerate() {
             let pos = e.prop.and_then(|i| race.props.props.get(i)).map_or(e.pos, |p| p.pose.pos);
-            let boost = if e.prop.is_some() { OBJECT_GAIN } else { 1.0 };
+            let boost = if e.prop.is_some() { OBJECT_GAIN.get() } else { 1.0 };
             let (volume, pan) = place(pos, e.min, e.max, e.volume * 0.5 * boost);
             self.audio.set(e.voice, Params { volume: volume * self.amb, pitch: e.pitch * dop[race.racers.len() + k], pan, looping: true });
         }
@@ -778,21 +834,23 @@ impl RaceAudio {
         let mat = me.car.hit_material.and_then(|m| race.world.materials.get(m));
         let hit = me.car.world_hits[0];
         let impulse = hit.map_or(0.0, |h| h.impulse);
-        let weak = (impulse > 0.0 && impulse < HARD_IMPULSE).then(|| mat.and_then(|m| m.sound("weakimpulse")).map(|s| ((s.volume * impulse / HARD_IMPULSE * HIT_GAIN).min(1.0), 0.0)));
+        let weak = (impulse > 0.0 && impulse < HARD_IMPULSE.get()).then(|| mat.and_then(|m| m.sound("weakimpulse")).map(|s| ((s.volume * impulse / HARD_IMPULSE.get().max(1.0) * HIT_GAIN.get()).min(1.0), 0.0)));
         let weak = weak.flatten().map(|w| self.focus_vp(w));
         self.drive_hit_loop(&mut ra.weak, mat.and_then(|m| m.sound("weakimpulse")), weak);
-        if impulse >= HARD_IMPULSE {
+        // #374: a one-shot fires on a frame that ran a tick only (between ticks the flags are the last tick's)
+        let fresh = race.ticks_last_frame() > 0;
+        if fresh && impulse >= HARD_IMPULSE.get() {
             // 0x484d78 stops the previous one, then it starts again at volume * 0.7 (0x484906)
             if let Some(v) = ra.hard.take() {
                 self.audio.stop(v);
             }
             if let Some(snd) = mat.and_then(|m| m.sound("hardimpulse")) {
-                ra.hard = self.play(&snd.sample, self.focus(Params { volume: (snd.volume * HIT_GAIN).min(1.0) * self.sfx, pitch: snd.pitch.max(0.1), ..Default::default() }));
+                ra.hard = self.play(&snd.sample, self.focus(Params { volume: (snd.volume * HIT_GAIN.get()).min(1.0) * self.sfx, pitch: snd.pitch.max(0.1), ..Default::default() }));
             }
         }
         let scratch = hit.filter(|h| h.spark_anim(&race.world.materials) != 0).and_then(|h| {
             let vol = mat.and_then(|m| m.sound("scratch"))?.volume;
-            let pan = if matches!(h.point, 0 | 3) { -SCRAPE_PAN } else { SCRAPE_PAN };
+            let pan = if matches!(h.point, 0 | 3) { -SCRAPE_PAN.get() } else { SCRAPE_PAN.get() };
             let (l, r) = pan_2d(pan);
             Some(to_mixer(h.strength() * vol * l, h.strength() * vol * r))
         });
@@ -800,7 +858,7 @@ impl RaceAudio {
         self.drive_hit_loop(&mut ra.scrape, mat.and_then(|m| m.sound("scratch")), scratch);
 
         // ---- hits against props and cars (0x483d4c at 0x48451e): one shared voice
-        if let Some(b) = me.car.bump {
+        if let Some(b) = me.car.bump.filter(|_| fresh) {
             let playing = ra.body_hit.is_some_and(|(v, id)| id == b.id && self.audio.with(|m| m.is_playing(v)));
             if !playing {
                 // volume 0.5 + 0.5 * v / 30 (0x4d83f7, 0x4d83ff); the .esd volume is not used
@@ -880,8 +938,8 @@ mod tests {
         assert!(close(doppler_factor(-30.0), 343.0 / 313.0));
         assert!(close(doppler_factor(48.8), 343.0 / 391.8));
         // a jump (a cut not caught) stays within the range
-        assert_eq!(doppler_factor(-1.0e4), DOPPLER_RANGE.1);
-        assert_eq!(doppler_factor(1.0e4), DOPPLER_RANGE.0);
+        assert_eq!(doppler_factor(-1.0e4), DOPPLER_MAX.get());
+        assert_eq!(doppler_factor(1.0e4), DOPPLER_MIN.get());
     }
 
     #[test]
@@ -922,6 +980,6 @@ mod tests {
         assert!(close(on, 0.5) && close(off, 0.45));
         assert_eq!(engine_levels(0.0, 13000.0, false), (0.0, 0.9));
         // b = 0: the four L/R loops stay silent
-        assert_eq!(&engine_volumes(1.0, 0.0, LOOP_FADE)[2..], &[0.0; 4]);
+        assert_eq!(&engine_volumes(1.0, 0.0, LOOP_FADE.get())[2..], &[0.0; 4]);
     }
 }

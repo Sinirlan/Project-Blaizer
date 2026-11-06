@@ -20,6 +20,6 @@ pub mod startcam;
 pub mod tvcam;
 pub mod world;
 
-pub use car::{Car, CarParams, Input, SteerKeys, WorldHit};
-pub use session::{AiRow, Difficulty, Driver, Race, Rules};
+pub use car::{Car, CarParams, Input, Pedals, SteerKeys, WorldHit};
+pub use session::{AiRow, Difficulty, Driver, Race, Rules, ViewPose};
 pub use world::World;

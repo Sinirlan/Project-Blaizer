@@ -44,7 +44,7 @@ const NEW_LEAD: f32 = 0.2;
 const NEW_AUTO: f32 = 25.0;
 const MOUNT_OFFSET: Vec3 = Vec3::new(0.0, 1.6, -0.5);
 /// The status bar's hint while the editor has the mouse.
-pub const HINT: &str = "LMB: pick a camera, key or aim point · drag an arrow to move it · RMB drag: look · Ctrl+K camera here · Ctrl+Shift+K key here · Ctrl+P preview";
+pub const HINT: &str = "*CINE* [LMB] pick camera, key or aim point [Drag] move arrow [RMB] look [Ctrl+K] camera here [Ctrl+Shift+K] key here [Ctrl+P] preview";
 /// Gizmos: points sampled along a path, the frustum depth and a key cross as shares of the eye distance (constant
 /// size on screen) with their floors, metres.
 const PATH_POINTS: usize = 96;
@@ -219,24 +219,64 @@ impl Default for CineEdit {
     }
 }
 
-/// The install's folder of sequences.
+/// The folder of the user's sequences, `<config>/Cine` beside settings.cfg, `Ghosts` and `Replays` (`ghost::config_dir`);
+/// the install's `remaster/cine` when there is no config folder.
 pub fn dir(root: &Path) -> PathBuf {
+    dir_in(crate::ghost::config_dir(), root)
+}
+
+fn dir_in(config: Option<PathBuf>, root: &Path) -> PathBuf {
+    config.map_or_else(|| legacy_dir(root), |c| c.join("Cine"))
+}
+
+/// The old home of the sequences, `<install>/remaster/cine`: still read (a bare name, the list), never written.
+pub fn legacy_dir(root: &Path) -> PathBuf {
     root.join("remaster/cine")
 }
 
-/// The `.cine` files of the install, by name.
+/// The `.cine` files in `d`.
+fn cines_in(d: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(d).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cine"))).collect()).unwrap_or_default()
+}
+
+/// The `.cine` files of the sequences folder, then those only the install's old folder has, by name.
 pub fn list(root: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir(root)).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("cine"))).collect()).unwrap_or_default();
-    v.sort();
+    list_in(&dir(root), &legacy_dir(root))
+}
+
+fn list_in(d: &Path, legacy: &Path) -> Vec<PathBuf> {
+    let mut v = cines_in(d);
+    if legacy != d {
+        let old: Vec<PathBuf> = cines_in(legacy).into_iter().filter(|p| !v.iter().any(|q| q.file_name() == p.file_name())).collect();
+        v.extend(old);
+    }
+    v.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     v
 }
 
-/// A bare name is looked for in the install's folder (as `--cine`).
+/// A bare name is looked for in the sequences folder, then in the install's old one (as `--cine`);
+/// a name that exists in neither is a new file of the sequences folder.
 pub fn resolve(root: &Path, p: &Path) -> PathBuf {
+    resolve_in(&dir(root), &legacy_dir(root), p)
+}
+
+fn resolve_in(d: &Path, legacy: &Path, p: &Path) -> PathBuf {
     if p.exists() || p.components().count() > 1 {
         p.to_path_buf()
+    } else if !d.join(p).exists() && legacy.join(p).exists() {
+        legacy.join(p)
     } else {
-        dir(root).join(p)
+        d.join(p)
+    }
+}
+
+/// Where a sequence read from `p` is saved: a file of the install's old folder goes to the same name in the
+/// sequences folder (the install is never written), any other path stays.
+pub fn home(root: &Path, p: &Path) -> PathBuf {
+    let (d, legacy) = (dir(root), legacy_dir(root));
+    match (p.parent(), p.file_name()) {
+        (Some(par), Some(n)) if d != legacy && par == legacy => d.join(n),
+        _ => p.to_path_buf(),
     }
 }
 
@@ -246,13 +286,11 @@ pub fn open(path: &Path) -> Result<(Sequence, Vec<String>), String> {
     cine::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// A free name `trackNN[_k].cine` in the install's folder.
+/// A free name `trackNN[_k].cine` in the sequences folder (and not taken in the install's old one).
 pub fn new_path(root: &Path, track: u32) -> PathBuf {
-    let d = dir(root);
-    (1..)
-        .map(|k| d.join(if k == 1 { format!("track{track:02}.cine") } else { format!("track{track:02}_{k}.cine") }))
-        .find(|p| !p.exists())
-        .unwrap_or_else(|| d.join("new.cine"))
+    let (d, legacy) = (dir(root), legacy_dir(root));
+    let name = |k: u32| if k == 1 { format!("track{track:02}.cine") } else { format!("track{track:02}_{k}.cine") };
+    (1..).map(name).find(|n| !d.join(n).exists() && !legacy.join(n).exists()).map_or_else(|| d.join("new.cine"), |n| d.join(n))
 }
 
 /// A new sequence on `track` (the default all-AI race), its one camera where `cam` is, following the leader.
@@ -272,7 +310,7 @@ pub fn game_rot(cam: &Camera) -> Mat3 {
 
 /// Horizontal field of view (degrees) of a zoom: the inverse of `cine::fov_zoom`.
 pub fn fov_of(zoom: f32) -> f32 {
-    (2.0 * ((FOV_X * 0.5 * DEG).tan() / zoom.max(1e-3)).atan() / DEG).clamp(FOV_RANGE.0, FOV_RANGE.1)
+    (2.0 * ((FOV_X.get() * 0.5 * DEG).tan() / zoom.max(1e-3)).atan() / DEG).clamp(FOV_RANGE.0, FOV_RANGE.1)
 }
 
 /// Pitch heading bank (degrees, `Angles`) of a game-space orientation.
@@ -586,7 +624,7 @@ impl CineEdit {
                 let c = &mut seq.cameras[sel];
                 let path = matches!(c.kind, CamKind::Path { .. });
                 let fov = (cam.zoom != 1.0 || c.keys.iter().any(|k| k.fov.is_some())).then(|| (fov_of(cam.zoom) * 10.0).round() / 10.0);
-                let key = CamKey { at, eye: path.then_some(here), angles: path.then(|| angles_of(rot)), fov: fov.or((!path).then_some(FOV_X)), tcb: [0.0; 3], linear: false };
+                let key = CamKey { at, eye: path.then_some(here), angles: path.then(|| angles_of(rot)), fov: fov.or((!path).then_some(FOV_X.get())), tcb: [0.0; 3], linear: false };
                 // a key at the same time is replaced
                 match c.keys.iter().position(|k| (k.at - at).abs() < 1e-3) {
                     Some(i) => c.keys[i] = key,
@@ -1036,7 +1074,7 @@ fn file_section(ui: &mut Ui, ed: &mut CineEdit, root: &Path) {
                 ed.reqs.push(Req::Open(resolve(root, &p)));
             }
             if ui.add_enabled(ed.seq.is_some() && !ed.path_text.trim().is_empty(), egui::Button::new("save as")).clicked() {
-                let p = resolve(root, &p);
+                let p = home(root, &resolve(root, &p));
                 ed.msg = match ed.save(Some(p)) {
                     Ok(p) => format!("saved {}", p.display()),
                     Err(e) => e,
@@ -1046,25 +1084,35 @@ fn file_section(ui: &mut Ui, ed: &mut CineEdit, root: &Path) {
         if !ed.msg.is_empty() {
             ui.weak(&ed.msg);
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.strong(format!("{}", dir(root).display()));
             if ui.small_button("refresh").clicked() {
                 ed.files = None;
             }
         });
         let files = ed.files.get_or_insert_with(|| list(root)).clone();
+        let legacy = legacy_dir(root);
+        let files_legacy = dir(root) != legacy && files.iter().any(|f| f.parent() == Some(legacy.as_path()));
         if files.is_empty() {
             ui.weak("no .cine files yet");
         }
         ui.horizontal_wrapped(|ui| {
             for f in files {
-                let name = f.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                if ui.selectable_label(ed.path.as_ref() == Some(&f), name).clicked() {
+                let mut name = f.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let old = f.parent() == Some(legacy.as_path());
+                if old {
+                    name += " (old)";
+                }
+                let shown = ed.path.as_ref() == Some(&f) || (old && ed.path.as_ref() == Some(&home(root, &f)));
+                if ui.selectable_label(shown, name).clicked() {
                     ed.reqs.push(Req::Open(f));
                 }
             }
         });
         ui.weak("saving rewrites the file: comments of a hand-written one are not kept");
+        if files_legacy {
+            ui.weak("(old) = still in the install's remaster/cine; saving writes a copy to the folder above");
+        }
     });
 }
 
@@ -1432,7 +1480,7 @@ fn keys_section(ui: &mut Ui, ed: &mut CineEdit) {
                 ui.horizontal(|ui| {
                     let mut on = key.fov.is_some();
                     if ui.checkbox(&mut on, "fov").changed() {
-                        key.fov = on.then_some(FOV_X);
+                        key.fov = on.then_some(FOV_X.get());
                         ch = true;
                     }
                     if let Some(f) = key.fov.as_mut() {
@@ -1524,6 +1572,37 @@ fn shots_section(ui: &mut Ui, ed: &mut CineEdit) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cine_dirs_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn sequences_live_in_the_config_folder_with_the_install_folder_as_read_only_fallback() {
+        let base = temp("dirs");
+        let (cfg, root) = (base.join("cfg"), base.join("install"));
+        let (d, old) = (dir_in(Some(cfg.clone()), &root), legacy_dir(&root));
+        assert_eq!(d, cfg.join("Cine"));
+        assert_eq!(dir_in(None, &root), old, "no config folder: the old place");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("a.cine"), "").unwrap();
+        std::fs::write(old.join("both.cine"), "").unwrap();
+        std::fs::write(d.join("both.cine"), "").unwrap();
+        std::fs::write(d.join("b.cine"), "").unwrap();
+        std::fs::write(d.join("notes.txt"), "").unwrap();
+        let names: Vec<_> = list_in(&d, &old).iter().map(|p| (p.parent() == Some(old.as_path()), p.file_name().unwrap().to_string_lossy().into_owned())).collect();
+        assert_eq!(names, vec![(true, "a.cine".into()), (false, "b.cine".into()), (false, "both.cine".into())]);
+        // a bare name: config first, the old folder when only it has the file, else a new config file
+        assert_eq!(resolve_in(&d, &old, Path::new("both.cine")), d.join("both.cine"));
+        assert_eq!(resolve_in(&d, &old, Path::new("a.cine")), old.join("a.cine"));
+        assert_eq!(resolve_in(&d, &old, Path::new("fresh.cine")), d.join("fresh.cine"));
+        assert_eq!(resolve_in(&d, &old, Path::new("sub/x.cine")), PathBuf::from("sub/x.cine"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn game_rot_inverts_from_rot() {

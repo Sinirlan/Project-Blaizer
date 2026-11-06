@@ -8,41 +8,208 @@ use motor_sim::car::skid_step2;
 use motor_sim::props;
 use motor_sim::race::fmt_ms;
 use motor_sim::replay::{Header, Recording};
-use motor_sim::session::Rules;
+use motor_sim::session::{Rules, ViewPose};
 use motor_sim::{AiRow, Car, Difficulty, Driver, Input, Race};
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
 
-/// Env-probe height above a car's body origin, metres [design choice].
-const ENV_PROBE_HEIGHT: f32 = 0.6;
+motor_tune::tunable! {
+    /// Env-probe height above a car's body origin [design choice].
+    /// range: 0..3
+    /// unit: m
+    /// area: Camera & drive/Effects
+    ENV_PROBE_HEIGHT: f32 = 0.6;
+}
 
 /// Game space (left-handed) -> view space (right-handed): negate z.
 const FLIP: Vec3 = Vec3::new(1.0, 1.0, -1.0);
 
-/// Chase camera (0x42c540, called from the race loop 0x45a210 at 0x45c4c2). Constants in
-/// .data: look-at offset 0x4b7b60 (world space, added to the car position) and eye offset
-/// 0x4b7b6c (car space).
-const CHASE_LOOK: Vec3 = Vec3::new(0.0, 1.5, 0.0);
-const CHASE_EYE: Vec3 = Vec3::new(0.0, 2.0, -4.5);
+// The eye offsets and look-at points below are car space, game axes (x right, y up, z forward),
+// one `tunable!` per axis. Each view has an accessor that puts the three together.
+motor_tune::tunable! {
+    // Chase camera (0x42c540, called from the race loop 0x45a210 at 0x45c4c2). Constants in
+    // .data: look-at offset 0x4b7b60 (world space, added to the car position) and eye offset
+    // 0x4b7b6c (car space).
+    /// Chase camera look-at point, sideways (0x4b7b60) [O]: world space, added to the car's position.
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_LOOK_X: f32 = 0.0;
+    /// Chase camera look-at point, height above the car (0x4b7b60) [O].
+    /// range: -2..6
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_LOOK_Y: f32 = 1.5;
+    /// Chase camera look-at point, ahead of the car (0x4b7b60) [O].
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_LOOK_Z: f32 = 0.0;
+    /// Chase camera eye, sideways (0x4b7b6c) [O]: car space.
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_EYE_X: f32 = 0.0;
+    /// Chase camera eye, height above the car (0x4b7b6c) [O].
+    /// range: -1..8
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_EYE_Y: f32 = 2.0;
+    /// Chase camera eye, ahead of the car (0x4b7b6c) [O]: negative is behind. The nose-pitch drop
+    /// (`CHASE_PITCH`) is scaled by the eye's distance relative to the source's -4.5.
+    /// range: -20..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_EYE_Z: f32 = -4.5;
+    /// Chase camera looking back (rear-view key), eye sideways (0x45a210) [O].
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_BACK_EYE_X: f32 = 0.0;
+    /// Chase camera looking back, eye height above the car (0x45a210) [O].
+    /// range: -1..8
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_BACK_EYE_Y: f32 = 2.0;
+    /// Chase camera looking back, eye ahead of the car (0x45a210) [O]: the view is turned round, so it sits in front.
+    /// range: -5..20
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_BACK_EYE_Z: f32 = 5.0;
+}
+
 /// Shadow colour: polygons of colour (10, 10, 10) through the world path (0x438308), times
 /// WorldBrightness [I: ~1]. The alpha is a guess; the reference shots show a dark blob that
 /// lets the road through.
-const SHADOW_RGBA: [f32; 4] = [10.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0, 0.6];
-/// Ground plane rays run from 1 m above to 10 m below the shadow points (0x438308).
-const SHADOW_RAY_UP: f32 = 1.0;
-const SHADOW_RAY_DOWN: f32 = 10.0;
-/// Skip the shadow on ground steeper than this normal.y (0x4d2f9d).
-const SHADOW_MIN_NY: f32 = 0.8;
+const SHADOW_RGB: [f32; 3] = [10.0 / 255.0, 10.0 / 255.0, 10.0 / 255.0];
+motor_tune::tunable! {
+    /// Opacity of the blob shadow under a car [I: a guess; the reference shots show a dark blob that lets the road through].
+    /// range: 0..1
+    /// area: Camera & drive/Effects
+    SHADOW_ALPHA: f32 = 0.6;
+    /// Ground plane rays for the blob shadow start this far above the shadow points (0x438308).
+    /// range: 0..5
+    /// unit: m
+    /// area: Camera & drive/Effects
+    SHADOW_RAY_UP: f32 = 1.0;
+    /// Ground plane rays for the blob shadow end this far below the shadow points (0x438308).
+    /// range: 0..30
+    /// unit: m
+    /// area: Camera & drive/Effects
+    SHADOW_RAY_DOWN: f32 = 10.0;
+    /// Skip the blob shadow on ground steeper than this normal.y (0x4d2f9d).
+    /// range: 0..1
+    /// area: Camera & drive/Effects
+    SHADOW_MIN_NY: f32 = 0.8;
+}
 
-/// In-car camera: the car's own matrix moved 1.0 along up (0x45a210, 0x40af2c(1.0)); looking
-/// back: 1.2 up, 1.0 back, turned 180 degrees. Chase looking back: 2 up, 5 forward, turned.
-const INCAR_EYE: Vec3 = Vec3::new(0.0, 1.0, 0.0);
-const INCAR_BACK_EYE: Vec3 = Vec3::new(0.0, 1.2, -1.0);
-const CHASE_BACK_EYE: Vec3 = Vec3::new(0.0, 2.0, 5.0);
-/// Extra views not in this motor.exe build [design choice]: a far chase and a bumper camera.
-const FAR_EYE: Vec3 = Vec3::new(0.0, 3.2, -8.0);
-const FAR_LOOK: Vec3 = Vec3::new(0.0, 1.2, 0.0);
-const BUMPER_EYE: Vec3 = Vec3::new(0.0, 0.55, 2.1);
+motor_tune::tunable! {
+    // In-car camera: the car's own matrix moved 1.0 along up (0x45a210, 0x40af2c(1.0)); looking
+    // back: 1.2 up, 1.0 back, turned 180 degrees. Chase looking back: 2 up, 5 forward, turned.
+    /// In-car camera eye, sideways (0x45a210, 0x40af2c) [O]: the car's own matrix moved along its axes.
+    /// range: -2..2
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_EYE_X: f32 = 0.0;
+    /// In-car camera eye, height above the car's model origin (0x45a210, 0x40af2c(1.0)) [O].
+    /// range: -1..4
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_EYE_Y: f32 = 1.0;
+    /// In-car camera eye, ahead of the car's model origin (0x45a210) [O].
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_EYE_Z: f32 = 0.0;
+    /// In-car camera looking back, eye sideways (0x45a210) [O].
+    /// range: -2..2
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_BACK_EYE_X: f32 = 0.0;
+    /// In-car camera looking back, eye height (0x45a210) [O].
+    /// range: -1..4
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_BACK_EYE_Y: f32 = 1.2;
+    /// In-car camera looking back, eye ahead of the car (0x45a210) [O]: negative is behind; the view is turned 180 degrees.
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    INCAR_BACK_EYE_Z: f32 = -1.0;
+    // Extra views not in this motor.exe build [design choice]: a far chase and a bumper camera.
+    /// Far chase camera eye, sideways [design choice].
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_EYE_X: f32 = 0.0;
+    /// Far chase camera eye, height above the car [design choice].
+    /// range: -1..12
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_EYE_Y: f32 = 3.2;
+    /// Far chase camera eye, ahead of the car [design choice]: negative is behind.
+    /// range: -30..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_EYE_Z: f32 = -8.0;
+    /// Far chase camera look-at point, sideways [design choice]: world space, added to the car's position.
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_LOOK_X: f32 = 0.0;
+    /// Far chase camera look-at point, height above the car [design choice].
+    /// range: -2..6
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_LOOK_Y: f32 = 1.2;
+    /// Far chase camera look-at point, ahead of the car [design choice].
+    /// range: -5..5
+    /// unit: m
+    /// area: Camera & drive/Views
+    FAR_LOOK_Z: f32 = 0.0;
+    /// Bumper camera eye, sideways [design choice].
+    /// range: -2..2
+    /// unit: m
+    /// area: Camera & drive/Views
+    BUMPER_EYE_X: f32 = 0.0;
+    /// Bumper camera eye, height above the car's model origin [design choice].
+    /// range: -1..3
+    /// unit: m
+    /// area: Camera & drive/Views
+    BUMPER_EYE_Y: f32 = 0.55;
+    /// Bumper camera eye, ahead of the car's model origin [design choice].
+    /// range: -2..6
+    /// unit: m
+    /// area: Camera & drive/Views
+    BUMPER_EYE_Z: f32 = 2.1;
+}
+
+/// Three axis tunables as a vector.
+fn axes(x: &motor_tune::Tun<f32>, y: &motor_tune::Tun<f32>, z: &motor_tune::Tun<f32>) -> Vec3 {
+    Vec3::new(x.get(), y.get(), z.get())
+}
+
+/// The same at the source's values (`Default for CamTune`, the page's reset).
+fn axes_default(x: &motor_tune::Tun<f32>, y: &motor_tune::Tun<f32>, z: &motor_tune::Tun<f32>) -> Vec3 {
+    Vec3::new(x.default_value(), y.default_value(), z.default_value())
+}
+
+/// Put a vector into three axis tunables.
+fn set_axes(x: &motor_tune::Tun<f32>, y: &motor_tune::Tun<f32>, z: &motor_tune::Tun<f32>, v: Vec3) {
+    x.set(v.x);
+    y.set(v.y);
+    z.set(v.z);
+}
+
+/// The chase camera looking back: the eye's car-space offset (the view is turned round).
+fn chase_back_eye() -> Vec3 {
+    axes(&CHASE_BACK_EYE_X, &CHASE_BACK_EYE_Y, &CHASE_BACK_EYE_Z)
+}
+
+/// The in-car camera looking back (and the bumper camera, which shares it).
+fn incar_back_eye() -> Vec3 {
+    axes(&INCAR_BACK_EYE_X, &INCAR_BACK_EYE_Y, &INCAR_BACK_EYE_Z)
+}
 
 /// Camera views. The game has in-car, chase and TV cameras plus a held look-back key
 /// (mode flags 0x4b7b10, 0x704dfc, 0x704e00, 0x704e04 set in 0x45a210).
@@ -86,33 +253,67 @@ impl CamMode {
     }
 }
 
-/// A previous eye farther than this from the car is a cut (a respawn) and the chase eye starts over
-/// [design choice]. The original has no cut: its TV eye, up to 105 m out, is eased in [O, #274].
-const CUT_DISTANCE: f32 = 150.0;
+motor_tune::tunable! {
+    /// A previous eye farther than this from the car is a cut (a respawn) and the chase eye starts over
+    /// [design choice]. The original has no cut: its TV eye, up to 105 m out, is eased in [O, #274].
+    /// (The renderer's own `CUT_DISTANCE` is the motion-blur and temporal-history cut.)
+    /// range: 10..500
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CUT_DISTANCE: f32 = 150.0;
+    /// Chase eye easing per frame, horizontally: k = sqrt(60*dt) * this (0x42c540) [O]. Remaster's Chase follow
+    /// (Loose / Tight) scales it.
+    /// range: 0..1
+    /// area: Camera & drive/Chase camera
+    CHASE_K_XZ: f32 = 0.15;
+    /// Chase eye easing per frame, vertically: k = sqrt(60*dt) * this (0x42c540) [O].
+    /// range: 0..1
+    /// area: Camera & drive/Chase camera
+    CHASE_K_Y: f32 = 0.9;
+    /// How far the eased eye drops with the car's nose pitch, per unit of forward.y (0x42c540: 3.0) [O].
+    /// range: 0..10
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CHASE_PITCH: f32 = 3.0;
+    /// Largest angle the eased eye may trail behind the car's heading: pi is off, like the
+    /// original (any value from pi up is off). Chase follow Loose / Tight set their own [REMASTER design choice].
+    /// range: 0..3.15
+    /// unit: rad
+    /// area: Camera & drive/Chase camera
+    CHASE_MAX_LAG: f32 = PI;
+    /// Free look [design choice, not in the original]: the right stick's direction picks the
+    /// chase eye's yaw round the car (up = behind, down = in front looking back, right = the
+    /// car's left side), no pitch. The eye eases the short way round at this rate, and back
+    /// behind the car when the stick is released.
+    /// range: 1..40
+    /// unit: 1/s
+    /// area: Camera & drive/Chase camera
+    ORBIT_RATE: f32 = 14.0;
+    /// Free look [design choice]: within this angle of straight up the eye stays behind the car.
+    /// range: 0..1.5707964
+    /// unit: rad
+    /// area: Camera & drive/Chase camera
+    ORBIT_HOLD: f32 = 20.0 * PI / 180.0;
+    /// Chase eye pull-in [design choice]: the gap kept in front of a wall.
+    /// range: 0..3
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CAM_MARGIN: f32 = 0.35;
+    /// Chase eye pull-in [design choice]: the closest the eye may come to the look-at point.
+    /// range: 0..5
+    /// unit: m
+    /// area: Camera & drive/Chase camera
+    CAM_MIN: f32 = 1.0;
+    /// Chase eye pull-in [design choice]: the rate the eye eases back out at once the wall is gone.
+    /// range: 0..50
+    /// unit: 1/s
+    /// area: Camera & drive/Chase camera
+    CAM_OUT_RATE: f32 = 4.0;
+}
 
-/// Eye easing per frame: k = sqrt(60*dt) * 0.15 horizontally, * 0.9 vertically.
-const CHASE_K_XZ: f32 = 0.15;
-const CHASE_K_Y: f32 = 0.9;
-/// How far the eased eye drops with the car's nose pitch, per unit of forward.y (0x42c540: 3.0).
-const CHASE_PITCH: f32 = 3.0;
-/// Largest angle the eased eye may trail behind the car's heading, radians: off (pi) like the
-/// original, Chase follow Loose / Tight set their own [REMASTER design choice].
-const CHASE_MAX_LAG: f32 = PI;
-/// Free look [design choice, not in the original]: the right stick's direction picks the
-/// chase eye's yaw round the car (up = behind, down = in front looking back, right = the
-/// car's left side), no pitch. Within ORBIT_HOLD (radians) of straight up the eye stays
-/// behind the car. The eye eases the short way round with rate ORBIT_RATE (1/s) and back
-/// behind the car when the stick is released.
-const ORBIT_RATE: f32 = 14.0;
-const ORBIT_HOLD: f32 = 20.0 * PI / 180.0;
-/// Chase eye pull-in [design choice]: gap kept in front of a wall, closest the eye may come
-/// to the look-at point (metres), and the rate (1/s) it eases back out at.
-const CAM_MARGIN: f32 = 0.35;
-const CAM_MIN: f32 = 1.0;
-const CAM_OUT_RATE: f32 = 4.0;
-
-/// The camera offsets and easing above in one struct, so motorview's tuning window (F11)
-/// can edit them live. The default is the values above; the game never changes it.
+/// The camera offsets and easing above in one struct: the values of one frame. `live()` reads the
+/// tunables (the Constants page, the F11 Camera page and `tune.cfg` all edit those); `Default` is
+/// the source's values, the Camera page's reset.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CamTune {
     pub chase_eye: Vec3,
@@ -129,22 +330,86 @@ pub struct CamTune {
     pub out_rate: f32,
 }
 
+impl CamTune {
+    /// The camera values now.
+    pub fn live() -> CamTune {
+        CamTune {
+            chase_eye: axes(&CHASE_EYE_X, &CHASE_EYE_Y, &CHASE_EYE_Z),
+            chase_look: axes(&CHASE_LOOK_X, &CHASE_LOOK_Y, &CHASE_LOOK_Z),
+            far_eye: axes(&FAR_EYE_X, &FAR_EYE_Y, &FAR_EYE_Z),
+            far_look: axes(&FAR_LOOK_X, &FAR_LOOK_Y, &FAR_LOOK_Z),
+            incar_eye: axes(&INCAR_EYE_X, &INCAR_EYE_Y, &INCAR_EYE_Z),
+            bumper_eye: axes(&BUMPER_EYE_X, &BUMPER_EYE_Y, &BUMPER_EYE_Z),
+            k_xz: CHASE_K_XZ.get(),
+            k_y: CHASE_K_Y.get(),
+            max_lag: CHASE_MAX_LAG.get(),
+            margin: CAM_MARGIN.get(),
+            min: CAM_MIN.get(),
+            out_rate: CAM_OUT_RATE.get(),
+        }
+    }
+
+    /// Put these values into the tunables (the F11 Camera page edits a copy and stores it).
+    pub fn store(&self) {
+        set_axes(&CHASE_EYE_X, &CHASE_EYE_Y, &CHASE_EYE_Z, self.chase_eye);
+        set_axes(&CHASE_LOOK_X, &CHASE_LOOK_Y, &CHASE_LOOK_Z, self.chase_look);
+        set_axes(&FAR_EYE_X, &FAR_EYE_Y, &FAR_EYE_Z, self.far_eye);
+        set_axes(&FAR_LOOK_X, &FAR_LOOK_Y, &FAR_LOOK_Z, self.far_look);
+        set_axes(&INCAR_EYE_X, &INCAR_EYE_Y, &INCAR_EYE_Z, self.incar_eye);
+        set_axes(&BUMPER_EYE_X, &BUMPER_EYE_Y, &BUMPER_EYE_Z, self.bumper_eye);
+        CHASE_K_XZ.set(self.k_xz);
+        CHASE_K_Y.set(self.k_y);
+        CHASE_MAX_LAG.set(self.max_lag);
+        CAM_MARGIN.set(self.margin);
+        CAM_MIN.set(self.min);
+        CAM_OUT_RATE.set(self.out_rate);
+    }
+
+    /// These values with a chase follow setting on top.
+    fn followed(mut self, f: Follow) -> CamTune {
+        if f == Follow::default() {
+            return self;
+        }
+        self.k_xz *= f.ease;
+        self.k_y = (self.k_y * f.ease).min(1.0);
+        self.max_lag = f.lag.unwrap_or(self.max_lag);
+        self
+    }
+}
+
 impl Default for CamTune {
     fn default() -> Self {
         CamTune {
-            chase_eye: CHASE_EYE,
-            chase_look: CHASE_LOOK,
-            far_eye: FAR_EYE,
-            far_look: FAR_LOOK,
-            incar_eye: INCAR_EYE,
-            bumper_eye: BUMPER_EYE,
-            k_xz: CHASE_K_XZ,
-            k_y: CHASE_K_Y,
-            max_lag: CHASE_MAX_LAG,
-            margin: CAM_MARGIN,
-            min: CAM_MIN,
-            out_rate: CAM_OUT_RATE,
+            chase_eye: axes_default(&CHASE_EYE_X, &CHASE_EYE_Y, &CHASE_EYE_Z),
+            chase_look: axes_default(&CHASE_LOOK_X, &CHASE_LOOK_Y, &CHASE_LOOK_Z),
+            far_eye: axes_default(&FAR_EYE_X, &FAR_EYE_Y, &FAR_EYE_Z),
+            far_look: axes_default(&FAR_LOOK_X, &FAR_LOOK_Y, &FAR_LOOK_Z),
+            incar_eye: axes_default(&INCAR_EYE_X, &INCAR_EYE_Y, &INCAR_EYE_Z),
+            bumper_eye: axes_default(&BUMPER_EYE_X, &BUMPER_EYE_Y, &BUMPER_EYE_Z),
+            k_xz: CHASE_K_XZ.default_value(),
+            k_y: CHASE_K_Y.default_value(),
+            max_lag: CHASE_MAX_LAG.default_value(),
+            margin: CAM_MARGIN.default_value(),
+            min: CAM_MIN.default_value(),
+            out_rate: CAM_OUT_RATE.default_value(),
         }
+    }
+}
+
+/// The chase follow setting of a session (REMASTER Chase follow Loose / Normal / Tight; CLASSIC and Normal
+/// are the default): scales the tuned easing and, when `lag` is set, limits how far the eye trails the heading
+/// [design choice]. The game sets it every frame; motorview leaves the default.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Follow {
+    /// factor on `CHASE_K_XZ` and `CHASE_K_Y` (the vertical one stays under 1)
+    pub ease: f32,
+    /// the largest lag in radians, None = `CHASE_MAX_LAG`
+    pub lag: Option<f32>,
+}
+
+impl Default for Follow {
+    fn default() -> Follow {
+        Follow { ease: 1.0, lag: None }
     }
 }
 
@@ -158,8 +423,8 @@ pub struct Session {
     /// the start camera flag (0x4b7b1c, set at race init): the fly-by shows while it is set and
     /// the race's `start_eye` has an eye; a camera key from the "3" on clears it (#216)
     pub fly_by: bool,
-    /// camera offsets and easing (motorview tuning window; defaults otherwise)
-    pub tune: CamTune,
+    /// chase follow setting on top of the tuned camera values (the game sets it each frame)
+    pub follow: Follow,
     /// look-back key held
     pub look_back: bool,
     /// wall pull-in of the chase eye on (`place_eye`; the Camera tab of the graphic options)
@@ -208,36 +473,81 @@ pub struct Session {
     pub sim_secs: f32,
 }
 
-/// REMASTER grass trail: a car stamps a new footprint once it has moved this far (m) or this
-/// long (s) since its last; the gap is filled along its velocity, at most this long (s).
-const TRAIL_STEP_M: f32 = 0.25;
-const TRAIL_STEP_S: f32 = 0.1;
-const TRAIL_TAIL_MAX: f32 = 0.25;
+motor_tune::tunable! {
+    /// REMASTER grass trail: a car stamps a new footprint once it has moved this far since its last [design choice].
+    /// range: 0.02..2
+    /// unit: m
+    /// area: Camera & drive/Effects
+    TRAIL_STEP_M: f32 = 0.25;
+    /// REMASTER grass trail: a car stamps a new footprint once this long has passed since its last [design choice].
+    /// range: 0.01..1
+    /// unit: s
+    /// area: Camera & drive/Effects
+    TRAIL_STEP_S: f32 = 0.1;
+    /// REMASTER grass trail: the gap since the last footprint is filled along the car's velocity, at most this long [design choice].
+    /// range: 0..1
+    /// unit: s
+    /// area: Camera & drive/Effects
+    TRAIL_TAIL_MAX: f32 = 0.25;
+    /// The finish emblem's motion is read with this many frames per second (0x44b62f → 0x456be4) [O].
+    /// range: 10..240
+    /// unit: frames/s
+    /// area: Camera & drive/Effects
+    FINISH_FPS: f32 = 60.0;
+    /// Front wheels turn by the smoothed steering times this (0x40cbb2, 0x4cf3ab) [O].
+    /// range: 0..1.5
+    /// unit: rad
+    /// area: Camera & drive/Effects
+    WHEEL_STEER: f32 = 0.7;
+}
 
-/// The finish spline is loaded with 1/60 s per frame (0x44b62f → 0x456be4) [O].
-const FINISH_FPS: f32 = 60.0;
-
-/// Front wheels turn by the smoothed steering times this (0x40cbb2, 0x4cf3ab = 0.7 rad).
-const WHEEL_STEER: f32 = 0.7;
 // Skid marks, CLASSIC (the mark code 0x446644, 08-missing-features 8.6): which wheels mark is
 // `Car::skid_marking`, the commit distance is `skid_step2`; the constants below are the rest of the original's spacing.
-/// a step² above this (12 m, 0x4d3b7d) restarts the strip; below 0.01 (0.1 m, 0x4d3b85) nothing is laid
-const SKID_RESTART2: f32 = 144.0;
-const SKID_MIN_STEP2: f32 = 0.01;
-/// strip half-width (0x4d357d = 0.1) and lift above the ground (0x4d3585 = 0.01)
-const SKID_HALF_WIDTH: f32 = 0.1;
-const SKID_LIFT: f32 = 0.01;
-/// segments kept per wheel (the ring of 50, `cmp 0x32` at 0x446734)
-const SKID_RING: usize = 50;
-/// REMASTER detailed marks [design choice]: one tile of the tread texture covers this many metres
-/// along the mark (the tread's own tile on the wheels, procgen.rs `TYRE_TILE`)
-const SKID_TILE: f32 = 0.4;
-/// the sideways speed, in multiples of the surface's limit above it, that makes a mark full strength;
-/// at the limit it is `SKID_MIN`
-const SKID_FULL: f32 = 1.0;
-const SKID_MIN: f32 = 0.3;
-/// a bend sharper than this (cosine of half the turn) is not mitred
-const SKID_MITRE_MIN: f32 = 0.7;
+motor_tune::tunable! {
+    /// Skid marks: a horizontal step² above this (12 m, 0x4d3b7d) restarts the strip [O].
+    /// range: 1..1000
+    /// unit: m²
+    /// area: Camera & drive/Skid marks
+    SKID_RESTART2: f32 = 144.0;
+    /// Skid marks: a horizontal step² below this (0.1 m, 0x4d3b85) lays nothing [O].
+    /// range: 0..1
+    /// unit: m²
+    /// area: Camera & drive/Skid marks
+    SKID_MIN_STEP2: f32 = 0.01;
+    /// Skid marks: the strip's half-width as a share of the tyre's (0x4d357d) [O].
+    /// range: 0.01..1
+    /// unit: m
+    /// area: Camera & drive/Skid marks
+    SKID_HALF_WIDTH: f32 = 0.1;
+    /// Skid marks: the strip's lift above the ground along its normal (0x4d3585) [O].
+    /// range: 0..0.2
+    /// unit: m
+    /// area: Camera & drive/Skid marks
+    SKID_LIFT: f32 = 0.01;
+    /// Skid marks: segments kept per wheel (the original's ring of 50, `cmp 0x32` at 0x446734) [O].
+    /// range: 1..500
+    /// area: Camera & drive/Skid marks
+    SKID_RING: usize = 50;
+    /// REMASTER detailed skid marks [design choice]: one tile of the tread texture covers this many metres
+    /// along the mark (the tread's own tile on the wheels, procgen.rs `TYRE_TILE`).
+    /// range: 0.05..4
+    /// unit: m
+    /// area: Camera & drive/Skid marks
+    SKID_TILE: f32 = 0.4;
+    /// REMASTER detailed skid marks [design choice]: the sideways speed, in multiples of the surface's limit
+    /// above it, that makes a mark full strength.
+    /// range: 0.05..10
+    /// area: Camera & drive/Skid marks
+    SKID_FULL: f32 = 1.0;
+    /// REMASTER detailed skid marks [design choice]: the strength of a mark at the surface's limit.
+    /// range: 0..1
+    /// area: Camera & drive/Skid marks
+    SKID_MIN: f32 = 0.3;
+    /// Skid marks: a bend sharper than this (cosine of half the turn) is not mitred [design choice].
+    /// range: 0..1
+    /// area: Camera & drive/Skid marks
+    SKID_MITRE_MIN: f32 = 0.7;
+}
 
 /// Mark colour by the surface's SkidMark kind (0..255 scale as the original stores it). CLASSIC:
 /// grass (80, 60, 20) and gravel (40, 35, 20) are literal constants of the mark code (0x44688a,
@@ -291,21 +601,39 @@ struct SkidHead {
 fn skid_mitre(a: Vec3, b: Vec3) -> Vec3 {
     let m = a + b;
     let hw = b.length();
-    if m.length() < 2.0 * hw * SKID_MITRE_MIN {
+    if m.length() < 2.0 * hw * SKID_MITRE_MIN.get() {
         return b;
     }
     m * (2.0 * hw * hw / m.length_squared())
 }
 
-/// CHEAT tribute to tron, REMASTER Neon grid (#320 phase 3, design choice): a light wall lasts this long (sim seconds)
-pub const LIGHT_WALL_LIFE: f32 = 2.5;
-/// a new wall point every this many metres or seconds, whichever comes first
-const LIGHT_WALL_STEP_M: f32 = 0.5;
-const LIGHT_WALL_STEP_S: f32 = 0.05;
-/// the wall's height (m) along the car's up axis
-pub const LIGHT_WALL_HEIGHT: f32 = 0.6;
-/// a car this far from its wall's newest point (a respawn) starts a new wall
-const LIGHT_WALL_BREAK: f32 = 12.0;
+motor_tune::tunable! {
+    /// CHEAT tribute to tron, REMASTER Neon grid (#320 phase 3, design choice): a light wall lasts this long.
+    /// range: 0.2..20
+    /// unit: s
+    /// area: Camera & drive/Effects
+    pub LIGHT_WALL_LIFE: f32 = 2.5;
+    /// Light wall: a new wall point every this many metres ...
+    /// range: 0.05..5
+    /// unit: m
+    /// area: Camera & drive/Effects
+    LIGHT_WALL_STEP_M: f32 = 0.5;
+    /// ... or this many seconds, whichever comes first.
+    /// range: 0.005..1
+    /// unit: s
+    /// area: Camera & drive/Effects
+    LIGHT_WALL_STEP_S: f32 = 0.05;
+    /// Light wall: the wall's height along the car's up axis.
+    /// range: 0.05..3
+    /// unit: m
+    /// area: Camera & drive/Effects
+    pub LIGHT_WALL_HEIGHT: f32 = 0.6;
+    /// Light wall: a car this far from its wall's newest point (a respawn) starts a new wall.
+    /// range: 1..100
+    /// unit: m
+    /// area: Camera & drive/Effects
+    LIGHT_WALL_BREAK: f32 = 12.0;
+}
 /// the followed car's wall, cyan like the grid, and the rivals', orange (gamma space)
 pub const LIGHT_WALL_YOU: [f32; 3] = [0.35, 0.9, 1.0];
 pub const LIGHT_WALL_RIVAL: [f32; 3] = [1.0, 0.45, 0.08];
@@ -321,13 +649,14 @@ struct WallPt {
 /// Add `pt` to a wall when it is `LIGHT_WALL_STEP_M` / `_S` past the newest point (a jump of `LIGHT_WALL_BREAK`
 /// starts a new wall) and drop the points older than `LIGHT_WALL_LIFE`.
 fn push_wall_point(ring: &mut std::collections::VecDeque<WallPt>, pt: WallPt) {
-    if ring.back().is_some_and(|b| b.pos.distance(pt.pos) > LIGHT_WALL_BREAK) {
+    let (brk, step_m, step_s, life) = (LIGHT_WALL_BREAK.get(), LIGHT_WALL_STEP_M.get(), LIGHT_WALL_STEP_S.get(), LIGHT_WALL_LIFE.get());
+    if ring.back().is_some_and(|b| b.pos.distance(pt.pos) > brk) {
         ring.clear();
     }
-    if ring.back().is_none_or(|b| b.pos.distance(pt.pos) >= LIGHT_WALL_STEP_M || pt.t - b.t >= LIGHT_WALL_STEP_S) {
+    if ring.back().is_none_or(|b| b.pos.distance(pt.pos) >= step_m || pt.t - b.t >= step_s) {
         ring.push_back(pt);
     }
-    while ring.front().is_some_and(|f| pt.t - f.t > LIGHT_WALL_LIFE) {
+    while ring.front().is_some_and(|f| pt.t - f.t > life) {
         ring.pop_front();
     }
 }
@@ -335,9 +664,10 @@ fn push_wall_point(ring: &mut std::collections::VecDeque<WallPt>, pt: WallPt) {
 /// One quad (six vertices, view space) per pair of neighbouring wall points, ground to `LIGHT_WALL_HEIGHT`:
 /// uv = (age 0..1 of `LIGHT_WALL_LIFE`, 0 bottom / 1 top), colour `rgb`.
 fn wall_quads<'a>(out: &mut Vec<Vertex>, pts: impl Iterator<Item = &'a WallPt>, now: f32, rgb: [f32; 3]) {
+    let (height, life) = (LIGHT_WALL_HEIGHT.get(), LIGHT_WALL_LIFE.get());
     let at = |p: &WallPt, top: bool| {
-        let x = if top { p.pos + p.up * LIGHT_WALL_HEIGHT } else { p.pos };
-        let age = ((now - p.t) / LIGHT_WALL_LIFE).clamp(0.0, 1.0);
+        let x = if top { p.pos + p.up * height } else { p.pos };
+        let age = ((now - p.t) / life).clamp(0.0, 1.0);
         Vertex { pos: (x * FLIP).into(), uv: [age, if top { 1.0 } else { 0.0 }], color: [rgb[0], rgb[1], rgb[2], 1.0], layer: -1.0, normal: [0.0; 3], env: 0.0 }
     };
     let mut prev: Option<&WallPt> = None;
@@ -369,6 +699,11 @@ pub fn cam_origin(car: &Car) -> Vec3 {
     car.pos + car.rot * Vec3::new(0.0, car.p.ride_height(), 0.0)
 }
 
+/// `cam_origin` of a car (parameters `p`) drawn at `v` (#374: the interpolated view pose, `Race::view_pose`).
+pub fn cam_origin_at(p: &motor_sim::car::CarParams, v: &ViewPose) -> Vec3 {
+    v.pos + v.rot * Vec3::new(0.0, p.ride_height(), 0.0)
+}
+
 /// CHEAT supercars / grem (0x42c8e0): the camera's rows, game space: right +x, up +z (north up), forward -y.
 const TOP_DOWN_ROT: Mat3 = Mat3::from_cols(Vec3::X, Vec3::Z, Vec3::NEG_Y);
 
@@ -396,10 +731,12 @@ pub fn lineup(player_car: u32) -> Vec<u32> {
 fn ease_eye(prev: Option<Vec3>, pos: Vec3, rot: Mat3, local: Vec3, t: &CamTune, dt: f32) -> Vec3 {
     let fwd_y = (rot * Vec3::Z).y;
     let mut off = rot * local;
-    off.y = local.y + local.z * fwd_y * (CHASE_PITCH / -CHASE_EYE.z);
+    // the drop is CHASE_PITCH at the source's eye distance and scales with the eye's distance from there on
+    off.y = local.y + local.z * fwd_y * (CHASE_PITCH.get() / (-CHASE_EYE_Z.default_value()).max(0.1));
+    let cut = CUT_DISTANCE.get();
     match prev {
         // a respawn or a cut moves the car far from the old eye: start over [design choice]
-        Some(e) if e.distance(pos) < CUT_DISTANCE => {
+        Some(e) if e.distance(pos) < cut => {
             let from = pos + (e - pos).normalize_or_zero() * local.length();
             let r = (60.0 * dt).sqrt();
             let (kxz, ky) = ((t.k_xz * r).clamp(0.05, 0.9), (t.k_y * r).clamp(0.05, 0.9));
@@ -430,7 +767,7 @@ fn ignition_eye(prev: Option<Vec3>, pos: Vec3, rot: Mat3, dt: f32) -> Vec3 {
     let off = Vec3::new(-IGNITION_BACK * fwd.x, IGNITION_UP, -IGNITION_BACK * fwd.z);
     let target = pos + Vec3::new(off.x, IGNITION_UP - IGNITION_PITCH * fwd.y, off.z);
     match prev {
-        Some(e) if e.distance(pos) < CUT_DISTANCE => {
+        Some(e) if e.distance(pos) < CUT_DISTANCE.get() => {
             let from = pos + (e - pos).normalize_or_zero() * off.length();
             let k = IGNITION_K.map(|k| 1.0 - (1.0 - k).powf(60.0 * dt));
             let d = target - from;
@@ -477,10 +814,10 @@ fn view_of(race: &Race, mode: CamMode, look_back: bool, pos: Vec3, rot: Mat3, ca
             (eye * FLIP, at * FLIP)
         }
         (CamMode::InCar, false) => fixed(t.incar_eye, fwd),
-        (CamMode::InCar | CamMode::Bumper, true) => fixed(INCAR_BACK_EYE, -fwd),
+        (CamMode::InCar | CamMode::Bumper, true) => fixed(incar_back_eye(), -fwd),
         (CamMode::Bumper, false) => fixed(t.bumper_eye, fwd),
         (_, true) => {
-            let eye = pos + cam_off.unwrap_or(rot * CHASE_BACK_EYE);
+            let eye = pos + cam_off.unwrap_or(rot * chase_back_eye());
             (eye * FLIP, (eye - fwd) * FLIP)
         }
         (mode, false) => {
@@ -509,7 +846,7 @@ fn camera_of(race: &Race, mode: CamMode, look_back: bool, pos: Vec3, rot: Mat3, 
         let (local, turn) = match (mode, look_back) {
             (CamMode::Bumper, false) => (t.bumper_eye, Vec3::ONE),
             (_, false) => (t.incar_eye, Vec3::ONE),
-            _ => (INCAR_BACK_EYE, Vec3::new(-1.0, 1.0, -1.0)),
+            _ => (incar_back_eye(), Vec3::new(-1.0, 1.0, -1.0)),
         };
         return Camera::from_rot(pos + rot * local, rot * Mat3::from_diagonal(turn), 1.0, 1.0);
     }
@@ -579,7 +916,7 @@ impl Session {
             eye: None,
             cam: CamMode::Chase,
             fly_by: true,
-            tune: CamTune::default(),
+            follow: Follow::default(),
             look_back: false,
             free_look: Vec2::ZERO,
             pull_in: true,
@@ -620,6 +957,8 @@ impl Session {
         if let Some(r) = h.player.and_then(|p| sess.race.racers.get_mut(p)) {
             r.car.manual = h.manual;
         }
+        // #374: the physics the run was made on (MHR3 names the fixed tick; older files step once per frame)
+        sess.race.set_fixed_tick(h.tick_hz);
         Ok(sess)
     }
 
@@ -674,10 +1013,12 @@ impl Session {
             .racers
             .iter()
             .zip(&self.wheels)
-            .map(|(r, &(_, radius))| {
+            .enumerate()
+            .map(|(i, (r, &(_, radius)))| {
                 let radius = radius * r.car.p.scale;
-                let ground = |w| r.car.pos + r.car.rot * Self::wheel_local(&r.car, w, radius).1;
-                (&r.car, [ground(2), ground(3)])
+                let v = self.race.view_pose(i);
+                let ground = |w| v.pos + v.rot * Self::wheel_at(&r.car.p, v.wheel_ext[w], w, radius).1;
+                (&r.car, v, [ground(2), ground(3)])
             })
             .collect();
         let skip = self.hides_car().then_some(self.focus);
@@ -693,21 +1034,24 @@ impl Session {
     fn record_trail(&mut self) {
         let now = self.sim_secs;
         let Session { race, trail, trail_last, .. } = self;
-        for (r, last) in race.racers.iter().zip(trail_last.iter_mut()) {
+        let (step_m, step_s, tail_max) = (TRAIL_STEP_M.get(), TRAIL_STEP_S.get(), TRAIL_TAIL_MAX.get().max(0.0));
+        for (i, (r, last)) in race.racers.iter().zip(trail_last.iter_mut()).enumerate() {
             let on = r.car.wheel_mat.iter().flatten().any(|&m| race.world.materials.get(m).is_some_and(|m| matches!(m.contact_anim, 2 | 3)));
-            let pos = r.car.pos * FLIP;
-            if !on || pos.distance(last.0) < TRAIL_STEP_M && now - last.1 < TRAIL_STEP_S {
+            // #374: where the car is drawn
+            let v = race.view_pose(i);
+            let pos = v.pos * FLIP;
+            if !on || pos.distance(last.0) < step_m && now - last.1 < step_s {
                 continue;
             }
-            let tail = if last.1.is_finite() { (now - last.1).clamp(0.0, TRAIL_TAIL_MAX) } else { 0.0 };
+            let tail = if last.1.is_finite() { (now - last.1).clamp(0.0, tail_max) } else { 0.0 };
             *last = (pos, now);
             let c = &r.car.p.corners;
             let half = [c.iter().map(|v| v.z.abs()).fold(0.0, f32::max), c.iter().map(|v| v.x.abs()).fold(0.0, f32::max)];
-            let fwd = r.car.rot * Vec3::Z * FLIP;
+            let fwd = v.rot * Vec3::Z * FLIP;
             let vel = r.car.world_vel() * FLIP;
             trail.push_back(TrailStamp { pos: [pos.x, pos.z], fwd: [fwd.x, fwd.z], half, vel: [vel.x, vel.z], time: now, tail, _pad: [0.0; 2] });
         }
-        while trail.front().is_some_and(|t| t.time < now - TRAIL_RELAX) {
+        while trail.front().is_some_and(|t| t.time < now - TRAIL_RELAX.get()) {
             trail.pop_front();
         }
     }
@@ -781,6 +1125,8 @@ impl Session {
     /// human's finish and best lap as they stand at the end of the run.
     pub fn recording(&mut self) -> Result<Recording, String> {
         let mut header = self.setup.clone().ok_or("this run has no setup to record")?;
+        // #374: the file names the physics the frames were stepped on, so a replay makes the same ticks
+        header.tick_hz = self.race.fixed_hz();
         let t = self.timeline.as_mut().ok_or("no timeline")?;
         if !t.whole() {
             return Err("the start of the run was dropped (more than 10 minutes)".into());
@@ -859,12 +1205,15 @@ impl Session {
                     Self::end_skid(&mut self.skids[i][w], self.skid_head[i][w].take());
                     continue;
                 }
-                let (centre, _) = Self::wheel_local(car, w, radius);
-                let hub = car.pos + car.rot * centre;
-                let Some(hit) = self.race.world.raycast(hub, hub - car.rot.y_axis * (radius + 1.0)) else { continue };
-                let p = hit.point + hit.normal * SKID_LIFT;
+                // #374: the hub of the wheel as drawn (the view pose), so the strip ends under the tyre
+                let v = self.race.view_pose(i);
+                let (centre, _) = Self::wheel_at(&car.p, v.wheel_ext[w], w, radius);
+                let hub = v.pos + v.rot * centre;
+                let Some(hit) = self.race.world.raycast(hub, hub - v.rot.y_axis * (radius + 1.0)) else { continue };
+                let p = hit.point + hit.normal * SKID_LIFT.get();
                 // REMASTER detailed marks: harder slides leave darker marks
-                let s = (SKID_MIN + (1.0 - SKID_MIN) * (car.vel.x.abs() / limit - 1.0) / SKID_FULL).clamp(SKID_MIN, 1.0);
+                let min = SKID_MIN.get();
+                let s = (min + (1.0 - min) * (car.vel.x.abs() / limit - 1.0) / SKID_FULL.get()).clamp(min.min(1.0), 1.0);
                 let ring = &mut self.skids[i][w];
                 let head = &mut self.skid_head[i][w];
                 let Some(h) = head.as_mut() else {
@@ -873,19 +1222,19 @@ impl Session {
                 };
                 // horizontal distance² from the segment's start (0x44697f)
                 let d2 = (p.x - h.p.x).powi(2) + (p.z - h.p.z).powi(2);
-                if d2 > SKID_RESTART2 {
+                if d2 > SKID_RESTART2.get() {
                     // 0x446a00: the original leaves the strip stuck until the marking stops; ours
                     // starts a new strip here [design choice: a respawn or jump leaves no stuck wheel]
                     Self::end_skid(ring, head.take());
                     *head = Some(SkidHead { p, v: 0.0, s, prev_side: None, chained: false, open: None });
                     continue;
                 }
-                if d2 <= SKID_MIN_STEP2 {
+                if d2 <= SKID_MIN_STEP2.get() {
                     h.open = None;
                     continue;
                 }
                 let d = h.p.distance(p);
-                let side = (p - h.p).normalize_or_zero().cross(hit.normal).normalize_or_zero() * (SKID_HALF_WIDTH * car.p.scale);
+                let side = (p - h.p).normalize_or_zero().cross(hit.normal).normalize_or_zero() * (SKID_HALF_WIDTH.get() * car.p.scale);
                 let (side_q, s0) = match h.prev_side {
                     Some(prev) => (skid_mitre(prev, side), h.s),
                     None => (side, 0.0),
@@ -897,7 +1246,8 @@ impl Session {
                         prev.side_p = side_q;
                     }
                     ring.push_back(seg);
-                    if ring.len() > SKID_RING {
+                    // `while`: a lowered SKID_RING trims the strips that are already longer
+                    while ring.len() > SKID_RING.get() {
                         ring.pop_front();
                     }
                     (h.open, h.p, h.v, h.s, h.prev_side, h.chained) = (None, p, h.v + d, s, Some(side), true);
@@ -918,8 +1268,9 @@ impl Session {
         let now = self.sim_secs;
         for (i, r) in self.race.racers.iter().enumerate() {
             let radius = self.wheel_radius(i) * r.car.p.scale;
-            let ground = |w| r.car.pos + r.car.rot * Self::wheel_local(&r.car, w, radius).1;
-            let pt = WallPt { pos: (ground(2) + ground(3)) * 0.5, up: r.car.rot * Vec3::Y, t: now };
+            let v = self.race.view_pose(i);
+            let ground = |w| v.pos + v.rot * Self::wheel_at(&r.car.p, v.wheel_ext[w], w, radius).1;
+            let pt = WallPt { pos: (ground(2) + ground(3)) * 0.5, up: v.rot * Vec3::Y, t: now };
             push_wall_point(&mut self.light_walls[i], pt);
             self.light_head[i] = Some(pt);
         }
@@ -960,7 +1311,9 @@ impl Session {
         let open = self.skid_head.iter().flatten().flatten().filter_map(|h| h.open.as_ref());
         let rings = self.skids.iter().flatten().flatten();
         let segs = rings.chain(open);
-        let mut out = Vec::with_capacity(self.skids.len() * 4 * SKID_RING * 6);
+        // capacity is a hint only: a typed SKID_RING of millions must not reserve gigabytes
+        let mut out = Vec::with_capacity(self.skids.len() * 4 * SKID_RING.get().min(500) * 6);
+        let tile = SKID_TILE.get();
         for g in segs {
             let Some(rgba) = skid_colour(g.kind) else { continue };
             // the kind rides in `env` of the detailed vertices only: the quads stay as they were
@@ -968,10 +1321,10 @@ impl Session {
             if let (true, Some(layer)) = (detailed, self.tyre_layer) {
                 // u: across the tread in tile units (the strip's middle on the tile's middle); v:
                 // metres along the strip in tiles. Edge distance (-1..1) rides in the normal.
-                let hw = g.side.length() / SKID_TILE;
+                let hw = g.side.length() / tile;
                 // REMASTER detailed marks keep their rubber a touch lighter than pure black
                 let c = |s: f32| [rgba[0].max(0.03), rgba[1].max(0.03), rgba[2].max(0.03), s];
-                let (v0, v1) = (g.v0 / SKID_TILE, g.v1 / SKID_TILE);
+                let (v0, v1) = (g.v0 / tile, g.v1 / tile);
                 let a = at(g.q - g.side_q, [0.5 - hw, v0], c(g.s0), -1.0, layer);
                 let b = at(g.q + g.side_q, [0.5 + hw, v0], c(g.s0), 1.0, layer);
                 let cc = at(g.p + g.side_p, [0.5 + hw, v1], c(g.s1), 1.0, layer);
@@ -993,18 +1346,18 @@ impl Session {
         if (ignition && self.cam != CamMode::Chase) || (self.top_down() && self.cam.hides_car()) {
             self.cam = CamMode::Chase;
         }
-        let (car, t) = (&self.race.racers[self.focus].car, self.tune);
-        let (origin, rot) = (cam_origin(car), car.rot);
+        let t = self.base_tune();
+        let (origin, rot) = self.view_origin();
         let local = match (self.cam, self.look_back) {
             (CamMode::FarChase, false) => t.far_eye,
-            (_, true) => CHASE_BACK_EYE,
+            (_, true) => chase_back_eye(),
             _ => t.chase_eye,
         };
         // CLASSIC [O] (#274 trace, frame of the key press): looking back in a chase view puts the eye
         // at its fixed spot at once, no easing; the eased eye follows it, so letting go sweeps it
         // back round the car the way the original does
         let eye = match self.look_back && matches!(self.cam, CamMode::Chase | CamMode::FarChase) {
-            true => origin + rot * CHASE_BACK_EYE,
+            true => origin + rot * chase_back_eye(),
             // CHEAT ignition / uds (0x42c540 -> 0x42c944); look back keeps the fixed back view (0x704e04 is not cleared)
             false if ignition => ignition_eye(self.eye, origin, rot, dt),
             false => ease_eye(self.eye, origin, rot, local, &t, dt),
@@ -1029,12 +1382,12 @@ impl Session {
         // the eye stays behind
         let target = if stick == Vec2::ZERO { 0.0 } else {
             let a = stick.x.atan2(stick.y);
-            if a.abs() <= ORBIT_HOLD { 0.0 } else { a }
+            if a.abs() <= ORBIT_HOLD.get() { 0.0 } else { a }
         };
         let d = (target - self.orbit + PI).rem_euclid(TAU) - PI;
-        self.orbit = (self.orbit + d * (1.0 - (-ORBIT_RATE * dt).exp()) + PI).rem_euclid(TAU) - PI;
+        self.orbit = (self.orbit + d * (1.0 - (-ORBIT_RATE.get() * dt).exp()) + PI).rem_euclid(TAU) - PI;
         let off = Quat::from_rotation_y(self.orbit) * off;
-        let (origin, t) = (cam_origin(&self.race.racers[self.focus].car), self.tune_now());
+        let (origin, t) = (self.view_origin().0, self.tune_now());
         let look = match (self.cam, self.look_back) {
             (CamMode::FarChase, false) => t.far_look,
             _ => t.chase_look,
@@ -1044,16 +1397,27 @@ impl Session {
 
     /// Current camera (eye, look-at point), view space.
     pub fn chase_view(&self) -> (Vec3, Vec3) {
-        let car = &self.race.racers[self.focus].car;
-        view_of(&self.race, self.cam, self.look_back, cam_origin(car), car.rot, self.cam_off, &self.tune_now())
+        let (origin, rot) = self.view_origin();
+        view_of(&self.race, self.cam, self.look_back, origin, rot, self.cam_off, &self.tune_now())
+    }
+
+    /// #374: the followed car's camera origin (`cam_origin`) and axes where it is drawn (`Race::view_pose`).
+    pub fn view_origin(&self) -> (Vec3, Mat3) {
+        let v = self.race.view_pose(self.focus);
+        (cam_origin_at(&self.race.racers[self.focus].car.p, &v), v.rot)
+    }
+
+    /// The tuned camera values with this session's chase follow setting on top.
+    pub fn base_tune(&self) -> CamTune {
+        CamTune::live().followed(self.follow)
     }
 
     /// The camera tuning of this frame: under ignition / uds the chase looks 2 m ahead of the car (`0x4b02b8`, rotated by
     /// the body, `0x42b844`) instead of `chase_look` (#318).
     fn tune_now(&self) -> CamTune {
-        let mut t = self.tune;
+        let mut t = self.base_tune();
         if self.ignition() {
-            t.chase_look = self.race.racers[self.focus].car.rot * Vec3::new(0.0, 0.0, motor_sim::cheats::IGNITION_AHEAD);
+            t.chase_look = self.view_origin().1 * Vec3::new(0.0, 0.0, motor_sim::cheats::IGNITION_AHEAD);
         }
         t
     }
@@ -1122,33 +1486,35 @@ impl Session {
         // CHEAT supercars / grem (0x439f7a -> 0x42c8e0, #319) [O]: rows right (1,0,0), up (0,0,1), forward (0,-1,0),
         // north up whatever the car does; eye = body origin + 12 m along the heading (x, z) + 25 m up. Zoom and
         // far plane stay those of the mode.
-        let car = &self.race.racers[self.focus].car;
-        Camera::from_rot(top_down_eye(cam_origin(car), car.rot * Vec3::Z), TOP_DOWN_ROT, base.zoom, base.far_k)
+        let (origin, rot) = self.view_origin();
+        Camera::from_rot(top_down_eye(origin, rot * Vec3::Z), TOP_DOWN_ROT, base.zoom, base.far_k)
     }
 
     /// The camera of the mode without the cheats: where the sound is heard from (the original leaves
     /// its listener `0x704e6c` at the working camera) and what the eased eye starts from.
     pub fn base_camera(&self) -> Camera {
-        let car = &self.race.racers[self.focus].car;
+        let (origin, rot) = self.view_origin();
         if let Some(eye) = self.race.start_eye().filter(|_| self.flying()) {
             // CLASSIC 0x42c3a4: look at the car's model origin; look back and free look do not apply [I]
-            let target = cam_origin(car);
+            let target = origin;
             let look = ((target - eye) * FLIP).normalize_or(Vec3::NEG_Z);
             return Camera::new(eye * FLIP, look.x.atan2(-look.z), look.y.asin());
         }
-        camera_of(&self.race, self.cam, self.look_back, cam_origin(car), car.rot, self.cam_off, &self.tune_now(), self.pull_in)
+        camera_of(&self.race, self.cam, self.look_back, origin, rot, self.cam_off, &self.tune_now(), self.pull_in)
     }
 
     /// Rear-view mirror camera (eye, look-at point), view space: the in-car look-back eye
     /// (design choice; the original's mirror camera is [U]).
     pub fn mirror_view(&self) -> (Vec3, Vec3) {
-        let car = &self.race.racers[self.focus].car;
-        let eye = car.pos + car.rot * INCAR_BACK_EYE;
-        (eye * FLIP, (eye - car.rot * Vec3::Z) * FLIP)
+        let v = self.race.view_pose(self.focus);
+        let eye = v.pos + v.rot * incar_back_eye();
+        (eye * FLIP, (eye - v.rot * Vec3::Z) * FLIP)
     }
 
-    fn model_of(&self, car: &Car) -> Mat4 {
-        Self::body_model(&car.p, car.pos, car.rot, &car.wheel_ext, 1.0)
+    /// Car `slot`'s body where it is drawn (#374: `Race::view_pose`).
+    fn model_of(&self, slot: usize) -> Mat4 {
+        let v = self.race.view_pose(slot);
+        Self::body_model(&self.race.racers[slot].car.p, v.pos, v.rot, &v.wheel_ext, 1.0)
     }
 
     /// The body's model matrix at a pose. CHEAT gulliver: parameters at a size (`p.scale`, the
@@ -1187,8 +1553,8 @@ impl Session {
     /// REMASTER, Enhanced car paint: where to capture the env cube (above the followed car's body
     /// origin, view space) and that car's meshes, left out of the capture.
     pub fn env_probe(&self) -> (Vec3, std::ops::Range<usize>) {
-        let m = self.model_of(&self.race.racers[self.focus].car);
-        (m.transform_point3(Vec3::Y * ENV_PROBE_HEIGHT), self.focus * CAR_MESHES..(self.focus + 1) * CAR_MESHES)
+        let m = self.model_of(self.focus);
+        (m.transform_point3(Vec3::Y * ENV_PROBE_HEIGHT.get()), self.focus * CAR_MESHES..(self.focus + 1) * CAR_MESHES)
     }
 
     /// (mesh index, model matrix) for every car; meshes are loaded in grid-slot order.
@@ -1201,7 +1567,7 @@ impl Session {
     /// car lights).
     pub fn hidden_bodies(&self, hide: Option<usize>) -> Vec<(usize, Mat4)> {
         let hide = hide.or(self.hides_car().then_some(self.focus));
-        hide.and_then(|i| self.race.racers.get(i).map(|r| (i * CAR_MESHES, self.model_of(&r.car)))).into_iter().collect()
+        hide.filter(|&i| i < self.race.racers.len()).map(|i| (i * CAR_MESHES, self.model_of(i))).into_iter().collect()
     }
 
     /// `models` without car `hide` (in-car views, the rear mirror).
@@ -1211,15 +1577,17 @@ impl Session {
         for (i, r) in self.race.racers.iter().enumerate().filter(|&(i, r)| Some(i) != hide && r.progress.eliminated_ms.is_none()) {
             let car = &r.car;
             let (_, radius) = self.wheels[i];
+            // #374: where the car is drawn (a remote car: its latest pose)
+            let v = self.race.view_pose(i);
             if r.remote {
                 // a remote racer keeps its full-size parameters: shrunk as a recorded pose
                 let scale = self.race.car_scale.0;
-                out.push((i * CAR_MESHES, Self::body_model(&car.p, car.pos, car.rot, &car.wheel_ext, scale)));
-                out.extend(Self::wheel_models(&car.p, car.pos, car.rot, &car.wheel_ext, car.steer_smooth, self.spin[i], radius, i * CAR_MESHES, scale));
+                out.push((i * CAR_MESHES, Self::body_model(&car.p, v.pos, v.rot, &v.wheel_ext, scale)));
+                out.extend(Self::wheel_models(&car.p, v.pos, v.rot, &v.wheel_ext, v.steer_smooth, self.spin[i], radius, i * CAR_MESHES, scale));
                 continue;
             }
-            out.push((i * CAR_MESHES, self.model_of(car)));
-            out.extend(Self::wheel_models(&car.p, car.pos, car.rot, &car.wheel_ext, car.steer_smooth, self.spin[i], radius * car.p.scale, i * CAR_MESHES, 1.0));
+            out.push((i * CAR_MESHES, self.model_of(i)));
+            out.extend(Self::wheel_models(&car.p, v.pos, v.rot, &v.wheel_ext, v.steer_smooth, self.spin[i], radius * car.p.scale, i * CAR_MESHES, 1.0));
         }
         out
     }
@@ -1229,7 +1597,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn wheel_models(p: &motor_sim::car::CarParams, pos: Vec3, rot: Mat3, ext: &[f32; 4], steer_smooth: f32, spin: [f32; 2], radius: f32, base: usize, scale: f32) -> Vec<(usize, Mat4)> {
         let frame = Self::physics_frame(p, pos, rot, ext, scale);
-        let steer = steer_smooth * WHEEL_STEER;
+        let steer = steer_smooth * WHEEL_STEER.get();
         (0..4)
             .map(|w| {
                 let (centre, _) = Self::wheel_at(p, ext[w], w, radius);
@@ -1285,9 +1653,11 @@ impl Session {
         let slot = self.race.racers.iter().position(|r| r.human).unwrap_or(self.focus);
         let at = self.race.racers[slot].progress.finished_ms?;
         let place = self.race.standings().iter().position(|&s| s == slot).filter(|&p| p < 3)?;
-        let end = m.keys.last()?.frame / FINISH_FPS;
-        let t = (((self.race.clock_ms - at as f64) * 0.001) as f32).clamp(0.0, end - 0.01);
-        let q = props::Pose::from_channels(&props::evaluate(m, t * FINISH_FPS, false));
+        let fps = FINISH_FPS.get();
+        let end = m.keys.last()?.frame / fps;
+        // `.max(0.0)`: a typed FINISH_FPS that makes the motion shorter than 0.01 s must not make clamp panic
+        let t = (((self.race.clock_ms - at as f64) * 0.001) as f32).clamp(0.0, (end - 0.01).max(0.0));
+        let q = props::Pose::from_channels(&props::evaluate(m, t * fps, false));
         let (f, r) = (cam.forward(), cam.right());
         let cam_to_world = Mat4::from_cols(r.extend(0.0), r.cross(f).extend(0.0), (-f).extend(0.0), cam.pos.extend(1.0));
         let s = Mat3::from_diagonal(FLIP);
@@ -1347,10 +1717,11 @@ impl Session {
     /// `shadows` without car `skip`'s (a ghost-like car casts none).
     pub fn shadows_except(&self, skip: Option<usize>) -> Vec<Vertex> {
         let mut out = Vec::new();
-        for (_, (r, pts)) in self.race.racers.iter().zip(&self.shadow_points).enumerate().filter(|(i, (r, _))| Some(*i) != skip && r.progress.eliminated_ms.is_none()) {
+        for (i, (r, pts)) in self.race.racers.iter().zip(&self.shadow_points).enumerate().filter(|(i, (r, _))| Some(*i) != skip && r.progress.eliminated_ms.is_none()) {
             let Some(pts) = pts else { continue };
             let scale = if r.remote { self.race.car_scale.0 } else { r.car.p.scale };
-            self.shadow_quads(r.car.pos, r.car.rot, pts, scale, &mut out);
+            let v = self.race.view_pose(i);
+            self.shadow_quads(v.pos, v.rot, pts, scale, &mut out);
         }
         out
     }
@@ -1360,19 +1731,21 @@ impl Session {
     pub fn shadow_quads(&self, pos: Vec3, rot: Mat3, pts: &[Vec3; 16], scale: f32, out: &mut Vec<Vertex>) {
         // CHEAT gulliver: the shadow shrinks about the car's own origin (the ground point under it)
         let world: Vec<Vec3> = pts.iter().map(|&p| pos + rot * (Vec3::new(p.x * scale, p.y, p.z * scale))).collect();
-        let hit = |p: Vec3| self.race.world.raycast(p + Vec3::Y * SHADOW_RAY_UP, p - Vec3::Y * SHADOW_RAY_DOWN).map(|h| h.point);
+        let (up, down) = (SHADOW_RAY_UP.get(), SHADOW_RAY_DOWN.get());
+        let hit = |p: Vec3| self.race.world.raycast(p + Vec3::Y * up, p - Vec3::Y * down).map(|h| h.point);
         let (Some(a), Some(b), Some(c)) = (hit(world[5]), hit(world[6]), hit(world[10])) else { return };
         let mut n = (b - a).cross(c - a).normalize_or_zero();
         if n.y < 0.0 {
             n = -n;
         }
-        if n.y < SHADOW_MIN_NY {
+        if n.y < SHADOW_MIN_NY.get() {
             return;
         }
+        let colour = [SHADOW_RGB[0], SHADOW_RGB[1], SHADOW_RGB[2], SHADOW_ALPHA.get()];
         // drop onto the plane n.(q - a) = 0, plus a hair against z-fighting
         let drop = |p: Vec3| {
             let y = a.y - (n.x * (p.x - a.x) + n.z * (p.z - a.z)) / n.y;
-            Vertex { pos: (Vec3::new(p.x, y + 0.02, p.z) * FLIP).into(), uv: [0.0; 2], color: SHADOW_RGBA, layer: -1.0, normal: [0.0; 3], env: 0.0 }
+            Vertex { pos: (Vec3::new(p.x, y + 0.02, p.z) * FLIP).into(), uv: [0.0; 2], color: colour, layer: -1.0, normal: [0.0; 3], env: 0.0 }
         };
         let v: Vec<Vertex> = world.iter().map(|&p| drop(p)).collect();
         for row in 0..3 {
@@ -1385,10 +1758,10 @@ impl Session {
 
     /// Focused car position (model ground plane) and flat forward direction, view space.
     pub fn pose_view(&self) -> (Vec3, Vec3) {
-        let car = &self.race.racers[self.focus].car;
-        let ride = car.p.ride_height();
-        let fwd = car.rot * Vec3::Z * FLIP;
-        (car.pos * FLIP + Vec3::Y * ride, Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z))
+        let ride = self.race.racers[self.focus].car.p.ride_height();
+        let v = self.race.view_pose(self.focus);
+        let fwd = v.rot * Vec3::Z * FLIP;
+        (v.pos * FLIP + Vec3::Y * ride, Vec3::new(fwd.x, 0.0, fwd.z).normalize_or(Vec3::NEG_Z))
     }
 
     /// Wheel radius of racer `slot` (from the scene; 0.35 until `set_wheels`).
@@ -1606,6 +1979,40 @@ mod tests {
         assert!(lo.is_finite() && hi.is_finite());
     }
 
+    /// The source's camera values (#398 phase 4): `Default` is what the F11 Camera page resets to, `live()` the same
+    /// until a tunable is changed (no lib test changes one: they are statics of the test process).
+    #[test]
+    fn camera_defaults_are_the_originals() {
+        let t = CamTune::default();
+        assert_eq!(t.chase_eye, Vec3::new(0.0, 2.0, -4.5));
+        assert_eq!(t.chase_look, Vec3::new(0.0, 1.5, 0.0));
+        assert_eq!(t.far_eye, Vec3::new(0.0, 3.2, -8.0));
+        assert_eq!(t.far_look, Vec3::new(0.0, 1.2, 0.0));
+        assert_eq!(t.incar_eye, Vec3::new(0.0, 1.0, 0.0));
+        assert_eq!(t.bumper_eye, Vec3::new(0.0, 0.55, 2.1));
+        assert_eq!((t.k_xz, t.k_y, t.max_lag), (0.15, 0.9, PI));
+        assert_eq!((t.margin, t.min, t.out_rate), (0.35, 1.0, 4.0));
+        assert_eq!(chase_back_eye(), Vec3::new(0.0, 2.0, 5.0));
+        assert_eq!(incar_back_eye(), Vec3::new(0.0, 1.2, -1.0));
+        assert_eq!(CamTune::live(), t);
+    }
+
+    /// Chase follow (REMASTER Loose / Tight) scales the tuned easing and sets the lag; Normal and CLASSIC (the default
+    /// `Follow`) leave the values as they are.
+    #[test]
+    fn follow_scales_the_easing() {
+        let t = CamTune::default();
+        assert_eq!(t.followed(Follow::default()), t);
+        let loose = t.followed(Follow { ease: 0.5, lag: Some(0.5) });
+        assert_eq!((loose.k_xz, loose.k_y, loose.max_lag), (t.k_xz * 0.5, t.k_y * 0.5, 0.5));
+        let tight = t.followed(Follow { ease: 1.8, lag: Some(0.15) });
+        assert_eq!((tight.k_xz, tight.k_y, tight.max_lag), (t.k_xz * 1.8, 1.0, 0.15));
+        // Normal: ease 1, no lag limit
+        let normal = t.followed(Follow { ease: 1.0, lag: None });
+        assert_eq!(normal, t);
+        assert_eq!(loose.chase_eye, t.chase_eye);
+    }
+
     /// Letting go of look back starts the eased eye at the look-back spot in front of the car and
     /// sweeps it round through the car to the chase spot (traced original, #274: z 5.0, 3.1, 2.5,
     /// 1.9, 1.2, 0.2, -1.4, -3.4, -4.4 at 60 fps, 160 km/h; ours differs by under 0.7 m on the way).
@@ -1613,7 +2020,7 @@ mod tests {
     fn look_back_release_sweeps_round_the_car() {
         let t = CamTune::default();
         let (mut pos, rot) = (Vec3::new(5.0, 1.0, 7.0), Mat3::IDENTITY);
-        let mut eye = pos + CHASE_BACK_EYE;
+        let mut eye = pos + chase_back_eye();
         let mut z = Vec::new();
         for _ in 0..40 {
             pos += Vec3::Z * 0.73;
@@ -1750,11 +2157,14 @@ mod tests {
             nick: String::new(),
             car_name: String::new(),
             drivers: Vec::new(),
+            tick_hz: None,
             race_ms: None,
             best_lap_ms: None,
         });
         s.record_timeline();
-        let dt = 1.0 / 60.0;
+        // #374: the run on the fixed tick, stepped at 144 fps (the hand-driven test below stays per-frame)
+        s.race.set_fixed_tick(Some(60.0));
+        let dt = 1.0 / 144.0;
         let state = |s: &Session| (s.race.racers.iter().map(|r| (r.car.pos, r.car.rot)).collect::<Vec<_>>(), s.race.clock_ms, s.race.countdown);
         let drive = |s: &mut Session, secs: f32| {
             s.skip_intro();
@@ -1770,6 +2180,7 @@ mod tests {
         let round_trip = |s: &mut Session| {
             let before = state(s);
             let rec = Recording::from_bytes(&s.recording().unwrap().to_bytes()).unwrap();
+            assert_eq!(rec.header.tick_hz, Some(60.0), "the file names the tick");
             // saving moves nothing
             assert_eq!(before, state(s));
             let mut t = Session::for_recording(&root, &rec).unwrap();
@@ -1811,6 +2222,7 @@ mod tests {
             nick: String::new(),
             car_name: String::new(),
             drivers: Vec::new(),
+            tick_hz: None,
             race_ms: None,
             best_lap_ms: None,
         });
@@ -1856,7 +2268,7 @@ mod tests {
         let dt = 1.0 / 60.0;
         let check = |s: &Session| {
             let now = s.sim_secs;
-            assert!(s.trail.iter().all(|t| t.time >= now - TRAIL_RELAX && t.time <= now), "footprints outside the relax window");
+            assert!(s.trail.iter().all(|t| t.time >= now - TRAIL_RELAX.get() && t.time <= now), "footprints outside the relax window");
             assert!(s.trail.iter().zip(s.trail.iter().skip(1)).all(|(a, b)| a.time <= b.time), "footprints out of order");
         };
         for _ in 0..1200 {
@@ -1884,18 +2296,18 @@ mod tests {
             push_wall_point(&mut ring, pt(i as f32 * 0.1, i as f32 * 0.001));
         }
         assert_eq!(ring.len(), 10);
-        assert!(ring.iter().zip(ring.iter().skip(1)).all(|(a, b)| b.pos.x - a.pos.x >= LIGHT_WALL_STEP_M - 1e-4));
+        assert!(ring.iter().zip(ring.iter().skip(1)).all(|(a, b)| b.pos.x - a.pos.x >= LIGHT_WALL_STEP_M.get() - 1e-4));
         // standing still: a point every LIGHT_WALL_STEP_S, and the old ones go
         ring.clear();
         for i in 0..400 {
             push_wall_point(&mut ring, pt(0.0, i as f32 * 0.01));
         }
         let now = 399.0 * 0.01;
-        assert!(ring.iter().all(|p| now - p.t <= LIGHT_WALL_LIFE));
-        assert!(ring.iter().zip(ring.iter().skip(1)).all(|(a, b)| b.t - a.t <= LIGHT_WALL_STEP_S + 0.01 + 1e-4));
-        assert!(now - ring[0].t > LIGHT_WALL_LIFE - LIGHT_WALL_STEP_S - 0.01);
+        assert!(ring.iter().all(|p| now - p.t <= LIGHT_WALL_LIFE.get()));
+        assert!(ring.iter().zip(ring.iter().skip(1)).all(|(a, b)| b.t - a.t <= LIGHT_WALL_STEP_S.get() + 0.01 + 1e-4));
+        assert!(now - ring[0].t > LIGHT_WALL_LIFE.get() - LIGHT_WALL_STEP_S.get() - 0.01);
         // a respawn far away
-        push_wall_point(&mut ring, pt(LIGHT_WALL_BREAK + 1.0, now + 0.01));
+        push_wall_point(&mut ring, pt(LIGHT_WALL_BREAK.get() + 1.0, now + 0.01));
         assert_eq!(ring.len(), 1);
     }
 
@@ -1907,11 +2319,11 @@ mod tests {
         wall_quads(&mut out, pts.iter(), 2.0, LIGHT_WALL_RIVAL);
         assert_eq!(out.len(), 12);
         let top = out.iter().filter(|v| v.uv[1] == 1.0).map(|v| v.pos[1]).fold(f32::MIN, f32::max);
-        assert!((top - LIGHT_WALL_HEIGHT).abs() < 1e-5);
+        assert!((top - LIGHT_WALL_HEIGHT.get()).abs() < 1e-5);
         assert!(out.iter().all(|v| v.color[..3] == LIGHT_WALL_RIVAL && v.layer < 0.0));
         // the oldest end (laid at t = 0) is 2 s of the 2.5 s life old, the newest new
         let ages: Vec<f32> = out.iter().map(|v| v.uv[0]).collect();
-        assert!(ages.iter().any(|&a| (a - 2.0 / LIGHT_WALL_LIFE).abs() < 1e-5));
+        assert!(ages.iter().any(|&a| (a - 2.0 / LIGHT_WALL_LIFE.get()).abs() < 1e-5));
         assert!(ages.contains(&0.0));
         // one point: no wall
         out.clear();

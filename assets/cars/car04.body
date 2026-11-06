@@ -49,6 +49,15 @@ Led pts=0,0.03;0.62,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=
 Paint from=128,128,128 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 like=1,1,1
 Vent from=1,1,1 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 rgb=3,3,5 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=45
 
+# [O] the roof scoop's top is a shallow ridge: 135 (73 103 135, n 0.10 0.97 -0.22) and 136 behind
+# it a side, their centre points 63 (0 1.279 -0.472), 183 (0 1.167 -0.932) and 184 (0 1.057
+# -1.339) 2.5 cm over the plane of the outer edge 62 (0.201 1.257 -0.461) - 138 (0.304 1.142
+# -0.932) - 137 (0.369 1.032 -1.339): the two halves fold 11.7 deg at the centre line, a crease
+# over smooth_deg. Design choice (the user's request): one flat top across, the centre points
+# lowered onto that plane (63 lands 3 mm under it); the deck 143 behind gets the same flat front.
+Push lo=-0.01,1.27,-0.48 hi=0.01,1.29,-0.46 by=0,-0.025,0
+Push lo=-0.01,1.16,-0.94 hi=0.01,1.175,-0.92 by=0,-0.025,0
+Push lo=-0.01,1.05,-1.345 hi=0.01,1.065,-1.33 by=0,-0.025,0
 # [O] the roof scoop's mouth 22/23 (1 1 1, |x| < 0.228, y 1.196-1.279, z -0.47..-0.43, facing
 # forward and up between the scoop's walls 79/81). Design choice: a honeycomb.
 Vent from=1,1,1 lo=0,1.15,-0.5 hi=0.3,1.3,-0.4 rgb=3,3,3 frame=0.008 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
@@ -82,6 +91,12 @@ Push lo=0.73,0.225,1.85 hi=0.745,0.235,1.87 by=0.003,0.065,0.003
 Push lo=0.27,0.315,1.97 hi=0.28,0.325,1.99 by=0,0.07,0.076
 Push lo=0.505,0.315,1.94 hi=0.52,0.325,1.96 by=0,0.07,0.076
 Push lo=0.725,0.315,1.79 hi=0.735,0.325,1.81 by=0.015,0.069,0.07
+# [O] the arch column (the bumper corner's back edge, the front arch's front rim) bends: x 0.922
+# at the bottom and lip rows (y 0.189, 0.23, z 1.61), 0.874 at the chin row (y 0.321, z 1.592),
+# 0.909 at the headlight line (y 0.543). Design choice (the user's request): straight up at
+# x 0.91, the three lower corners moved onto the line, so the arch's front wall stands straight.
+Push lo=0.915,0.185,1.6 hi=0.93,0.235,1.62 by=-0.012,0,0
+Push lo=0.87,0.315,1.585 hi=0.88,0.325,1.6 by=0.036,0,0
 # Curved into one rounded bumper, both tags in one zone (each face keeps its colour, the paint
 # line stays; #174 phase 2), listed before the front fender's zone so 142 goes with the bumper:
 # the lower band outside the intake (98, 99), everything over the intake, and (#342) the
@@ -100,37 +115,88 @@ Vent from=1,1,1 lo=0,0.18,1.95 hi=0.47,0.3,2.1 rgb=3,3,6 frame=0.01 inset=0.05 t
 # The carbon splitter (#342) under the new bottom edge, out to the corner before the front
 # arch: 2.5 cm thick, 6 cm proud of the edge (1.6 cm past the bumper's fullest line, the CCX's
 # 2 cm), a round front, fading out over its last 20 cm.
-Splitter edge=0,0.189,2.011;0.275,0.189,2.011;0.461,0.188,1.99;0.717,0.189,1.84;0.86,0.189,1.679 reach=0.06 depth=0.2 thickness=0.025 nose=4 taper=0.2 carbon=1
+Splitter edge=0,0.189,2.011;0.275,0.189,2.011;0.461,0.188,1.99;0.717,0.189,1.84;0.852,0.189,1.679 reach=0.06 depth=0.2 thickness=0.025 nose=4 taper=0.2 carbon=1
 # [O] The fenders are fans of flat facets, 143 146 177: the front fender crown 129 (n 0.69 0.72),
 # 131 and 153 ahead of it, 130 and 137 down its side, 154 and 142 down to the nose; the rear
 # haunch is 73 103 135: 121/122 at its front, 157 and 156/128 on top, 124/125, 145/144 and 148
 # down to the tail lamp. Design choice (like the ASC's and the Resonic's): each curved into one
 # panel a side, 2.5 cm triangles, every point held to the original facets (`round`); the folds
-# to the hood, the door, the deck and the lamps stay creases.
-Smooth from=143,146,177 lo=0.75,0.3,0.55 hi=1.0,0.9,1.85 max_deg=50 step=0.025 loose=0 round=0.1
+# to the door, the deck and the lamps stay creases. [O] Inboard of the crown, the ledge 151 and
+# the scuttle 155 (n 0.1 0.99, in front of the A-pillar) and the bonnet strip 152 beside the
+# headlight meet it along 52-179-180-3 (36, 36 and 34 deg), and 155 meets 152 along 148-180
+# (19 deg). Design choice (the user's request): those three join the zone (second box), so the
+# fender rounds into the bonnet; the folds to the glass, the lamp and the bonnet's middle 134
+# (5 deg) are its outline.
+Smooth from=143,146,177 lo=0.75,0.3,0.55;0.6,0.74,0.8 hi=1.0,0.9,1.85;0.8,0.9,1.5 max_deg=50 step=0.025 loose=0 round=0.1
 # [O] the side panel 120 (73 103 135, n 0.97 0.24 0.08, |x| 0.842-0.969, y 0.471-0.895,
 # z -1.116..0.589) runs flat from the door blade to the haunch and meets 121 along 110-172;
 # the shoulder 113 over it (n 0.43 0.90 0.07, under the quarter intake) meets the haunch's top
 # 128 along 68-172. Design choice (#174 phase 3): both join the haunch's zone (second and third
 # box), so those folds round instead of a crease and a dimple at 172 where the curved haunch met
-# the flat side; the fold to the lower side 111 stays a crease.
+# the flat side. [O] Under the quarter intake and the side window a ledge runs back from 144
+# (0.783 0.871 0.181): 127 (143 146 177, n 0.30 0.96) and 112/113 (n 0.28-0.43 0.9), meeting the
+# side along 144-171-172 at 61 deg (127 / the light wedge 158 under the window, n 0.98 0.21) and
+# 49 deg (113 / 120); below 120 the lower side 111 and the light sill stripe 110 (n 0.99 -0.09)
+# meet it along 48-110 at 21 deg. Design choice (the user's request): 158 and 127 (sixth box) and
+# 111 and 110 (seventh) join the zone and `max_deg` goes to 65, so the shoulder and the lower
+# fold round too (no other fold in the zone is over 50 deg); the sill's outward flare 82 (51 deg
+# off 110) stays a crease.
 # [O] the rear bumper is flat facets too: upright 143 146 177 panels at y 0.32-0.63, 139 in the
 # middle (x 0-0.389), 140 (x 0.387-0.749) and the corner 138 round to the rear arch, and over
 # them the 73 103 135 band sloping in to the tail lamps, 150 and 149 (y 0.63-0.81). Design choice
 # (#174 phase 4, the user's request): curved into one rounded bumper, in the haunch's zone (fourth
 # and fifth box, both tags: each face keeps its colour, the paint line stays), so the haunch's
 # corner 148 flows into it; as a zone of its own the fold between them stayed a vertical crease.
-# The folds to the underside, the tail lamps and the louvred grille stay creases.
-Smooth from=73,103,135;143,146,177 lo=0.65,0.55,-2.05;0.85,0.6,-0.5;0.65,0.85,-1.0;0,0.3,-2.2;0,0.6,-2.2 hi=1.0,1.0,-0.9;1.0,0.8,0.1;0.9,1.0,-0.5;0.93,0.64,-1.8;0.75,0.82,-1.95 max_deg=50 step=0.025 loose=0 round=0.1
+# The folds to the underside, the tail lamps and the louvred grille stay creases. The user asked
+# for the tail's corners rounder (#388): rounded over 10 cm (`round` 0.1, like the other zones),
+# the 20-22 deg fold between the rear face 140/149 and the corner 138/148 still read as an
+# upright edge in the paint's reflection from the lamp down; over 25 cm it is one curve. The
+# haunch's top and side keep their shape (same silhouette in the side view).
+Smooth from=73,103,135;143,146,177 lo=0.65,0.55,-2.05;0.85,0.6,-0.5;0.65,0.85,-1.0;0,0.3,-2.2;0,0.6,-2.2;0.75,0.75,-0.5;0.85,0.3,-0.7 hi=1.0,1.0,-0.9;1.0,0.8,0.1;0.9,1.0,-0.5;0.93,0.64,-1.8;0.75,0.82,-1.95;0.85,0.9,0.3;1.0,0.5,0.4 max_deg=65 step=0.025 loose=0 round=0.25
+# [O] behind each quarter intake a light panel (143 146 177) runs from the roof scoop's back
+# corner 137 (0.369 1.032 -1.339) to the intake: 118 (n 0.05 0.99 -0.14) inboard and 119 (n 0.45
+# 0.86 -0.24) outboard, folded 25 deg along 137-69 (69 = the intake's inner back corner, 0.545
+# 1.107 -0.743); 126 in front of 118 (7 deg off it). Design choice (#388, the user's request):
+# curved into one panel, so that fold is no longer an edge. The folds to the scoop's side wall,
+# the intake and the deck's dark 115 (the paint line 137-68) stay.
+Smooth from=143,146,177 lo=0.35,1.0,-1.1 hi=0.6,1.2,-0.55 max_deg=50 step=0.025 loose=0 round=0.1
+# [O] under the tail: the underside's middle 10 (|x| < 0.5, between the rear arches' inner walls)
+# rises from y 0.207 at z -1.031 to 0.318 at -1.957, then 9 / 8 to the tail's bottom edge (0.340
+# at z -2.183 at x 0, 0.32 at the corner 26); the upright rear bumper 139 / 140 stands on it up to
+# y 0.63. Design choice (#388, the user's request): the diffuser of the reference model
+# veyron.blend. [O] There (model units, rear +y, up +z): the flat floor (z -0.408) turns up 0.22
+# behind the rear hub (y 1.33) and rises 0.243 to the tail (y 1.64), steepening to near upright,
+# between side walls at |x| 0.46; at 0.226 / 0.387 / 0.548 / 0.71 / 0.871 / 0.935 of the way it
+# has risen 0.115 / 0.239 / 0.362 / 0.506 / 0.712 / 0.835 of that. A keel hangs under its
+# middle: flat bottom +-0.05 at the tail, 0.125 over the floor, its sides meeting the roof at
+# +-0.1. Here, at about 1.3 times: the ramp from z -1.75 (just behind the hub's 0.22 x 1.3) to
+# the tail, 0.29 -> 0.52 along the same curve (held over the last 2 cm to the tail). Across,
+# the arches leave room for the Veyron's own size only: walls at |x| 0.44 (its 0.46 x 0.96,
+# inside the arches' 0.5) leaning out 2 cm. The keel (the user's sketch, #388): a U round the
+# exhaust tip below, as far from it at the bottom as at the sides, 3.5 cm: its sides lean like
+# the tip's (1.7 cm over its 8 cm), from x 0.061 at the bottom to 0.086 at the roof, the corner
+# rounded over 5 cm (within about 5 mm of the tip's chamfered corner offset by 3.5 cm); its
+# bottom 0.402 at the tail (the tip's 0.437 less 3.5 cm), rising like the Veyron's from where
+# it leaves the ramp (0.387 of the way): 12 cm deep at the tail, not the 18 of the cage's
+# underside.
+Diffuser lo=0,0.15,-2.3 hi=0.47,0.6,-1.75 width=0.44 wall=0.02 roof=-1.75,0.29;-1.844,0.316;-1.911,0.345;-1.977,0.373;-2.045,0.406;-2.111,0.454;-2.138,0.482;-2.165,0.52 keel=-1.911,0.345;-1.995,0.368;-2.075,0.385;-2.138,0.397;-2.165,0.402 keel_bottom=0.061 keel_top=0.086 keel_round=0.03 step=0.025
+# The ramp, its walls and the keel's underside (the underside's black, its shape lost in the
+# shadow under the tail) in carbon fibre like the front splitter, so the curve reads.
+Carbon from=0,0,0 lo=0,0.25,-2.3 hi=0.47,0.6,-1.75
+# [O] the Veyron's exhaust: one tip on its keel's back face, a rounded trapezoid +-0.0525 at the
+# top, +-0.035 at the bottom, 0.083 tall, its top level with the roof, a polished ring 2 cm
+# proud of the face round a dark inside. Here at the keel's 0.96, its top level with the roof
+# (0.52), on the keel's back face (the rear bumper 139, z -2.183 at x 0). The face is solid, so
+# the tip stands 3 cm proud of it and its dark inside is 2 cm deep, in front of the face.
+Exhaust x=0 y=0.477 z=-2.215 width=0.1 height=0.08 chamfer=0.016 slant=0.017 round=0.01 lip=0.009 pipe=0.08 depth=0.02 centre=1
 
 # [O] the glass canopy is facets folded 3-15 deg apart: the windscreen 87/93 (n 0.25 0.94 0.23),
 # 88/94 (0.05 0.95 0.30) and the centre triangle 89; the side windows 84-86 / 90-92. Design
-# choice (#174 phase 3): each curved into one pane before the glass is recessed, the windscreen
-# and the side windows as two zones so the fold between them (the A-pillar line, 87/86) stays.
-# A longer `round` than the paint's: the glass reads as one even curve, not flats joined by
-# rounded folds.
-Smooth from=54,70,86 lo=0,0.7,0.3 hi=0.55,1.2,1.4 max_deg=30 step=0.025 loose=0 round=0.3
-Smooth from=54,70,86 lo=0.56,0.8,-0.6 hi=0.8,1.2,0.7 max_deg=30 step=0.025 loose=0 round=0.3
+# choice (#174 phase 3): curved before the glass is recessed. A longer `round` than the paint's:
+# the glass reads as one even curve, not flats joined by rounded folds. The windscreen and the
+# side windows were two zones, keeping the fold between them (87/86 along 145-146, 13 deg) as an
+# A-pillar line; the user asked for it smooth, so the canopy is one zone (both boxes).
+Smooth from=54,70,86 lo=0,0.7,0.3;0.56,0.8,-0.6 hi=0.55,1.2,1.4;0.8,1.2,0.7 max_deg=30 step=0.025 loose=0 round=0.3
 
 # [O] the rear wing, 143 146 177: a swept wedge over the deck, not joined to it (66-77, 159-161,
 # 214-216: top 72-77, back 66/67, underside 159-161, the tip's side wall 68). Leading edge
@@ -143,6 +209,25 @@ Smooth from=54,70,86 lo=0.56,0.8,-0.6 hi=0.8,1.2,0.7 max_deg=30 step=0.025 loose
 # wing about 5 cm higher, on two struts 12 cm long to the deck.
 Foil from=143,146,177 lo=0,1.0,-1.9 hi=0.75,1.12,-1.29 le=0,1.12,-1.59;0.405,1.122,-1.574;0.499,1.127,-1.536;0.696,1.144,-1.314;0.71,1.145,-1.33 te=0,1.13,-1.867;0.521,1.133,-1.83;0.644,1.14,-1.762;0.71,1.145,-1.471 thickness=0.12 camber=-0.03 step=0.025 struts=0.3,0.5 strut_chord=0.12 strut_width=0.014
 
+# The tail's lower corner, rounder and fuller (#388, the user's outline drawn on the wireframe
+# from behind and above). [O] The cage's outline there is three points: the arch's rear end 27
+# (0.834 0.318 -1.957), 26 (0.749 0.320 -2.030) and 25 (0.389 0.340 -2.174), so the bumper's
+# bottom edge in plan is two straight runs (41 and 22 deg off the car's width) and the curved
+# zone rounds the facets above it, never that outline: 2-5 cm inside the outline asked for at
+# x 0.58-0.80. The user's curve, read back onto the bottom edge's plane (the shot's camera fitted
+# to the cage's silhouette, 1 cm): from the arch's end (0.86 -1.92) it bulges out to z -2.009 at
+# x 0.80, -2.056 at 0.745, -2.107 at 0.634 and -2.135 at 0.523, level with the cage at x 0.47
+# (-2.144). Design choice: the points of the finished, refined cage move back along z by that
+# difference (a bulge of at most 4.5 cm at x 0.76-0.80, 0 at x 0.46 where the diffuser's walls
+# are and at 0.93 outside the arch's rim), at the heights of the bumper panel and the underside
+# (full to y 0.56, none from the lamps' lower edge 0.81 up, so the lamps and the grille stay
+# where they are) and from the arch's rear wall back (none forward of z -1.78). The outline is a
+# curve of 4 cm cuts, not two corners; the bottom edge lands within 1 cm of the user's curve.
+Warp by=0,0,-0.045 x=0.46,0;0.52,0.36;0.58,0.55;0.64,0.7;0.7,0.84;0.76,0.96;0.8,0.93;0.84,0.62;0.88,0.28;0.93,0 y=0.28,1;0.56,1;0.81,0;0.9,0 z=-2.3,1;-1.95,1;-1.78,0
+
 # Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
 # #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
-Refine step=0.04
+# `seams=1` (#387, as the Avalanche's, #177): [O] the original meets a long edge with two or more
+# shorter ones in places (T-junctions); cutting the open edges at those corners first closes the
+# seam. Mesh check, open edges 3,215 -> 3,185, no new defect.
+Refine step=0.04 seams=1

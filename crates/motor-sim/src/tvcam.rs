@@ -11,11 +11,22 @@ use motor_data::cfg::Motion;
 const DEG: f32 = std::f32::consts::PI / 180.0;
 /// Shot types (`0x4b7b34`).
 const KINDS: i64 = 7;
-/// Zoom limits (`0x40b498`) and far-plane limits in metres (`0x40b564`).
-const ZOOM_MIN: f32 = 0.5;
-const ZOOM_MAX: f32 = 10.0;
-pub const FAR_MIN: f32 = 60.0;
-pub const FAR_MAX: f32 = 300.0;
+motor_tune::tunable! {
+    /// TV camera: the smallest zoom (`0x40b498`) [O].
+    /// range: 0.1..5
+    ZOOM_MIN: f32 = 0.5;
+    /// TV camera: the largest zoom (`0x40b498`) [O].
+    /// range: 1..40
+    ZOOM_MAX: f32 = 10.0;
+    /// TV camera: the nearest the far plane may come when the shot scales it (`0x40b564`) [O].
+    /// range: 10..1000
+    /// unit: m
+    pub FAR_MIN: f32 = 60.0;
+    /// TV camera: the farthest the far plane may go when the shot scales it (`0x40b564`) [O]; Remaster keeps a longer view-distance option.
+    /// range: 10..2000
+    /// unit: m
+    pub FAR_MAX: f32 = 300.0;
+}
 
 #[derive(Debug, Clone)]
 pub struct TvKey {
@@ -124,14 +135,23 @@ pub fn shot(keys: &[TvKey], car: Vec3, car_rot: Mat3) -> Option<TvShot> {
     // zoom and far plane from the distance to the car (0x4574c1.., 0x40b498, 0x40b564)
     let r = car.distance(eye).min(k.cap) * k.zoom;
     let r = r.max(1.0);
-    let zoom = (if k.zoom < 0.0 { -k.zoom } else { r }).clamp(ZOOM_MIN, ZOOM_MAX);
+    // `.max(lo)`: a typed ZOOM_MAX under ZOOM_MIN must not make clamp panic
+    let (zoom_lo, zoom_hi) = (ZOOM_MIN.get(), ZOOM_MAX.get());
+    let zoom = (if k.zoom < 0.0 { -k.zoom } else { r }).clamp(zoom_lo, zoom_hi.max(zoom_lo));
     let far_k = 1.0 + r * 0.01 * k.far;
     Some(TvShot { eye, rot: rot?, zoom, far_k, kind: k.kind })
 }
 
-/// Gap kept in front of the geometry that hides the car, and the closest the eye may come to it.
-const CLEAR_MARGIN: f32 = 0.4;
-const CLEAR_MIN: f32 = 1.5;
+motor_tune::tunable! {
+    /// TV camera wall clearance [design choice]: the gap kept in front of the geometry that hides the car.
+    /// range: 0..3
+    /// unit: m
+    CLEAR_MARGIN: f32 = 0.4;
+    /// TV camera wall clearance [design choice]: the closest the eye may come to the car's look-at point.
+    /// range: 0..10
+    /// unit: m
+    CLEAR_MIN: f32 = 1.5;
+}
 
 impl TvShot {
     /// APPROX [design choice]: stations and offsets that put the eye behind a wall or under the
@@ -143,7 +163,7 @@ impl TvShot {
         let Some(hit) = world.raycast(pivot, self.eye) else { return false };
         let (len, hit_len) = (pivot.distance(self.eye), pivot.distance(hit.point));
         let dir = (self.eye - pivot) / len.max(1e-3);
-        let keep = (hit_len - CLEAR_MARGIN).max(CLEAR_MIN).min(len);
+        let keep = (hit_len - CLEAR_MARGIN.get()).max(CLEAR_MIN.get()).min(len);
         self.eye = pivot + dir * keep;
         if self.zoom > 1.0 {
             self.zoom = (self.zoom * keep / len).max(1.0);

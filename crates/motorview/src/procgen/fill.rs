@@ -7,10 +7,11 @@
 //! Piece ground Texture GRAS1 UvScale 8 Point x z [y] ...    # polygon; y omitted = drape
 //! Piece block  Texture WALL3 Roof ROOF1 Centre x y z Size w h d Yaw deg [Pitch deg] [Roll deg]   # y = base; angles in degrees, applied as roll, pitch, yaw
 //! Piece wall   Texture WALL3 From x y z To x y z Height h
-//! Piece hill   Texture ROCK1 Point x z ... Height h Width w   # ridge along a polyline
+//! Piece hill   Texture ROCK1 Point x z [y] ... Height h Width w [Base d]   # ridge along a polyline; y omitted = crest at ground + h; d = feet above the ground
 //! Piece patch  Texture ... Vertex x y z ...                    # 3 or 4 vertices
 //! Piece skirt  Texture ... Radius r Drop d                     # meshed by the automatic pass (phase 2)
 //! Piece plant  Species tree|pine|bush|rock Texture LEAF Trunk BARK Centre x y z Scale s Variant n   # low-poly tree, bush or rock; y = base; Texture = foliage / stone
+//! Piece model  Name Tree-01-2 Centre x y z Scale s Yaw deg      # a model of the tree pack (trees.rs, #390); y = base, Scale 1 = the model's own size
 //! Water Texture WATT Style ocean ...                            # REMASTER water, see water.rs
 //! Grass Texture Gras1+Gras2 Style meadow ... | Grass none        # REMASTER grass, see grass.rs
 //! Seed n
@@ -34,13 +35,19 @@ pub enum Shape {
     /// `yaw` about +Y, `pitch` about the block's X and `roll` about its Z (degrees; see `block_rotation`)
     Block { centre: [f32; 3], size: [f32; 3], yaw: f32, pitch: f32, roll: f32, roof: Option<String> },
     Wall { from: [f32; 3], to: [f32; 3], height: f32 },
-    Hill { points: Vec<[f32; 2]>, height: f32, width: f32 },
+    /// ridge along a polyline; a point's `Some(y)` pins the crest there (absolute height), `None` = the
+    /// ground under it + `height`. The feet of the slopes drape onto the ground, offset by `base` (m, negative = buried).
+    Hill { points: Vec<([f32; 2], Option<f32>)>, height: f32, width: f32, base: f32 },
     /// 3 or 4 vertices
     Patch { verts: Vec<[f32; 3]> },
     Skirt { radius: f32, drop: f32 },
     /// Low-poly vegetation or a rock standing on `centre` (base). `scale` 1 is a tree of about 10 m;
     /// `variant` seeds the shape jitter (plants are not turned: the jitter is their variety); `trunk` is the trunk texture (None: the piece's texture).
     Plant { species: Species, centre: [f32; 3], scale: f32, variant: u32, trunk: Option<String> },
+    /// A model of the tree pack (`trees::names`) standing on `centre` (base), turned `yaw` degrees about +Y
+    /// (game space, like a block's); `scale` 1 is the model's own size. Needs the pack's texture layers
+    /// (`Scene::tree_pack_layer`); no Texture.
+    Model { name: String, centre: [f32; 3], scale: f32, yaw: f32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,11 +181,13 @@ struct Fields {
     to: Option<[f32; 3]>,
     height: f32,
     width: f32,
+    base: f32,
     points: Vec<Vec<f32>>,
     verts: Vec<[f32; 3]>,
     radius: f32,
     drop: f32,
     species: Option<Species>,
+    name: Option<String>,
     trunk: Option<String>,
     scale: Option<f32>,
     variant: u32,
@@ -190,13 +199,14 @@ fn piece(kind: &str, toks: &[&str]) -> Result<Piece, String> {
     while i < toks.len() {
         let key = toks[i];
         i += 1;
-        if matches!(key, "Texture" | "Roof" | "Trunk" | "Species") {
+        if matches!(key, "Texture" | "Roof" | "Trunk" | "Species" | "Name") {
             let w = toks.get(i).ok_or(format!("{key} needs a name"))?;
             i += 1;
             match key {
                 "Texture" => f.texture = w.to_string(),
                 "Roof" => f.roof = Some(w.to_string()),
                 "Trunk" => f.trunk = Some(w.to_string()),
+                "Name" => f.name = Some(w.to_string()),
                 _ => f.species = Some(Species::parse(w).ok_or(format!("unknown species '{w}'"))?),
             }
             continue;
@@ -218,6 +228,7 @@ fn piece(kind: &str, toks: &[&str]) -> Result<Piece, String> {
             "To" => { need(3)?; f.to = Some([v[0], v[1], v[2]]) }
             "Height" => { need(1)?; f.height = v[0] }
             "Width" => { need(1)?; f.width = v[0] }
+            "Base" => { need(1)?; f.base = v[0] }
             "Point" => { need(2)?; f.points.push(v) }
             "Vertex" => { need(3)?; f.verts.push([v[0], v[1], v[2]]) }
             "Radius" => { need(1)?; f.radius = v[0] }
@@ -243,7 +254,7 @@ fn piece(kind: &str, toks: &[&str]) -> Result<Piece, String> {
         "wall" => Shape::Wall { from: f.from.ok_or("wall needs From")?, to: f.to.ok_or("wall needs To")?, height: f.height },
         "hill" => {
             if f.points.len() < 2 { return Err("hill needs 2 Point".into()) }
-            Shape::Hill { points: f.points.iter().map(|p| [p[0], p[1]]).collect(), height: f.height, width: f.width }
+            Shape::Hill { points: f.points.iter().map(|p| ([p[0], p[1]], p.get(2).copied())).collect(), height: f.height, width: f.width, base: f.base }
         }
         "patch" => {
             if !(3..=4).contains(&f.verts.len()) { return Err("patch needs 3 or 4 Vertex".into()) }
@@ -257,6 +268,7 @@ fn piece(kind: &str, toks: &[&str]) -> Result<Piece, String> {
             variant: f.variant,
             trunk: f.trunk,
         },
+        "model" => Shape::Model { name: f.name.ok_or("model needs Name")?, centre: f.centre.ok_or("model needs Centre")?, scale: f.scale.unwrap_or(1.0), yaw: f.yaw },
         _ => return Err(format!("unknown piece '{kind}'")),
     };
     Ok(Piece { shape, texture: f.texture, uv_scale: f.uv.unwrap_or(DEFAULT_UV_SCALE) })
@@ -326,11 +338,17 @@ pub fn to_text(f: &FillFile) -> String {
                 l.push_str(&v3("To", to));
                 l.push_str(&format!(" Height {height}"));
             }
-            Shape::Hill { points, height, width } => {
+            Shape::Hill { points, height, width, base } => {
                 l.push_str("hill");
                 tex(&mut l);
-                for q in points { l.push_str(&format!(" Point {} {}", q[0], q[1])) }
+                for (xz, y) in points {
+                    l.push_str(&format!(" Point {} {}", xz[0], xz[1]));
+                    if let Some(y) = y { l.push_str(&format!(" {y}")) }
+                }
                 l.push_str(&format!(" Height {height} Width {width}"));
+                if *base != 0.0 {
+                    l.push_str(&format!(" Base {base}"));
+                }
             }
             Shape::Patch { verts } => {
                 l.push_str("patch");
@@ -348,6 +366,11 @@ pub fn to_text(f: &FillFile) -> String {
                 if let Some(t) = trunk { l.push_str(&format!(" Trunk {t}")) }
                 l.push_str(&v3("Centre", centre));
                 l.push_str(&format!(" Scale {scale} Variant {variant}"));
+            }
+            Shape::Model { name, centre, scale, yaw } => {
+                l.push_str(&format!("model Name {name}"));
+                l.push_str(&v3("Centre", centre));
+                l.push_str(&format!(" Scale {scale} Yaw {yaw}"));
             }
         }
         t.push_str(&l);
@@ -461,6 +484,68 @@ impl<'a> World<'a> {
     }
 }
 
+/// Cell size (m) of `GroundLight`'s grid: coarser than `CELL`, the ground's polygons are large.
+const LIGHT_CELL: f32 = 16.0;
+/// How far (m) above or below a point the ground under it may be, for `GroundLight::at`.
+const LIGHT_REACH: f32 = 6.0;
+
+/// The ground's baked light as the screen shows it (#390): the upward-facing triangles of the world and
+/// of the fill's own pieces, by grid cell, for the Gouraud colour under a point. A placed model takes its
+/// light from here, so it is as dark as the ground it stands on, wherever on a big polygon that is.
+struct GroundLight {
+    tris: Vec<[(Vec3, [f32; 3]); 3]>,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl GroundLight {
+    /// From whole triangles (3 vertices each); steep ones (walls, cards) are left out.
+    fn new<'v>(tris: impl Iterator<Item = &'v [Vertex; 3]>) -> Self {
+        let cell = |x: f32, z: f32| ((x / LIGHT_CELL).floor() as i32, (z / LIGHT_CELL).floor() as i32);
+        let mut g = GroundLight { tris: Vec::new(), cells: HashMap::new() };
+        for t in tris {
+            let p = [0, 1, 2].map(|k| Vec3::from(t[k].pos));
+            let n = (p[1] - p[0]).cross(p[2] - p[0]);
+            if n.y.abs() < 0.3 * n.length() || n.length_squared() < 1e-12 {
+                continue;
+            }
+            let id = g.tris.len() as u32;
+            g.tris.push([0, 1, 2].map(|k| (p[k], [t[k].color[0], t[k].color[1], t[k].color[2]])));
+            let (lo, hi) = (cell(p[0].x.min(p[1].x).min(p[2].x), p[0].z.min(p[1].z).min(p[2].z)), cell(p[0].x.max(p[1].x).max(p[2].x), p[0].z.max(p[1].z).max(p[2].z)));
+            for cx in lo.0..=hi.0 {
+                for cz in lo.1..=hi.1 {
+                    g.cells.entry((cx, cz)).or_default().push(id);
+                }
+            }
+        }
+        g
+    }
+    /// The interpolated vertex colour of the ground triangle under `p` (view space) whose height there is
+    /// nearest `p.y`, within `LIGHT_REACH`; None off the ground.
+    fn at(&self, p: Vec3) -> Option<[f32; 3]> {
+        let key = ((p.x / LIGHT_CELL).floor() as i32, (p.z / LIGHT_CELL).floor() as i32);
+        let mut best: Option<(f32, [f32; 3])> = None;
+        for &id in self.cells.get(&key).into_iter().flatten() {
+            let [(a, ca), (b, cb), (c, cc)] = self.tris[id as usize];
+            let d = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
+            if d.abs() < 1e-9 {
+                continue;
+            }
+            let wb = ((p.x - a.x) * (c.z - a.z) - (c.x - a.x) * (p.z - a.z)) / d;
+            let wc = ((b.x - a.x) * (p.z - a.z) - (p.x - a.x) * (b.z - a.z)) / d;
+            let wa = 1.0 - wb - wc;
+            const E: f32 = -1e-4;
+            if wa < E || wb < E || wc < E {
+                continue;
+            }
+            let dy = (wa * a.y + wb * b.y + wc * c.y - p.y).abs();
+            if dy <= LIGHT_REACH && best.is_none_or(|(d0, _)| dy < d0) {
+                best = Some((dy, [0, 1, 2].map(|k| wa * ca[k] + wb * cb[k] + wc * cc[k])));
+            }
+        }
+        best.map(|(_, c)| c)
+    }
+}
+
 fn key(name: &str) -> String {
     name.split('.').next().unwrap_or("").to_ascii_lowercase()
 }
@@ -496,8 +581,16 @@ struct Mesher<'a> {
     layers: HashMap<String, f32>,
     missing: HashSet<String>,
     out: Vec<Vertex>,
+    /// the scene's first tree pack layer (`Scene::tree_pack_layer`), for `Shape::Model`
+    pack_layer: Option<usize>,
+    /// for `Shape::Model` (#390), built after the other pieces: the ground's light (world and fill) and
+    /// the track's own trees measured against it (None: no tree cards on this track)
+    light: Option<GroundLight>,
+    tree_match: Option<super::trees::Match>,
     /// the meshed skirt's centre (view space) and the world's lowest y
     skirt: Option<(Vec3, f32)>,
+    /// the ridge heights of the hill meshed last (pinned or draped), for the editor's handles
+    crest: Vec<f32>,
 }
 
 impl Mesher<'_> {
@@ -633,7 +726,7 @@ impl Mesher<'_> {
 
     fn piece(&mut self, p: &Piece) {
         let s = if p.uv_scale > 0.0 { p.uv_scale } else { DEFAULT_UV_SCALE };
-        let layer = self.layer(&p.texture);
+        let layer = if matches!(p.shape, Shape::Model { .. }) { -1.0 } else { self.layer(&p.texture) };
         let view = |v: [f32; 3]| Vec3::new(v[0], v[1], -v[2]);
         match &p.shape {
             Shape::Ground { points } => {
@@ -670,9 +763,11 @@ impl Mesher<'_> {
                 let (a, b) = (view(*from), view(*to));
                 self.quad([a, b, b + Vec3::Y * height, a + Vec3::Y * height], Self::upright(a, b, *height, s), layer, None);
             }
-            Shape::Hill { points, height, width } => {
-                // ridge points on the ground + height; the slopes run out to ±width/2 on the ground
-                let r: Vec<Vec3> = points.iter().map(|&[x, z]| Vec3::new(x, self.w.ground(x, -z) + height, -z)).collect();
+            Shape::Hill { points, height, width, base } => {
+                // ridge points on the ground + height, or at their pinned y; the slopes run out to ±width/2 on the ground
+                // + base (design choice: Base offsets the feet only, the crest stays ground + Height)
+                let r: Vec<Vec3> = points.iter().map(|&([x, z], y)| Vec3::new(x, y.unwrap_or_else(|| self.w.ground(x, -z) + height), -z)).collect();
+                self.crest = r.iter().map(|v| v.y).collect();
                 let mut side = Vec::new();
                 for i in 0..r.len() {
                     let seg = |a: usize, b: usize| (r[b] - r[a]).with_y(0.0).normalize_or_zero();
@@ -684,17 +779,25 @@ impl Mesher<'_> {
                     let perp = Vec3::new(-d.z, 0.0, d.x) * width / 2.0;
                     let base = |sgn: f32| {
                         let q = r[i] + perp * sgn;
-                        Vec3::new(q.x, self.w.ground(q.x, q.z), q.z)
+                        Vec3::new(q.x, self.w.ground(q.x, q.z) + base, q.z)
                     };
                     side.push((base(-1.0), base(1.0)));
                 }
+                // UVs follow the surface (u along the crest, v up the slope, both in metres on the slope, 0 on the
+                // crest) so a steep or raised hill is not smeared by a top-down projection
+                let mut along = vec![0.0f32];
+                for i in 1..r.len() {
+                    along.push(along[i - 1] + r[i].distance(r[i - 1]));
+                }
+                let drop = |i: usize| (r[i].distance(side[i].0), r[i].distance(side[i].1));
                 for i in 0..r.len() - 1 {
                     let (j, up) = (i + 1, Vec3::Y);
-                    let uvs = |q: [Vec3; 4]| q.map(|v| Self::flat(v, s));
+                    let (a, b) = (along[i] / s, along[j] / s);
+                    let ((li, ri), (lj, rj)) = (drop(i), drop(j));
                     let l = [side[i].0, side[j].0, r[j], r[i]];
                     let rt = [r[i], r[j], side[j].1, side[i].1];
-                    self.quad(l, uvs(l), layer, Some(up));
-                    self.quad(rt, uvs(rt), layer, Some(up));
+                    self.quad(l, [[a, -li / s], [b, -lj / s], [b, 0.0], [a, 0.0]], layer, Some(up));
+                    self.quad(rt, [[a, 0.0], [b, 0.0], [b, rj / s], [a, ri / s]], layer, Some(up));
                 }
             }
             Shape::Patch { verts } => {
@@ -711,6 +814,26 @@ impl Mesher<'_> {
                 let trunk_layer = trunk.as_deref().map_or(layer, |t| self.layer(t));
                 let tex = [(layer, plant_tex(&p.texture).and_then(|t| t.leaf)), (trunk_layer, plant_tex(trunk_name).and_then(|t| t.trunk))];
                 self.plant(*species, view(*centre), *scale, *variant, tex, s);
+            }
+            Shape::Model { name, centre, scale, yaw } => {
+                let Some(first) = self.pack_layer else {
+                    if self.missing.insert("<tree pack>".into()) {
+                        eprintln!("fill: the tree pack's texture layers are not in this scene, model pieces skipped");
+                    }
+                    return;
+                };
+                let base = view(*centre);
+                // the ground's light under it and round its crown (world and fill ground); off the ground,
+                // the nearest world vertex's
+                let c = self.w.colour(base + Vec3::Y * 0.1, Vec3::Y);
+                let g = self.light.as_ref();
+                let ground = |p: Vec3| g.and_then(|g| g.at(p));
+                let light = super::trees::Light { ground: &ground, fallback: [c[0], c[1], c[2]], track: self.tree_match.as_ref() };
+                // game yaw about +Y is the opposite turn in view space (z negated)
+                let sun = self.w.look.sun_dir;
+                if !super::trees::place(name, base, *scale, -yaw.to_radians(), &light, sun, first, &mut self.out) && self.missing.insert(format!("<model {name}>")) {
+                    eprintln!("fill: no model '{name}' in the tree pack");
+                }
             }
             Shape::Skirt { radius, drop } => {
                 let (o, c) = outline(self.w.all);
@@ -1064,21 +1187,21 @@ pub fn auto(s: &Scene, seed: u32) -> FillFile {
             if (0..5).any(|k| near_edge(arc(k).x, arc(k).z)) {
                 continue;
             }
-            let points: Vec<[f32; 2]> = (0..5).map(|k| {
+            let points: Vec<([f32; 2], Option<f32>)> = (0..5).map(|k| {
                 let (a, rr) = (a0 + span * k as f32 / 4.0, r * (1.0 + rng.range(-0.03, 0.03)));
                 let p = c + Vec3::new(a.cos() * rr, 0.0, a.sin() * rr);
-                [p.x, -p.z]
+                ([p.x, -p.z], None)
             }).collect();
             let height = rng.range(40.0, 150.0);
-            pieces.push(Piece { shape: Shape::Hill { points, height, width: height * rng.range(3.0, 5.0) }, texture: u.wall.clone(), uv_scale: 16.0 });
+            pieces.push(Piece { shape: Shape::Hill { points, height, width: height * rng.range(3.0, 5.0), base: 0.0 }, texture: u.wall.clone(), uv_scale: 16.0 });
         }
     }
     FillFile { seed, pieces, ..Default::default() }
 }
 
-/// `count` plants of `species` scattered over a disc of `radius` round `centre` (game space) with
-/// random scale (0.7 to 1.3 of `scale`) and variant; bases follow the world's ground (a single plant stays at `centre`).
-pub fn scatter(species: Species, centre: Vec3, radius: f32, count: usize, scale: f32, seed: u32, scene: &Scene) -> Vec<Shape> {
+/// `count` points over a disc of `radius` round `centre` (game space), each with a random scale factor
+/// (0.7 to 1.3; 1 for a single click, which also stays on the click) and its ground height.
+fn disc(centre: Vec3, radius: f32, count: usize, seed: u32, scene: &Scene, mut each: impl FnMut(usize, [f32; 3], f32, &mut Rng) -> Shape) -> Vec<Shape> {
     let world = (count > 1).then(|| World::new(scene));
     let mut rng = Rng(seed.wrapping_mul(2_246_822_519) | 1);
     (0..count)
@@ -1087,9 +1210,29 @@ pub fn scatter(species: Species, centre: Vec3, radius: f32, count: usize, scale:
             let (a, d) = (rng.range(0.0, std::f32::consts::TAU), if count == 1 { 0.0 } else { radius * rng.next().sqrt() });
             let (x, z) = (centre.x + a.cos() * d, centre.z + a.sin() * d);
             let y = world.as_ref().map_or(centre.y, |w| w.ground(x, -z));
-            Shape::Plant { species, centre: [x, y, z], scale: scale * if count == 1 { 1.0 } else { rng.range(0.7, 1.3) }, variant: seed.wrapping_add(i as u32).wrapping_mul(97), trunk: None }
+            let k = if count == 1 { 1.0 } else { rng.range(0.7, 1.3) };
+            each(i, [x, y, z], k, &mut rng)
         })
         .collect()
+}
+
+/// `count` plants of `species` scattered over a disc of `radius` round `centre` (game space) with
+/// random scale (0.7 to 1.3 of `scale`) and variant; bases follow the world's ground (a single plant stays at `centre`).
+pub fn scatter(species: Species, centre: Vec3, radius: f32, count: usize, scale: f32, seed: u32, scene: &Scene) -> Vec<Shape> {
+    disc(centre, radius, count, seed, scene, |i, c, k, _| Shape::Plant { species, centre: c, scale: scale * k, variant: seed.wrapping_add(i as u32).wrapping_mul(97), trunk: None })
+}
+
+/// `count` pack models (`names`: one picked at random per model) scattered like `scatter`, each turned
+/// by a random yaw; scale x 0.8 to 1.2 for a scatter, `scale` as is for a single click (#390).
+pub fn scatter_models(names: &[&str], centre: Vec3, radius: f32, count: usize, scale: f32, seed: u32, scene: &Scene) -> Vec<Shape> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+    disc(centre, radius, count, seed, scene, |_, c, _, rng| {
+        let name = names[(rng.next() * names.len() as f32) as usize % names.len()];
+        let k = if count == 1 { 1.0 } else { rng.range(0.8, 1.2) };
+        Shape::Model { name: name.to_string(), centre: c, scale: scale * k, yaw: rng.range(0.0, 360.0) }
+    })
 }
 
 /// The world's ground height under each game-space (x, z) point.
@@ -1110,11 +1253,13 @@ pub struct FillMesh {
     pub pieces: Vec<(usize, std::ops::Range<usize>)>,
     /// the skirt's centre (view space) and the world's lowest y; None without a skirt piece
     pub skirt: Option<(Vec3, f32)>,
+    /// per hill piece (index into `FillFile::pieces`): the ridge height at each of its points, pinned or draped
+    pub hills: Vec<(usize, Vec<f32>)>,
 }
 
 pub fn mesh_pieces(f: &FillFile, s: &Scene) -> FillMesh {
     if f.pieces.is_empty() {
-        return FillMesh { verts: Vec::new(), pieces: Vec::new(), skirt: None };
+        return FillMesh { verts: Vec::new(), pieces: Vec::new(), skirt: None, hills: Vec::new() };
     }
     // texture name -> layer, from the world's own triangles
     let mut layers = HashMap::new();
@@ -1125,16 +1270,32 @@ pub fn mesh_pieces(f: &FillFile, s: &Scene) -> FillMesh {
             }
         }
     }
-    let mut m = Mesher { w: World::new(s), layers, missing: HashSet::new(), out: Vec::new(), skirt: None };
-    // skirts first: draped pieces outside the world sit on them
+    let mut m = Mesher { w: World::new(s), layers, missing: HashSet::new(), out: Vec::new(), pack_layer: s.tree_pack_layer, light: None, tree_match: None, skirt: None, crest: Vec::new() };
+    // skirts first: draped pieces outside the world sit on them; models last: they take the light of the
+    // ground pieces under them
     let (skirts, rest): (Vec<_>, Vec<_>) = f.pieces.iter().enumerate().partition(|(_, p)| matches!(p.shape, Shape::Skirt { .. }));
+    let (models, rest): (Vec<_>, Vec<_>) = rest.into_iter().partition(|(_, p)| matches!(p.shape, Shape::Model { .. }));
     let mut pieces = Vec::with_capacity(f.pieces.len());
+    let mut hills = Vec::new();
     for (i, p) in skirts.into_iter().chain(rest) {
+        let start = m.out.len();
+        m.piece(p);
+        if matches!(p.shape, Shape::Hill { .. }) {
+            hills.push((i, std::mem::take(&mut m.crest)));
+        }
+        pieces.push((i, start..m.out.len()));
+    }
+    if !models.is_empty() && m.pack_layer.is_some() {
+        let g = GroundLight::new(s.tris.as_chunks::<3>().0.iter().chain(m.out.as_chunks::<3>().0));
+        m.tree_match = super::trees::calibrate(&s.tree_sites, &s.layers, &|p| g.at(p));
+        m.light = Some(g);
+    }
+    for (i, p) in models {
         let start = m.out.len();
         m.piece(p);
         pieces.push((i, start..m.out.len()));
     }
-    FillMesh { verts: m.out, pieces, skirt: m.skirt }
+    FillMesh { verts: m.out, pieces, skirt: m.skirt, hills }
 }
 
 #[cfg(test)]
@@ -1175,13 +1336,15 @@ mod tests {
         Piece patch Texture WALL3 Vertex 0 0 0 Vertex 1 0 0 Vertex 1 1 0\n\
         Piece skirt Texture GRAS1 Radius 900 Drop 20\n\
         Piece plant Species pine Texture LEAF Trunk BARK Centre 1 2 3 Scale 1.5 Variant 4\n\
+        Piece model Name Tree-01-2 Centre 4 5 6 Scale 1.25 Yaw 90\n\
         Grass Texture Gras1+Grasokk Style verge Height 0.25 Tip 1 1.1 0.8\n";
 
     #[test]
     fn round_trip() {
         let (f, w) = from_text(SAMPLE);
         assert!(w.is_empty(), "{w:?}");
-        assert_eq!(f.pieces.len(), 7);
+        assert_eq!(f.pieces.len(), 8);
+        assert_eq!(f.pieces[7].shape, Shape::Model { name: "Tree-01-2".into(), centre: [4.0, 5.0, 6.0], scale: 1.25, yaw: 90.0 });
         assert_eq!(f.seed, 7);
         assert_eq!((f.grass.len(), f.grass[0].params.height, f.grass_none), (1, 0.25, false));
         assert!(from_text("Grass none\n").0.grass_none);
@@ -1195,6 +1358,58 @@ mod tests {
         let (f, w) = from_text("Piece ground Point 0 0\nPiece nonsense\nPiece wall From 0 0 0\nPiece patch Vertex 0 0 0 Vertex 1 0 0 Vertex 1 1 0\n");
         assert_eq!(f.pieces.len(), 1);
         assert_eq!(w.len(), 3);
+    }
+
+    /// The ground light is the Gouraud colour under a point: interpolated across a quad, the nearest
+    /// height wins, walls and points off the ground give none.
+    #[test]
+    fn hill_point_height_round_trips() {
+        let (f, bad) = from_text("Piece hill Texture A Point 0 0 Point 5 5 12.5 Height 4 Width 6\n");
+        assert!(bad.is_empty(), "{bad:?}");
+        let Shape::Hill { points, .. } = &f.pieces[0].shape else { panic!() };
+        assert_eq!((points[0].1, points[1].1), (None, Some(12.5)));
+        let text = to_text(&f);
+        assert!(text.contains("Point 0 0 Point 5 5 12.5 Height"), "{text}");
+        assert_eq!(from_text(&text).0.pieces, f.pieces);
+        assert!(!text.contains("Base"), "{text}");
+    }
+
+    #[test]
+    fn hill_base_round_trips() {
+        let (f, bad) = from_text("Piece hill Texture A Point 0 0 Point 5 5 Height 4 Width 6 Base -3\n");
+        assert!(bad.is_empty(), "{bad:?}");
+        let Shape::Hill { base, .. } = &f.pieces[0].shape else { panic!() };
+        assert_eq!(*base, -3.0);
+        let text = to_text(&f);
+        assert!(text.contains("Width 6 Base -3"), "{text}");
+        assert_eq!(from_text(&text).0.pieces, f.pieces);
+    }
+
+    #[test]
+    fn ground_light_interpolates_under_a_point() {
+        let v = |x: f32, y: f32, z: f32, c: f32| Vertex { pos: [x, y, z], uv: [0.0; 2], color: [c, c, c, 1.0], layer: 0.0, normal: [0.0, 1.0, 0.0], env: 0.0 };
+        // a 40 m quad dark at x 0, light at x 40; a roof 20 m above it; a wall
+        let mut t = vec![v(0.0, 0.0, 0.0, 0.0), v(40.0, 0.0, 0.0, 1.0), v(40.0, 0.0, 40.0, 1.0), v(0.0, 0.0, 0.0, 0.0), v(40.0, 0.0, 40.0, 1.0), v(0.0, 0.0, 40.0, 0.0)];
+        t.extend([v(0.0, 20.0, 0.0, 0.5), v(40.0, 20.0, 0.0, 0.5), v(40.0, 20.0, 40.0, 0.5)]);
+        t.extend([v(10.0, 0.0, 10.0, 0.9), v(10.0, 9.0, 10.0, 0.9), v(10.0, 9.0, 30.0, 0.9)]);
+        let g = GroundLight::new(t.as_chunks::<3>().0.iter());
+        assert_eq!(g.tris.len(), 3, "the wall is left out");
+        let at = |x, y, z| g.at(Vec3::new(x, y, z)).map(|c| c[0]);
+        assert!((at(10.0, 0.0, 20.0).unwrap() - 0.25).abs() < 1e-5);
+        assert!((at(30.0, 1.0, 35.0).unwrap() - 0.75).abs() < 1e-5);
+        assert_eq!(at(30.0, 19.0, 10.0), Some(0.5));
+        assert_eq!(at(30.0, 10.0, 10.0), None, "over 6 m from both");
+        assert_eq!(at(50.0, 0.0, 10.0), None);
+    }
+
+    #[test]
+    fn model_line_defaults_and_needs_a_name() {
+        let (f, w) = from_text("Piece model Name Bush-01 Centre 1 2 3\nPiece model Centre 1 2 3\n");
+        assert_eq!(f.pieces.len(), 1);
+        assert_eq!(f.pieces[0].shape, Shape::Model { name: "Bush-01".into(), centre: [1.0, 2.0, 3.0], scale: 1.0, yaw: 0.0 });
+        assert_eq!(w.len(), 1);
+        // a written model line has no Texture
+        assert!(!to_text(&f).contains("Texture"));
     }
 
     #[test]

@@ -14,11 +14,21 @@ pub const SLICES: u32 = 64;
 /// First slice boundary (m): closer than this the fog fades to nothing.
 pub const NEAR: f32 = 1.0;
 
-/// Headlight scatter relative to the street lamps' gain (`FogTune::lamps`) [design choice, tuned from shots].
-pub const HEAD_SCATTER: f32 = 0.15;
+// Headlight scatter relative to the street lamps' gain (`FogTune::lamps`) [design choice, tuned from shots].
+motor_tune::tunable! {
+    /// Headlight scatter relative to the street lamps' gain [design choice, tuned from shots].
+    /// range: 0..1
+    /// area: Graphics/Fog
+    pub HEAD_SCATTER: f32 = 0.15;
+}
 
-/// Weight of the reprojected history in the temporal blend [design choice, tuned from shots].
-pub const HISTORY: f32 = 0.9;
+// Weight of the reprojected history in the temporal blend [design choice, tuned from shots].
+motor_tune::tunable! {
+    /// Weight of the reprojected history in the volumetric fog's temporal blend [design choice, tuned from shots].
+    /// range: 0..0.99
+    /// area: Graphics/Fog
+    pub HISTORY: f32 = 0.9;
+}
 /// Frames of the jitter sequence (Halton 2, 3, 5).
 const JITTER_FRAMES: u32 = 16;
 
@@ -142,7 +152,7 @@ impl VolFog {
             let ty = if msaa { "texture_depth_multisampled_2d" } else { "texture_depth_2d" };
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("fog volume shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("volfog.wgsl").replace("DEPTH_TEX", ty).into()),
+                source: wgpu::ShaderSource::Wgsl(crate::shaders::src("volfog.wgsl").replace("DEPTH_TEX", ty).into()),
             })
         });
         let buffer = |visibility| wgpu::BindGroupLayoutEntry {
@@ -271,7 +281,7 @@ impl VolFog {
     pub fn step(&self, vp: Mat4, pos: Vec3, fwd: Vec3, far: f32) -> ([[f32; 4]; 4], [f32; 4]) {
         let mut t = self.temporal.borrow_mut();
         // CLASSIC-like cut test of the velocity blur: a jump or a sharp turn has nothing to blend with
-        if t.valid && (pos.distance(t.pos) > crate::render::CUT_DISTANCE || fwd.dot(t.fwd) < crate::render::CUT_COS || far != t.far) {
+        if t.valid && (pos.distance(t.pos) > crate::render::CUT_DISTANCE.get() || fwd.dot(t.fwd) < crate::render::CUT_COS.get() || far != t.far) {
             t.valid = false;
         }
         if !t.valid {
@@ -281,7 +291,7 @@ impl VolFog {
             (Mat4::IDENTITY, [0.5, 0.5, 0.5, 0.0])
         } else {
             let i = t.age % JITTER_FRAMES + 1;
-            (t.vp, [halton(i, 2), halton(i, 3), halton(i, 5), HISTORY])
+            (t.vp, [halton(i, 2), halton(i, 3), halton(i, 5), HISTORY.get()])
         };
         t.valid = true;
         t.vp = vp;

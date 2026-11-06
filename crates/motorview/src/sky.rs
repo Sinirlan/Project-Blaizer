@@ -11,16 +11,28 @@
 
 use std::path::{Path, PathBuf};
 
-/// Largest value kept from the file (f16 tops out at 65504; the sun disc of a clear-sky HDRI
-/// is far above it and would turn into inf in the mips).
-const MAX_RADIANCE: f32 = 60000.0;
+// Largest value kept from the file (f16 tops out at 65504; the sun disc of a clear-sky HDRI
+// is far above it and would turn into inf in the mips).
+motor_tune::tunable! {
+    /// Largest value kept from a sky HDRI file (f16 tops out at 65504; the sun disc would turn into inf in the mips).
+    /// range: 1000..65000
+    /// applies: reload
+    /// area: Graphics/Sky
+    MAX_RADIANCE: f32 = 60000.0;
+}
 
 /// Columns of the mip level the irradiance is projected from (the sky is smooth at that size).
 const SH_WIDTH: usize = 512;
 
-/// Texels brighter than this many times the upper half's median luminance are scaled down to it
-/// before the irradiance projection: the sun is `Globals::sun`, not ambient light.
-const SH_SUN_CLIP: f32 = 8.0;
+// Texels brighter than this many times the upper half's median luminance are scaled down to it
+// before the irradiance projection: the sun is `Globals::sun`, not ambient light.
+motor_tune::tunable! {
+    /// Texels brighter than this many times the upper half's median luminance are scaled down before the irradiance projection: the sun is `Globals::sun`, not ambient light.
+    /// range: 1..64
+    /// applies: reload
+    /// area: Graphics/Sky
+    SH_SUN_CLIP: f32 = 8.0;
+}
 
 pub struct Hdri {
     pub width: u32,
@@ -164,7 +176,7 @@ fn decode(path: &Path) -> Result<Hdri, String> {
     }
     for p in &mut px {
         for c in &mut p[..3] {
-            *c = if c.is_finite() { c.clamp(0.0, MAX_RADIANCE) } else { 0.0 };
+            *c = if c.is_finite() { c.clamp(0.0, MAX_RADIANCE.get()) } else { 0.0 };
         }
         p[3] = 1.0;
     }
@@ -277,7 +289,7 @@ fn irradiance_sh(px: &[[f32; 4]], w: usize, h: usize) -> [[f32; 3]; 9] {
     let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
     let mut upper: Vec<f32> = px[..w * h / 2].iter().map(luma).collect();
     let mid = upper.len() / 2;
-    let limit = SH_SUN_CLIP * upper.select_nth_unstable_by(mid, f32::total_cmp).1.max(1e-4);
+    let limit = SH_SUN_CLIP.get() * upper.select_nth_unstable_by(mid, f32::total_cmp).1.max(1e-4);
     let mut sh = [[0f64; 3]; 9];
     for y in 0..h {
         let t = (y as f32 + 0.5) / h as f32 * std::f32::consts::PI;

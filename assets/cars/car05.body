@@ -70,4 +70,7 @@ Vent from=10,10,10 lo=0,0.63,1.49 hi=0.35,0.68,1.64 rgb=3,3,3 frame=0.008 inset=
 Smooth from=219,218,216 lo=0.7,0.4,1.0;0,0.3,1.7 hi=0.95,0.8,1.7;0.7,0.62,2.0 max_deg=50 step=0.025 loose=0 round=0.1
 
 # Every edge cut and every face remeshed at 4 cm, like the other base bodies.
-Refine step=0.04
+# `seams=1` (#387, as the Avalanche's, #177): [O] the original meets a long edge with two or more
+# shorter ones in places (T-junctions); cutting the open edges at those corners first closes the
+# seam. Mesh check, open edges 772 -> 606, no new defect.
+Refine step=0.04 seams=1

@@ -160,8 +160,13 @@ pub struct World {
     pub gravity: f32,
 }
 
-/// The game's gravity, m/s² (0x4814ac).
-pub const GRAVITY: f32 = 15.81;
+motor_tune::tunable! {
+    /// The game's gravity (0x4814ac) [O]. A race takes it when the track loads.
+    /// range: 1..40
+    /// unit: m/s²
+    /// applies: restart
+    pub GRAVITY: f32 = 15.81;
+}
 
 impl World {
     pub fn load(root: &Path, track: u32) -> Result<World, String> {
@@ -182,7 +187,7 @@ impl World {
         if materials.is_empty() {
             materials.push(Material::default());
         }
-        Ok(World { col, materials, surface, gravity: GRAVITY })
+        Ok(World { col, materials, surface, gravity: GRAVITY.get() })
     }
 
     pub fn raycast(&self, a: Vec3, b: Vec3) -> Option<RayHit> {

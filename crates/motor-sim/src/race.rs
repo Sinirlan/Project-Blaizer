@@ -12,12 +12,19 @@ use std::path::Path;
 
 /// Spline samples per key interval (the game's group index is sample >> 4).
 const SAMPLES_PER_KEY: usize = 16;
-/// Wrong-way timer: set above 2000 ms, capped at 2500 ms (0x425b44).
 /// Largest forward key step that still extends the visited chain (= the projection's forward
 /// search window of 256 samples).
 const MAX_KEY_SKIP: usize = 16;
-const WRONG_WAY_ON_MS: f32 = 2000.0;
-const WRONG_WAY_CAP_MS: f32 = 2500.0;
+motor_tune::tunable! {
+    /// Wrong-way timer: the wrong-way warning shows once the timer is above this (0x425b44) [O].
+    /// range: 0..10000
+    /// unit: ms
+    WRONG_WAY_ON_MS: f32 = 2000.0;
+    /// Wrong-way timer: it is capped at this, so the warning goes out soon after turning round (0x425b44) [O].
+    /// range: 0..10000
+    /// unit: ms
+    WRONG_WAY_CAP_MS: f32 = 2500.0;
+}
 
 /// Closed Catmull-Rom centreline with arc length (LightWave TCB with t = c = b = 0).
 pub struct Centreline {
@@ -141,19 +148,50 @@ pub struct Turn {
     pub outward: [f32; 2],
 }
 
-pub const ELEVATION_SAMPLES: usize = 64;
-const OUTLINE_STEP: f32 = 10.0;
-/// turn detection: a heading change over this window (m) above `TURN_DEG` is a bend (80 m also sees the
-/// long gentle bends a 40 m window slides past); bends of one sense closer than `TURN_GAP` are one turn
-/// (a double apex or a bend that eases off in the middle); samples every `TURN_STEP`.
-/// A merged bend whose total heading change is under `TURN_MIN_DEG` is a kink, not a corner
-const TURN_WINDOW: f32 = 80.0;
-const TURN_DEG: f32 = 22.0;
-const TURN_GAP: f32 = 30.0;
-const TURN_STEP: f32 = 5.0;
-const TURN_MIN_DEG: f32 = 25.0;
-/// the chord (m) whose midpoint lies inside a bend: outward is away from it
-const TURN_CHORD: f32 = 40.0;
+// The track profile (`Centreline::profile`: elevation graph, outline, corners) is built when a race is built.
+motor_tune::tunable! {
+    /// Points of the track's elevation graph (design choice).
+    /// range: 8..256
+    /// applies: restart
+    pub ELEVATION_SAMPLES: usize = 64;
+    /// Distance between the points of the track's outline (map) (design choice).
+    /// range: 2..50
+    /// unit: m
+    /// applies: restart
+    OUTLINE_STEP: f32 = 10.0;
+    /// Turn detection: a heading change over this window above `TURN_DEG` is a bend (80 m also sees the
+    /// long gentle bends a 40 m window slides past) (design choice).
+    /// range: 10..200
+    /// unit: m
+    /// applies: restart
+    TURN_WINDOW: f32 = 80.0;
+    /// Turn detection: the heading change over `TURN_WINDOW` that makes a bend (design choice).
+    /// range: 5..90
+    /// unit: °
+    /// applies: restart
+    TURN_DEG: f32 = 22.0;
+    /// Turn detection: bends of one sense closer than this are one turn (a double apex or a bend that eases off in
+    /// the middle) (design choice).
+    /// range: 0..100
+    /// unit: m
+    /// applies: restart
+    TURN_GAP: f32 = 30.0;
+    /// Turn detection: the heading is sampled every this far along the track (design choice).
+    /// range: 1..20
+    /// unit: m
+    /// applies: restart
+    TURN_STEP: f32 = 5.0;
+    /// Turn detection: a merged bend whose total heading change is under this is a kink, not a corner (design choice).
+    /// range: 5..120
+    /// unit: °
+    /// applies: restart
+    TURN_MIN_DEG: f32 = 25.0;
+    /// Turn detection: the chord whose midpoint lies inside a bend; outward is away from it (design choice).
+    /// range: 5..200
+    /// unit: m
+    /// applies: restart
+    TURN_CHORD: f32 = 40.0;
+}
 
 impl Centreline {
     /// The samples (game space) and their arc lengths.
@@ -184,10 +222,10 @@ impl Centreline {
 
     pub fn profile(&self) -> TrackProfile {
         let len = self.length.max(1.0);
-        let heights: Vec<f32> = (0..ELEVATION_SAMPLES).map(|i| self.at(len * i as f32 / ELEVATION_SAMPLES as f32).0.y).collect();
+        let heights: Vec<f32> = (0..ELEVATION_SAMPLES.get()).map(|i| self.at(len * i as f32 / ELEVATION_SAMPLES.get() as f32).0.y).collect();
         let low = heights.iter().copied().fold(f32::INFINITY, f32::min);
         let elevation = heights.iter().map(|h| h - low).collect();
-        let n_out = (len / OUTLINE_STEP).round().max(8.0) as usize;
+        let n_out = (len / OUTLINE_STEP.get()).round().max(8.0) as usize;
         let outline_s: Vec<f32> = (0..n_out).map(|i| len * i as f32 / n_out as f32).collect();
         let outline = outline_s
             .iter()
@@ -195,16 +233,16 @@ impl Centreline {
             .collect();
         let sectors = self.sector_arcs();
         // the heading change over the window at every step (signed, -pi..pi)
-        let n = (len / TURN_STEP).ceil().max(4.0) as usize;
+        let n = (len / TURN_STEP.get()).ceil().max(4.0) as usize;
         // from the chord of the points, not the spline's tangent: a key where the tangent flips (Nolby Hills
         // at 965 m) would read as a half turn
         let heading = |s: f32| {
-            let d = self.at(s + TURN_STEP * 0.5).0 - self.at(s - TURN_STEP * 0.5).0;
+            let d = self.at(s + TURN_STEP.get() * 0.5).0 - self.at(s - TURN_STEP.get() * 0.5).0;
             d.x.atan2(d.z)
         };
         let at = |i: usize| len * (i % n) as f32 / n as f32;
-        let bend: Vec<f32> = (0..n).map(|i| (heading(at(i) + TURN_WINDOW * 0.5) - heading(at(i) - TURN_WINDOW * 0.5) + PI).rem_euclid(TAU) - PI).collect();
-        let thr = TURN_DEG.to_radians();
+        let bend: Vec<f32> = (0..n).map(|i| (heading(at(i) + TURN_WINDOW.get() * 0.5) - heading(at(i) - TURN_WINDOW.get() * 0.5) + PI).rem_euclid(TAU) - PI).collect();
+        let thr = TURN_DEG.get().to_radians();
         // runs of one sense above the threshold, walked from a straight sample so no run wraps
         let start = (0..n).find(|&i| bend[i].abs() <= thr);
         let mut runs: Vec<(usize, usize, f32)> = Vec::new(); // first sample, last sample (inclusive, unwrapped), sense
@@ -230,7 +268,7 @@ impl Centreline {
             runs.push((0, n - 1, bend[0].signum()));
         }
         // bends of one sense separated by less than the gap are one turn
-        let gap = (TURN_GAP / TURN_STEP).round() as usize;
+        let gap = (TURN_GAP.get() / TURN_STEP.get()).round() as usize;
         let mut merged: Vec<(usize, usize, f32)> = Vec::new();
         for r in runs {
             match merged.last_mut() {
@@ -241,8 +279,8 @@ impl Centreline {
         // the heading changes of a run, step by step from the start of its window to the end of it (signed, a hairpin
         // wraps past 180 degrees in a single difference)
         let steps = |a: usize, b: usize| -> Vec<(f32, f32)> {
-            let (s0, s1) = (at(a) - TURN_WINDOW * 0.5, at(b) + TURN_WINDOW * 0.5);
-            let k = (((s1 - s0) / TURN_STEP).ceil() as usize).max(1);
+            let (s0, s1) = (at(a) - TURN_WINDOW.get() * 0.5, at(b) + TURN_WINDOW.get() * 0.5);
+            let k = (((s1 - s0) / TURN_STEP.get()).ceil() as usize).max(1);
             let p = |i: usize| s0 + (s1 - s0) * i as f32 / k as f32;
             (0..k).map(|i| (p(i + 1), (heading(p(i + 1)) - heading(p(i)) + PI).rem_euclid(TAU) - PI)).collect()
         };
@@ -260,11 +298,11 @@ impl Centreline {
         let mut turns: Vec<Turn> = merged
             .iter()
             .map(|&(a, b, _)| (a, b, total(a, b)))
-            .filter(|&(_, _, deg)| deg >= TURN_MIN_DEG)
+            .filter(|&(_, _, deg)| deg >= TURN_MIN_DEG.get())
             .map(|(a, b, deg)| {
                 let s = apex(a, b);
                 let p = self.at(s).0;
-                let (q0, q1) = (self.at(s - TURN_CHORD * 0.5).0, self.at(s + TURN_CHORD * 0.5).0);
+                let (q0, q1) = (self.at(s - TURN_CHORD.get() * 0.5).0, self.at(s + TURN_CHORD.get() * 0.5).0);
                 // the chord's midpoint lies inside the bend: outward is away from it
                 let inward = Vec3::new((q0.x + q1.x) * 0.5 - p.x, 0.0, (q0.z + q1.z) * 0.5 - p.z).normalize_or(Vec3::X);
                 Turn { s, deg, apex: p.to_array(), outward: [-inward.x, -inward.z] }
@@ -534,8 +572,8 @@ impl Progress {
         } else if ds < -line.length * 0.5 {
             ds += line.length;
         }
-        self.wrong_ms = (self.wrong_ms + if ds < 0.0 { dt_ms } else { -dt_ms }).clamp(0.0, WRONG_WAY_CAP_MS);
-        self.wrong_way = self.wrong_ms > WRONG_WAY_ON_MS;
+        self.wrong_ms = (self.wrong_ms + if ds < 0.0 { dt_ms } else { -dt_ms }).clamp(0.0, WRONG_WAY_CAP_MS.get());
+        self.wrong_way = self.wrong_ms > WRONG_WAY_ON_MS.get();
         // keys must be passed in order before a lap counts
         let groups = self.visited.len();
         let g = sample / SAMPLES_PER_KEY;
@@ -668,10 +706,10 @@ pub(crate) mod tests {
         let line = Centreline::from_motion(&Motion { version: 1, channels: 9, keys }).unwrap();
         let p = line.profile();
         assert_eq!(p.turns.len(), 4, "turns at the corners: {:?}", p.turns);
-        assert_eq!(p.elevation.len(), ELEVATION_SAMPLES);
+        assert_eq!(p.elevation.len(), ELEVATION_SAMPLES.get());
         assert!(p.elevation.iter().all(|&h| h.abs() < 1e-3));
         assert_eq!(p.outline.len(), p.outline_s.len());
-        assert!((p.outline.len() as f32 - p.length / OUTLINE_STEP).abs() <= 1.0);
+        assert!((p.outline.len() as f32 - p.length / OUTLINE_STEP.get()).abs() <= 1.0);
         let (s1, s2) = (line.checkpoints[0].0, line.checkpoints[1].0);
         assert_eq!(p.sectors, [s1, s2]);
         // every turn's outward direction points away from the rectangle's centre

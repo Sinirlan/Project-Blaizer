@@ -5,10 +5,16 @@ use crate::car::{Car, Input};
 use glam::Vec3;
 use motor_data::aidat::RacingLine;
 
-/// Steady-state yaw-rate limit implied by the grip model (rad/s), 03-physics.md §5.
-const YAW_LIMIT: f32 = 0.55;
-/// Braking deceleration used for planning (m/s²).
-const BRAKE_DECEL: f32 = 14.0;
+motor_tune::tunable! {
+    /// Steady-state yaw-rate limit implied by the grip model, 03-physics.md §5 [D].
+    /// range: 0.1..2
+    /// unit: rad/s
+    YAW_LIMIT: f32 = 0.55;
+    /// Braking deceleration the test driver plans with [D].
+    /// range: 2..40
+    /// unit: m/s²
+    BRAKE_DECEL: f32 = 14.0;
+}
 
 pub struct Autopilot {
     nodes: Vec<Vec3>,
@@ -49,12 +55,13 @@ impl Autopilot {
             .unwrap()
             % n;
         let v = car.vel.z.max(0.0);
-        let horizon = (v * v / (2.0 * BRAKE_DECEL) + 40.0) as usize;
+        let (brake_decel, yaw_limit) = (BRAKE_DECEL.get(), YAW_LIMIT.get());
+        let horizon = (v * v / (2.0 * brake_decel) + 40.0) as usize;
         let (mut v_allowed, mut dist) = (f32::MAX, 0.0);
         for k in 0..horizon.min(n) {
             let j = (self.idx + k) % n;
-            let v_corner = self.pace * YAW_LIMIT / self.curvature[j].max(1e-4);
-            v_allowed = v_allowed.min((v_corner * v_corner + 2.0 * BRAKE_DECEL * dist).sqrt());
+            let v_corner = self.pace * yaw_limit / self.curvature[j].max(1e-4);
+            v_allowed = v_allowed.min((v_corner * v_corner + 2.0 * brake_decel * dist).sqrt());
             dist += nodes[j].distance(nodes[(j + 1) % n]);
         }
         let (throttle, brake) = if v > v_allowed + 2.0 {

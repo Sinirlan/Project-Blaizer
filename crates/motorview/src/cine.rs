@@ -21,7 +21,7 @@
 //! `Target`: `car N` (grid slot, 0-based, order of `Cars`), `leader`, `nearest` (static cameras: the
 //! car nearest the eye), `player` (the last slot, as in the viewer's line-up).
 
-use crate::drive::{cam_origin, CamTune, PoseCam};
+use crate::drive::{cam_origin, cam_origin_at, CamTune, PoseCam};
 use crate::render::Camera;
 use glam::{Mat3, Vec3};
 use motor_data::cfg::{Motion, MotionKey};
@@ -822,7 +822,7 @@ fn far_k(zoom: f32) -> f32 {
 
 /// The zoom of a horizontal field of view: 1.0 at the views' `FOV_X` (90 degrees).
 pub fn fov_zoom(fov_deg: f32) -> f32 {
-    (crate::render::FOV_X * 0.5 * DEG).tan() / (fov_deg * 0.5 * DEG).tan()
+    (crate::render::FOV_X.get() * 0.5 * DEG).tan() / (fov_deg * 0.5 * DEG).tan()
 }
 
 /// One step of the cameraman's easing towards `goal` (exponential, time constant `lag` seconds).
@@ -991,7 +991,6 @@ pub struct Director {
     curves: Vec<Curves>,
     /// per camera, per shake: its current strength
     shake: Vec<Vec<f32>>,
-    tune: CamTune,
     focus: usize,
     hidden: Option<usize>,
     /// per camera, as of the last `camera` call: the camera, the slot it shows, whether it hides that car (the editor's preview)
@@ -1017,7 +1016,8 @@ pub fn resolve(race: &Race, t: Target, eye: Option<Vec3>) -> usize {
 fn track_cam(race: &Race, eye: Vec3, target: Target, lag: f32, lead: f32, zoom: Zoom, clear: bool, state: &mut Option<Vec3>, dt: f32) -> (Camera, usize) {
     let slot = resolve(race, target, Some(eye));
     let car = &race.racers[slot].car;
-    let pos = cam_origin(car);
+    // #374: the car where it is drawn
+    let pos = cam_origin_at(&car.p, &race.view_pose(slot));
     let goal = pos + car.world_vel() * lead + Vec3::Y * AIM_UP;
     let at = state.map_or(goal, |p| ease(p, goal, lag, dt));
     *state = Some(at);
@@ -1054,7 +1054,7 @@ impl Director {
             })
             .collect();
         let shake = seq.cameras.iter().map(|c| vec![0.0; c.shakes.len()]).collect();
-        Director { states, curves, shake, tune: CamTune::default(), focus: 0, hidden: None, views: vec![None; seq.cameras.len()] }
+        Director { states, curves, shake, focus: 0, hidden: None, views: vec![None; seq.cameras.len()] }
     }
 
     /// Camera `i` as of the last `camera` call (on air or not): the camera, the slot it shows and whether it hides that car.
@@ -1138,14 +1138,14 @@ impl Director {
             },
             (CamKind::Mounted { target, offset, angles, zoom, hide }, State::Mounted) => {
                 let slot = resolve(race, *target, None);
-                let car = &race.racers[slot].car;
-                let eye = cam_origin(car) + car.rot * *offset;
-                (Camera::from_rot(eye, car.rot * euler_to_rot(*angles * DEG), *zoom, far_k(*zoom)), slot, *hide, since, true)
+                let v = race.view_pose(slot);
+                let eye = cam_origin_at(&race.racers[slot].car.p, &v) + v.rot * *offset;
+                (Camera::from_rot(eye, v.rot * euler_to_rot(*angles * DEG), *zoom, far_k(*zoom)), slot, *hide, since, true)
             }
             (CamKind::Pose { mode, target }, State::Pose(pc)) => {
                 let slot = resolve(race, *target, None);
-                let car = &race.racers[slot].car;
-                (pc.camera(race, &self.tune, cam_origin(car), car.rot, dt), slot, mode.hides_car(), since, true)
+                let v = race.view_pose(slot);
+                (pc.camera(race, &CamTune::live(), cam_origin_at(&race.racers[slot].car.p, &v), v.rot, dt), slot, mode.hides_car(), since, true)
             }
             (CamKind::Path { drive, aim, zoom, clear }, State::Path { aim: state, dir }) => {
                 let cv = &self.curves[i];

@@ -71,14 +71,17 @@ pub struct Params {
     pub foam_height: f32,
     /// strength of the moving light patterns on the shallow bottom, 0..1 (0 = none)
     pub caustics: f32,
+    /// texture bodies: interior holes of the original polygons up to this area (m²) are closed, so
+    /// they are water, not shore (0 = leave them) [design choice]
+    pub fill_holes: f32,
 }
 
 impl Params {
     /// The defaults of a style [design choice].
     pub fn new(style: Style) -> Self {
         match style {
-            Style::Still => Params { style, deep: [0.04, 0.16, 0.22], shallow: [0.2, 0.45, 0.5], clarity: 0.6, wave_height: 0.02, wave_length: 1.5, speed: 0.15, direction: 30.0, chop: 0.0, foam: 0.0, reflect: 1.0, shore: [0.45, 0.6, 0.55], visibility: 3.0, extinction: 4.0, refraction: 0.5, bed_depth: 1.5, tiling: 3.0, normals: 0.3, shore_foam: 0.3, foam_height: 10.0, caustics: 0.6 },
-            Style::Ocean => Params { style, deep: [0.02, 0.1, 0.2], shallow: [0.12, 0.4, 0.5], clarity: 0.3, wave_height: 1.2, wave_length: 28.0, speed: 2.5, direction: 20.0, chop: 0.6, foam: 0.7, reflect: 1.0, shore: [0.4, 0.62, 0.6], visibility: 6.0, extinction: 8.0, refraction: 0.5, bed_depth: 3.0, tiling: 1.0, normals: 0.5, shore_foam: 0.8, foam_height: 0.35, caustics: 0.4 },
+            Style::Still => Params { style, deep: [0.04, 0.16, 0.22], shallow: [0.2, 0.45, 0.5], clarity: 0.6, wave_height: 0.02, wave_length: 1.5, speed: 0.15, direction: 30.0, chop: 0.0, foam: 0.0, reflect: 1.0, shore: [0.45, 0.6, 0.55], visibility: 3.0, extinction: 4.0, refraction: 0.5, bed_depth: 1.5, tiling: 3.0, normals: 0.3, shore_foam: 0.3, foam_height: 10.0, caustics: 0.6, fill_holes: 0.0 },
+            Style::Ocean => Params { style, deep: [0.02, 0.1, 0.2], shallow: [0.12, 0.4, 0.5], clarity: 0.3, wave_height: 1.2, wave_length: 28.0, speed: 2.5, direction: 20.0, chop: 0.6, foam: 0.7, reflect: 1.0, shore: [0.4, 0.62, 0.6], visibility: 6.0, extinction: 8.0, refraction: 0.5, bed_depth: 3.0, tiling: 1.0, normals: 0.5, shore_foam: 0.8, foam_height: 0.35, caustics: 0.4, fill_holes: 0.0 },
         }
     }
 
@@ -182,6 +185,7 @@ pub fn parse(toks: &[&str]) -> Result<Body, String> {
             "ShoreFoam" => { need(1)?; p.shore_foam = v[0].max(0.0) }
             "FoamHeight" => { need(1)?; p.foam_height = v[0].max(0.0) }
             "Caustics" => { need(1)?; p.caustics = v[0].clamp(0.0, 1.0) }
+            "FillHoles" => { need(1)?; p.fill_holes = v[0].max(0.0) }
             _ => {}
         }
     }
@@ -241,6 +245,7 @@ pub fn to_text(b: &Body) -> String {
     c1(&mut l, "ShoreFoam", p.shore_foam, d.shore_foam);
     c1(&mut l, "FoamHeight", p.foam_height, d.foam_height);
     c1(&mut l, "Caustics", p.caustics, d.caustics);
+    c1(&mut l, "FillHoles", p.fill_holes, d.fill_holes);
     l
 }
 
@@ -452,6 +457,64 @@ fn texture_tris(s: &Scene, name: &str) -> Vec<usize> {
     out
 }
 
+/// Triangles closing the interior holes of a triangle soup: the closed loops of its shoreline
+/// (1 cm grid, every vertex on exactly two shore edges) that enclose at most `max_area` m² in XZ.
+/// The loop heights are kept, so a hole in flat water is closed flat. A loop that touches another
+/// one or the outer edge at a vertex is left alone.
+pub(crate) fn hole_patches(tris: &[[[f32; 3]; 3]], max_area: f32) -> Vec<[[f32; 3]; 3]> {
+    use std::collections::HashMap;
+    // vertex key -> its shore neighbours and its position
+    type Nodes = HashMap<[i64; 3], (Vec<[i64; 3]>, [f32; 3])>;
+    let mut at = Nodes::new();
+    for [a, b] in shoreline(tris) {
+        let (ka, kb) = (grid_key(a), grid_key(b));
+        at.entry(ka).or_insert((Vec::new(), a)).0.push(kb);
+        at.entry(kb).or_insert((Vec::new(), b)).0.push(ka);
+    }
+    let mut seen: std::collections::HashSet<[i64; 3]> = Default::default();
+    let mut loops = Vec::new();
+    let mut out = Vec::new();
+    for &start in at.keys() {
+        if seen.contains(&start) {
+            continue;
+        }
+        // walk the loop; `simple` = all its vertices have exactly two neighbours
+        let (mut ring, mut simple, mut prev, mut cur) = (Vec::new(), true, [i64::MIN; 3], start);
+        loop {
+            seen.insert(cur);
+            let (nb, pos) = &at[&cur];
+            ring.push(*pos);
+            simple &= nb.len() == 2;
+            let Some(&next) = nb.iter().find(|&&k| k != prev).filter(|_| nb.len() == 2) else { simple = false; break };
+            prev = cur;
+            cur = next;
+            if cur == start || seen.contains(&cur) {
+                simple &= cur == start;
+                break;
+            }
+        }
+        if simple && ring.len() >= 3 {
+            let pts: Vec<[f32; 2]> = ring.iter().map(|p| [p[0], p[2]]).collect();
+            let area = (0..pts.len()).map(|i| { let (a, b) = (pts[i], pts[(i + 1) % pts.len()]); a[0] * b[1] - b[0] * a[1] }).sum::<f32>().abs() / 2.0;
+            loops.push((ring, pts, area));
+        }
+    }
+    // a hole lies inside a larger loop (the outer edge, which is never closed)
+    let inside = |p: [f32; 2], poly: &[[f32; 2]]| {
+        let n = poly.len();
+        (0..n).filter(|&i| {
+            let (a, b) = (poly[i], poly[(i + 1) % n]);
+            (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+        }).count() % 2 == 1
+    };
+    for (ring, pts, area) in &loops {
+        if *area <= max_area && loops.iter().any(|(_, o, oa)| oa > area && inside(pts[0], o)) {
+            out.extend(super::fill::triangulate(pts).into_iter().map(|t| [ring[t[0]], ring[t[1]], ring[t[2]]]));
+        }
+    }
+    out
+}
+
 /// A vertex on the 1 cm grid, so the world's shared vertices pair up.
 fn grid_key(p: [f32; 3]) -> [i64; 3] {
     p.map(|c| (c * 100.0).round() as i64)
@@ -530,6 +593,14 @@ fn bed_look(s: &Scene, name: &str) -> Option<(f32, [f32; 4])> {
     Some((layer, if area > 0.0 { sum.map(|c| c / area) } else { [1.0; 4] }))
 }
 
+/// A bed triangle made from nothing: `t` with the bed texture's look, uv = world metres /
+/// `BED_TILE`, wound to face up like the fill's ground (the surface is drawn double-sided).
+fn floor_tri(t: &[[f32; 3]; 3], layer: f32, color: [f32; 4]) -> [Vertex; 3] {
+    let v = |p: [f32; 3]| Vertex { pos: p, uv: [p[0] / BED_TILE, p[2] / BED_TILE], color, layer, normal: [0.0, 1.0, 0.0], env: 0.0 };
+    let (p, q) = ([t[1][0] - t[0][0], t[1][2] - t[0][2]], [t[2][0] - t[0][0], t[2][2] - t[0][2]]);
+    if p[1] * q[0] - p[0] * q[1] > 0.0 { [v(t[0]), v(t[1]), v(t[2])] } else { [v(t[0]), v(t[2]), v(t[1])] }
+}
+
 /// Mesh the bodies of `bodies` against the world of `s`. Texture bodies take the world
 /// triangles (same vertices, so the surface sits exactly where the original's did); areas are
 /// triangulated. The first `MAX_BODIES` bodies count.
@@ -586,6 +657,19 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
                     m.hide[ti] = true;
                     tris.push([v[0].pos, v[1].pos, v[2].pos]);
                 }
+                // interior holes of the original's polygons become water too (`FillHoles`); they
+                // have no world triangle to hide, and take the bed's look from the texture
+                if b.params.fill_holes > 0.0 {
+                    let patch = hole_patches(&tris, b.params.fill_holes);
+                    let look = match &b.source {
+                        Source::Texture { name, .. } => name.split('+').next().and_then(|n| bed_look(s, n)),
+                        _ => None,
+                    };
+                    if let Some((layer, color)) = look {
+                        floor.extend(patch.iter().map(|t| floor_tri(t, layer, color)));
+                    }
+                    tris.extend(patch);
+                }
             }
             Source::Area { level, points } => {
                 for t in super::fill::triangulate(points) {
@@ -594,13 +678,7 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
                 }
                 // a `Bed` texture gives the area a floor (texture bodies have the hidden polygons)
                 if let Some((layer, color)) = b.bed.as_deref().and_then(|n| bed_look(s, n)) {
-                    let v = |p: [f32; 3]| Vertex { pos: p, uv: [p[0] / BED_TILE, p[2] / BED_TILE], color, layer, normal: [0.0, 1.0, 0.0], env: 0.0 };
-                    // wound to face up like the fill's ground (the surface is drawn double-sided)
-                    floor.extend(tris.iter().map(|t| {
-                        let (p, q) = ([t[1][0] - t[0][0], t[1][2] - t[0][2]], [t[2][0] - t[0][0], t[2][2] - t[0][2]]);
-                        let up = p[1] * q[0] - p[0] * q[1] > 0.0;
-                        if up { [v(t[0]), v(t[1]), v(t[2])] } else { [v(t[0]), v(t[2]), v(t[1])] }
-                    }));
+                    floor.extend(tris.iter().map(|t| floor_tri(t, layer, color)));
                 }
             }
         }
@@ -676,6 +754,31 @@ mod tests {
         let b = parse(&t.split_whitespace().collect::<Vec<_>>()).unwrap();
         assert_eq!(b.source, Source::Texture { name: "WATT".into(), piece: Some([22.0, -15.2, -1240.0]) });
         assert_eq!(parse(&to_text(&b).split_whitespace().skip(1).collect::<Vec<_>>()).unwrap(), b);
+    }
+
+    #[test]
+    fn holes_are_closed_up_to_their_area() {
+        // a 3 x 3 grid of 10 m cells without the middle one: a 100 m² hole in a 900 m² outline
+        let mut tris = Vec::new();
+        for (cx, cz) in (0..9).map(|i| (i % 3, i / 3)).filter(|&c| c != (1, 1)) {
+            let (x0, z0, x1, z1) = (cx as f32 * 10.0, cz as f32 * 10.0, cx as f32 * 10.0 + 10.0, cz as f32 * 10.0 + 10.0);
+            let (a, b, c, d) = ([x0, -3.0, z0], [x1, -3.0, z0], [x1, -3.0, z1], [x0, -3.0, z1]);
+            tris.extend([[a, b, c], [a, c, d]]);
+        }
+        assert!(hole_patches(&tris, 50.0).is_empty());
+        let patch = hole_patches(&tris, 150.0);
+        assert_eq!(patch.len(), 2);
+        let area: f32 = patch.iter().map(|t| ((t[1][0] - t[0][0]) * (t[2][2] - t[0][2]) - (t[1][2] - t[0][2]) * (t[2][0] - t[0][0])).abs() / 2.0).sum();
+        assert!((area - 100.0).abs() < 1e-3);
+        // closed: only the outer 12 edges are left as shore
+        let mut all = tris.clone();
+        all.extend(patch);
+        assert_eq!(shoreline(&all).len(), 12);
+        // the outer boundary is never a hole, however large the limit
+        assert_eq!(hole_patches(&tris, 1e9).len(), 2);
+        let t = parse(&["Texture", "Pyttesnu", "Style", "ocean", "FillHoles", "1500"]).unwrap();
+        assert_eq!(t.params.fill_holes, 1500.0);
+        assert_eq!(parse(&to_text(&t).split_whitespace().skip(1).collect::<Vec<_>>()).unwrap(), t);
     }
 
     #[test]

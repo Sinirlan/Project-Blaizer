@@ -46,6 +46,7 @@ jobs:
           {
             echo "VERSION=$ver"
             echo "PKG=motorhead-$tag-${{ matrix.platform }}"
+            echo "INSTALLER=motorinstall-$tag-${{ matrix.platform }}"
             echo "MOTOR_GIT_HASH=${GITHUB_SHA::7}"
           } >> "$GITHUB_ENV"
 
@@ -66,6 +67,8 @@ jobs:
           1. Run motorinstall (no arguments opens a window) and pick your CD image and a target folder.
           2. Copy motorhead next to motor.exe in that folder and start it there, or start it with the
              folder as its argument: motorhead /path/to/folder
+          3. Optional, for the Remaster look: download motorhead-remaster-<version>.zip from the same
+             Release page and unzip it over the install folder (it holds one folder, remaster/).
 
           Settings: ~/.config/motorhead/settings.cfg (Windows: %APPDATA%\Motorhead\settings.cfg).
           Licence: GNU AGPL-3.0-or-later (LICENSE). The source of this build is the tagged commit of the
@@ -96,6 +99,18 @@ jobs:
             echo "user home paths in the programs" >&2; exit 1
           fi
 
+      - name: Stage the standalone installer (separate download)
+        run: |
+          # Windows: the bare .exe. Linux: a tar.gz, because an artifact upload drops the executable bit.
+          if [[ "${{ matrix.archive }}" == tar.gz ]]; then
+            mkdir "$INSTALLER" && cp "target/release/motorinstall" LICENSE "$INSTALLER/"
+            tar -czf "$INSTALLER.tar.gz" "$INSTALLER"
+            echo "INSTALLER_FILE=$INSTALLER.tar.gz" >> "$GITHUB_ENV"
+          else
+            cp "target/release/motorinstall.exe" "$INSTALLER.exe"
+            echo "INSTALLER_FILE=$INSTALLER.exe" >> "$GITHUB_ENV"
+          fi
+
       - name: Archive
         run: |
           if [[ "${{ matrix.archive }}" == tar.gz ]]; then
@@ -103,11 +118,21 @@ jobs:
           else
             7z a -tzip "$PKG.zip" "$PKG" >/dev/null
           fi
-          ls -l "$PKG.${{ matrix.archive }}"
+          ls -l "$PKG.${{ matrix.archive }}" "$INSTALLER_FILE"
+          # The installer download is the same program as the one in the package, and not empty.
+          [[ -s $INSTALLER_FILE ]] || { echo "$INSTALLER_FILE is missing or empty" >&2; exit 1; }
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            cmp "$INSTALLER_FILE" "$PKG/motorinstall.exe" || { echo "installer differs from the packaged one" >&2; exit 1; }
+          else
+            tar -xzOf "$INSTALLER_FILE" "$INSTALLER/motorinstall" | cmp - "$PKG/motorinstall" \
+              || { echo "installer differs from the packaged one" >&2; exit 1; }
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PKG }}
-          path: ${{ env.PKG }}.${{ matrix.archive }}
+          path: |
+            ${{ env.PKG }}.${{ matrix.archive }}
+            ${{ env.INSTALLER_FILE }}
           if-no-files-found: error
 
   release:
@@ -118,9 +143,13 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}   # this job has no checkout, so gh cannot read a git remote
+      GH_REPO: ${{ github.repository }}   # the checkout is sparse (CHANGELOG.md only), keep gh independent of a git remote
       TAG: ${{ github.ref_name }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -132,13 +161,23 @@ jobs:
           cat SHA256SUMS
           pre=
           if [[ $TAG == *-* ]]; then pre='This is a pre-release; its version also shows the commit it was built from. '; fi
-          cat > ../notes.md <<EOF
+          cd ..
+          # The section of CHANGELOG.md for this tag ("## vX.Y.Z[ - date]" up to the next "## ").
+          awk -v v="## $TAG" '
+            index($0, v) == 1 { r = substr($0, length(v) + 1); if (r == "" || r ~ /^[ -]/) { on = 1; next } }
+            /^## / { on = 0 }
+            on { print }' CHANGELOG.md | sed '/./,$!d' > changes.md
+          [[ -n $(tr -d '[:space:]' < changes.md) ]] || { echo "CHANGELOG.md has no section for $TAG" >&2; exit 1; }
+          cat > notes.md <<EOF
           Motorhead $TAG for Linux (x86_64) and Windows (x86_64).
 
           ${pre}The packages contain the programs only and **no game data**: you need your own copy of Motorhead (\`motorinstall\` builds the install folder from your CD image). \`SHA256SUMS\` lists the checksums.
 
+          Downloads: \`motorhead-$TAG-<platform>\` is the game with the installer; \`motorinstall-$TAG-<platform>\` is the installer alone; \`motorhead-remaster-$TAG.zip\` is the optional Remaster data (unzip it over the install folder; it is added a few minutes after the release is created, with its own \`.sha256\` file).
+
           Source: these programs were built from the commit tagged \`$TAG\` in this repository (GNU AGPL-3.0-or-later).
           EOF
+          { printf '\n## What changed\n\n'; cat changes.md; printf '\nAll releases: [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md)\n' "$GH_REPO" "$TAG"; } >> notes.md
       - name: Create the release
         run: |
           flags=()

@@ -13,12 +13,23 @@ use motor_data::cfg::Motion;
 
 /// End of the fixed view and start of spline 1 (`0x45b754`: base + 0x1770).
 pub const HOLD_S: f32 = 6.0;
-/// Spline 2 starts (`0x45b791`: base + 0x1f40) ...
-const SPLINE2_S: f32 = 8.0;
-/// ... and the start camera ends (`0x45b9b5`: base + 0x2710).
-pub const END_S: f32 = 10.0;
-/// Motion frames per millisecond (`0x4d4f46`).
-const FRAMES_PER_MS: f32 = 0.0125;
+// HOLD_S stays a plain const: it is also the moment the "3" appears and the camera keys unlock
+// (the countdown trio of `session.rs`), so it moves with those, not on its own.
+motor_tune::tunable! {
+    /// Spline 2 starts (`0x45b791`: base + 0x1f40) [O], seconds after the race init. Keep it between
+    /// `HOLD_S` (6 s) and `END_S`.
+    /// range: 6..12
+    /// unit: s
+    SPLINE2_S: f32 = 8.0;
+    /// The start camera ends (`0x45b9b5`: base + 0x2710) [O], seconds after the race init; the player's camera returns.
+    /// range: 6..12
+    /// unit: s
+    pub END_S: f32 = 10.0;
+    /// Motion frames per millisecond (`0x4d4f46`) [O]: how fast the fly-by splines play.
+    /// range: 0.001..0.05
+    /// unit: frames/ms
+    FRAMES_PER_MS: f32 = 0.0125;
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct StartCamera {
@@ -33,14 +44,15 @@ impl StartCamera {
     /// The eye (game space) `t` seconds after the race init; `None` once the start camera is
     /// over, or when the window's spline is missing (the game then keeps the player's camera).
     pub fn eye(&self, t: f32) -> Option<Vec3> {
+        let (spline2, end) = (SPLINE2_S.get(), END_S.get());
         let (m, from) = match t {
             t if t < 0.0 => return None,
             t if t < HOLD_S => (self.splines[0].as_ref()?, None),
-            t if t < SPLINE2_S => (self.splines[0].as_ref()?, Some(HOLD_S)),
-            t if t < END_S => (self.splines[1].as_ref()?, Some(SPLINE2_S)),
+            t if t < spline2 => (self.splines[0].as_ref()?, Some(HOLD_S)),
+            t if t < end => (self.splines[1].as_ref()?, Some(spline2)),
             _ => return None,
         };
-        let frame = from.map_or(0.0, |s| (t - s) * 1000.0 * FRAMES_PER_MS);
+        let frame = from.map_or(0.0, |s| (t - s) * 1000.0 * FRAMES_PER_MS.get());
         let v = evaluate(m, frame, false);
         (v.len() >= 3).then(|| Vec3::new(v[0], v[1], v[2]))
     }

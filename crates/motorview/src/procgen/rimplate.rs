@@ -1,8 +1,9 @@
 //! REMASTER window plates (#337 phase 2, 09-remaster 9.23): a disc on the rim face that follows
 //! the dish, with `count` copies of one window cut out (a holed disc), none (a full cover) or
-//! with floors (a grooved cover). The top is tessellated by lyon with the windows as holes and
-//! seed points inside, flipped to Delaunay and refined so it stays on the dish; every outline
-//! gets the star plate's chamfer and wall.
+//! with floors (a grooved cover). A window may be several outlines cut together (a window and its
+//! slots, #386). The top is tessellated by lyon with the windows as holes and seed points inside,
+//! flipped to Delaunay and refined so it stays on the dish; every outline gets the star plate's
+//! chamfer and wall.
 
 use super::{tri, SEGMENTS, V};
 use crate::scene::Vertex;
@@ -16,9 +17,10 @@ use std::f32::consts::{PI, TAU};
 /// A plate from radius `r0` to `r1` (fractions of the rim radius; `r0` 0 = solid to the hub),
 /// its top `lift` above the dish (× half-width) and 1 mm under the star, so it lies over the
 /// spokes (2 mm under) [design choice], its walls `depth` deep (× half-width). `count` windows
-/// of one `outline` ((radius, angle off the window's centre) points, closed, rim fractions and
-/// radians; edges run straight in radius and angle, so an edge at one radius is an arc) sit at
-/// the spoke angle plus `phase` window pitches (`TAU / count`) and more pitches; corners are
+/// sit at the spoke angle plus `phase` window pitches (`TAU / count`) and more pitches; each is
+/// the `outlines` ((radius, angle off the window's centre) points, closed, rim fractions and
+/// radians; edges run straight in radius and angle, so an edge at one radius is an arc), all cut
+/// in one fill, so they must neither cross nor nest (#386: a window and its slots); corners are
 /// rounded by `corner` (rim fractions). `groove` > 0: the windows have a floor that deep
 /// (× half-width) instead of opening.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,7 +31,7 @@ pub struct WindowPlate {
     pub lift: f32,
     pub count: usize,
     pub phase: f32,
-    pub outline: Vec<[f32; 2]>,
+    pub outlines: Vec<Vec<[f32; 2]>>,
     pub corner: f32,
     pub groove: f32,
 }
@@ -37,7 +39,7 @@ pub struct WindowPlate {
 impl Default for WindowPlate {
     /// five round holes between the spokes, solid to the hub
     fn default() -> Self {
-        WindowPlate { r0: 0.0, r1: 0.84, depth: 0.15, lift: 0.0, count: 5, phase: 0.5, outline: circle(0.55, 0.17, 16), corner: 0.0, groove: 0.0 }
+        WindowPlate { r0: 0.0, r1: 0.84, depth: 0.15, lift: 0.0, count: 5, phase: 0.5, outlines: vec![circle(0.55, 0.17, 16)], corner: 0.0, groove: 0.0 }
     }
 }
 
@@ -83,6 +85,33 @@ pub fn teardrop(ri: f32, ro: f32, wi: f32, wo: f32) -> Vec<[f32; 2]> {
         p.push(Vec2::new(ca, 0.0));
     }
     p.into_iter().map(polar).collect()
+}
+
+/// The outline `o` turned `da` radians round the wheel (a slot moved off the window's centre).
+pub fn turned(o: &[[f32; 2]], da: f32) -> Vec<[f32; 2]> {
+    o.iter().map(|q| [q[0], q[1] + da]).collect()
+}
+
+/// The window between two neighbouring arms `pitch` radians apart (#386): the arm's edge follows
+/// `profile`, (radius, half-width) points from the hub out (rim fractions), straight in the arm's
+/// own frame between them; a radius given twice is a notch (a step in the width). The arms' metal
+/// is what the plate keeps; the window's inner and outer edges are arcs.
+pub fn arm_gap(pitch: f32, profile: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    // the arm edge as (along, across) points, a step per 0.1 of a segment's length (up to 4: the
+    // window's edges run straight in radius and angle between them, a hair off the straight line)
+    let frame = |q: [f32; 2]| { let w = q[1].clamp(0.0, q[0]); Vec2::new((q[0] * q[0] - w * w).sqrt(), w) };
+    let mut edge: Vec<Vec2> = Vec::new();
+    for (i, w) in profile.windows(2).enumerate() {
+        let (a, b) = (frame(w[0]), frame(w[1]));
+        let n = ((a.distance(b) / 0.1).ceil() as usize).clamp(1, 4);
+        edge.extend((usize::from(i > 0)..=n).map(|s| a.lerp(b, s as f32 / n as f32)));
+    }
+    if profile.len() == 1 {
+        edge.push(frame(profile[0]));
+    }
+    // the arm at -pitch/2 gives the window's - side, its mirror image the + side
+    let side: Vec<[f32; 2]> = edge.iter().map(|p| [p.length(), -pitch * 0.5 + p.y.atan2(p.x)]).collect();
+    side.iter().copied().chain(side.iter().rev().map(|q| [q[0], -q[1]])).collect()
 }
 
 /// point at arc length `d` along a polyline (from its end when `back`)
@@ -159,10 +188,10 @@ fn window_loop(outline: &[[f32; 2]], base: f32, rr: f32, corner: f32) -> Vec<Vec
     out
 }
 
-/// The outline of one window as it is built (densified and rounded), as (radius, angle)
-/// points round its centre in rim fractions: for the editor's checks.
-pub fn window_outline(p: &WindowPlate) -> Vec<[f32; 2]> {
-    window_loop(&p.outline, 0.0, 1.0, p.corner).into_iter().map(|q| [q.length(), q.x.atan2(q.y)]).collect()
+/// Outline `i` of a window as it is built (densified and rounded), as (radius, angle) points
+/// round the window's centre in rim fractions: for the editor's checks.
+pub fn window_outline(p: &WindowPlate, i: usize) -> Vec<[f32; 2]> {
+    window_loop(&p.outlines[i], 0.0, 1.0, p.corner).into_iter().map(|q| [q.length(), q.x.atan2(q.y)]).collect()
 }
 
 /// a ring of `SEGMENTS` points at radius `r` (metres), at the lathe's angles so it meets the
@@ -430,11 +459,11 @@ impl Loop {
 
 /// Build the plate `p` (09-remaster 9.23): `top(r)` is the dish height at radius r (metres),
 /// `phase` the spoke angle, `ch` the chamfer, `hidden` the radius the star plate covers (the
-/// top is not refined under it). Draws nothing for a window of fewer than three points or if
-/// lyon fails.
+/// top is not refined under it). Outlines of fewer than three points are skipped; draws nothing
+/// for windows without any other or if lyon fails.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plate(out: &mut Vec<Vertex>, side: f32, rr: f32, h: f32, top: &dyn Fn(f32) -> f32, phase: f32, p: &WindowPlate, ch: f32, hidden: f32, c: [f32; 4]) {
-    if p.count > 0 && p.outline.len() < 3 {
+    if p.count > 0 && p.outlines.iter().all(|o| o.len() < 3) {
         return;
     }
     let f = |q: Vec2| top(q.length());
@@ -445,9 +474,11 @@ pub(super) fn plate(out: &mut Vec<Vertex>, side: f32, rr: f32, h: f32, top: &dyn
     let (wall_depth, floor) = if p.groove > 0.0 { (p.groove * h, true) } else { (p.depth * h, false) };
     for k in 0..p.count {
         let base = phase + (k as f32 + p.phase) * TAU / p.count as f32;
-        let pts = split_loop(&window_loop(&p.outline, base, rr, p.corner), &f, DISH_TOL);
-        if pts.len() >= 3 {
-            loops.push(Loop::new(pts, true, wall_depth, floor));
+        for o in p.outlines.iter().filter(|o| o.len() >= 3) {
+            let pts = split_loop(&window_loop(o, base, rr, p.corner), &f, DISH_TOL);
+            if pts.len() >= 3 {
+                loops.push(Loop::new(pts, true, wall_depth, floor));
+            }
         }
     }
     // a point `down` under the plate's top, with the dish's normal there
@@ -542,13 +573,13 @@ mod tests {
     fn holed_plate_builds() {
         for outline in [circle(0.55, 0.17, 16), ngon(0.55, 0.16, 6, 0.0), teardrop(0.3, 0.78, 0.06, 0.3), trapezoid(0.35, 0.75, 0.4, 0.5)] {
             for corner in [0.0, 0.02] {
-                let p = WindowPlate { outline: outline.clone(), corner, ..Default::default() };
+                let p = WindowPlate { outlines: vec![outline.clone()], corner, ..Default::default() };
                 let v = build(&p);
                 let (lo, hi) = v.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
                 let want = Vec3::new(HW, R, R);
                 assert!((hi - want).abs().max_element() < 1e-5 && (lo + want).abs().max_element() < 1e-5);
                 assert!(faces_out(&v));
-                let o = window_outline(&p);
+                let o = window_outline(&p, 0);
                 let rc = o.iter().map(|q| q[0]).fold(f32::MAX, f32::min) * 0.5 + o.iter().map(|q| q[0]).fold(0.0, f32::max) * 0.5;
                 for k in 0..p.count {
                     let a = PHASE + (k as f32 + p.phase) * TAU / p.count as f32;
@@ -560,6 +591,52 @@ mod tests {
         }
     }
 
+    /// #386: a hexagonal window and twin slots on one plate: all three holes open, the metal
+    /// between them and between the twin slots stays, the box and the facing hold
+    #[test]
+    fn slotted_plate_builds() {
+        let pitch = TAU / 5.0;
+        let slot = trapezoid(0.3, 0.8, 0.05, 0.05);
+        let p = WindowPlate { count: 5, phase: 0.0, outlines: vec![ngon(0.56, 0.2, 6, 0.0), turned(&slot, pitch * 0.5 - 0.1), turned(&slot, -pitch * 0.5 + 0.1)], corner: 0.01, ..Default::default() };
+        let v = build(&p);
+        assert!(faces_out(&v));
+        let (lo, hi) = v.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
+        let want = Vec3::new(HW, R, R);
+        assert!((hi - want).abs().max_element() < 1e-5 && (lo + want).abs().max_element() < 1e-5);
+        for k in 0..5 {
+            let a = PHASE + k as f32 * pitch;
+            assert!(!covered(&v, 0.56, a), "hex {k} covered");
+            for s in [-1.0, 1.0] {
+                assert!(!covered(&v, 0.6, a + s * (pitch * 0.5 - 0.1)), "slot {k} {s} covered");
+                assert!(covered(&v, 0.6, a + s * 0.42), "no metal between hex {k} and its slot");
+            }
+            assert!(covered(&v, 0.6, a + pitch * 0.5), "no metal between the twin slots after {k}");
+        }
+        // walls for three outlines instead of one
+        let one = build(&WindowPlate { outlines: vec![p.outlines[0].clone()], ..p.clone() });
+        assert!(v.len() > one.len());
+    }
+
+    /// #386: notched arms are the metal between arm-gap windows: the gap opens, the arm's centre
+    /// is metal, and across one notch the arm is wide outside it and narrow inside
+    #[test]
+    fn arm_gap_builds() {
+        let pitch = TAU / 5.0;
+        let profile = [[0.25, 0.12], [0.5, 0.05], [0.5, 0.14], [0.75, 0.05], [0.8, 0.05]];
+        let p = WindowPlate { count: 5, phase: 0.0, outlines: vec![arm_gap(pitch, &profile)], corner: 0.005, ..Default::default() };
+        let v = build(&p);
+        assert!(faces_out(&v));
+        // the arms sit at the window pitch's edges
+        for k in 0..5 {
+            let arm = PHASE + (k as f32 + 0.5) * pitch;
+            assert!(!covered(&v, 0.6, arm - pitch * 0.5), "gap {k} covered");
+            assert!(covered(&v, 0.6, arm), "arm {k} missing");
+            let off = |r: f32| (0.09f32 / r).asin();
+            assert!(covered(&v, 0.53, arm - off(0.53)), "arm {k} narrow outside the notch");
+            assert!(!covered(&v, 0.47, arm - off(0.47)), "arm {k} wide inside the notch");
+        }
+    }
+
     /// on a flat face: the walls are two quad rings per outline, one quad per outline edge (sharp
     /// corners add no faces)
     #[test]
@@ -567,8 +644,8 @@ mod tests {
         let flat = |_: f32| 0.0;
         let rr = 0.25;
         for (outline, at_least) in [(circle(0.55, 0.17, 16), 16), (ngon(0.55, 0.16, 6, 0.0), 6)] {
-            let p = WindowPlate { r0: 0.2, outline, ..Default::default() };
-            let per = window_outline(&p).len();
+            let p = WindowPlate { r0: 0.2, outlines: vec![outline], ..Default::default() };
+            let per = window_outline(&p, 0).len();
             assert!(per >= at_least);
             let mut v = Vec::new();
             plate(&mut v, 1.0, rr, HW, &flat, 0.0, &p, 0.004, 0.0, [1.0; 4]);
@@ -583,7 +660,7 @@ mod tests {
     #[test]
     fn grooves_have_floors() {
         let flat = |_: f32| 0.0;
-        let p = WindowPlate { outline: trapezoid(0.3, 0.8, 0.12, 0.2), groove: 0.04, count: 8, ..Default::default() };
+        let p = WindowPlate { outlines: vec![trapezoid(0.3, 0.8, 0.12, 0.2)], groove: 0.04, count: 8, ..Default::default() };
         let mut v = Vec::new();
         plate(&mut v, 1.0, 0.25, HW, &flat, 0.0, &p, 0.004, 0.0, [1.0; 4]);
         let floor = -0.001 - 0.04 * HW;
@@ -594,10 +671,44 @@ mod tests {
         assert!(!deep.is_empty() && deep.iter().all(|&r| (r - 0.84 * 0.25).abs() < 1e-4));
     }
 
+    /// shape statistics over plates of every kind: one outline per plate keeps the mesh it had before
+    /// plates took several outlines (#386). Vertex count within 1 %, the sums of |x|, |y|, |z| within 0.01 %.
+    /// Not a bit hash: `sin` / `cos` / `pow` differ in their last bits between libm implementations
+    /// (Linux and Windows CI) and a hash of rounded floats still flips at a rounding edge
+    #[test]
+    fn one_outline_is_unchanged() {
+        let stats = |v: &[Vertex]| -> [f64; 4] {
+            let sum = |k: usize| v.iter().map(|x| f64::from(x.pos[k].abs())).sum::<f64>();
+            [v.len() as f64, sum(0), sum(1), sum(2)]
+        };
+        let got: Vec<[f64; 4]> = [
+            WindowPlate::default(),
+            WindowPlate { r0: 0.1, r1: 0.8, count: 6, phase: 0.25, outlines: vec![teardrop(0.3, 0.75, 0.0, 0.2)], corner: 0.015, ..Default::default() },
+            WindowPlate { count: 8, outlines: vec![trapezoid(0.3, 0.8, 0.12, 0.2)], groove: 0.04, corner: 0.012, ..Default::default() },
+            WindowPlate { count: 0, outlines: Vec::new(), ..Default::default() },
+        ]
+        .iter()
+        .map(|p| stats(&build(p)))
+        .collect();
+        let want: [[f64; 4]; 4] = [
+            [9201.0, 989.8641, 1171.5140, 1150.6949],
+            [9783.0, 1041.9769, 1210.3807, 1180.1049],
+            [9366.0, 1017.7990, 1221.6008, 1203.0371],
+            [9633.0, 1033.6092, 1172.4391, 1153.0286],
+        ];
+        for (g, w) in got.iter().zip(want) {
+            // a tessellation that flips at a rounding edge may add or drop a few vertices: 1 %; the extents are tight
+            assert!((g[0] - w[0]).abs() <= 0.01 * w[0], "vertex count: {} vs {}", g[0], w[0]);
+            for k in 1..4 {
+                assert!((g[k] - w[k]).abs() <= 1e-4 * w[k], "sum {k}: {} vs {}", g[k], w[k]);
+            }
+        }
+    }
+
     /// no windows: a full cover over the whole face
     #[test]
     fn cover_builds() {
-        let v = build(&WindowPlate { count: 0, outline: Vec::new(), ..Default::default() });
+        let v = build(&WindowPlate { count: 0, outlines: Vec::new(), ..Default::default() });
         assert!(faces_out(&v));
         for a in [0.0, 1.0, 2.5] {
             assert!(covered(&v, 0.5, a) && covered(&v, 0.8, a));
@@ -616,9 +727,9 @@ mod tests {
         let (lo, hi) = r(&teardrop(0.3, 0.8, 0.1, 0.2));
         assert!((lo - 0.3).abs() < 1e-3 && (hi - 0.8).abs() < 1e-3, "{lo} {hi}");
         let t = trapezoid(0.3, 0.8, 0.1, 0.2);
-        let sharp = WindowPlate { outline: t.clone(), ..Default::default() };
-        let round = WindowPlate { outline: t, corner: 0.03, ..Default::default() };
-        let (so, ro) = (window_outline(&sharp), window_outline(&round));
+        let sharp = WindowPlate { outlines: vec![t.clone()], ..Default::default() };
+        let round = WindowPlate { outlines: vec![t], corner: 0.03, ..Default::default() };
+        let (so, ro) = (window_outline(&sharp, 0), window_outline(&round, 0));
         assert!(ro.len() > so.len(), "{} {}", ro.len(), so.len());
         // the outer arc is an arc: every point of it at radius 0.8
         assert!(so.iter().filter(|q| q[0] > 0.79).count() >= 2);
@@ -626,6 +737,16 @@ mod tests {
         // (rounding an inner arc corner cuts its chord, a hair inside the arc)
         assert!(lo > 0.3 - 1e-3 && hi < 0.8 + 1e-5, "{lo} {hi}");
         assert!(ro.iter().all(|q| q[1].abs() <= 0.1 + 1e-4));
+        // an arm gap: symmetric, inside half a pitch, from the profile's first to last radius
+        let pitch = TAU / 5.0;
+        let g = arm_gap(pitch, &[[0.25, 0.1], [0.5, 0.06], [0.5, 0.12], [0.8, 0.05]]);
+        let (lo, hi) = r(&g);
+        assert!((lo - 0.25).abs() < 1e-5 && (hi - 0.8).abs() < 1e-5, "{lo} {hi}");
+        assert!(g.iter().all(|q| q[1].abs() < pitch * 0.5));
+        let n = g.len();
+        assert!((0..n).all(|i| (g[i][0] - g[n - 1 - i][0]).abs() < 1e-6 && (g[i][1] + g[n - 1 - i][1]).abs() < 1e-6));
+        // the edge's half-width is the profile's: at radius 0.25, 0.1 off the arm's centre line
+        assert!(((g[0][1] + pitch * 0.5).sin() * 0.25 - 0.1).abs() < 1e-5);
     }
 }
 

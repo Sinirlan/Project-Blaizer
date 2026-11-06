@@ -18,8 +18,17 @@
 //! Window plates (#337 phase 2, any version): `Window r0 r1 depth lift count phase corner
 //! groove`, then that plate's window outline as `WindowPoint radius angle` lines
 //! (`rimplate::WindowPlate`). A file without them has no plates.
+//!
+//! Twist and wire (#386, any version): an optional 6th `GroupPoint` value, the bank (radians,
+//! written only when not 0), and `Wire count hub offset thickness cross` (written only when the
+//! rim has wire spokes).
+//!
+//! Window outlines (#386): a plate's window may be several outlines (a window and its slots).
+//! The first outline's `WindowPoint` lines follow the `Window` line as before. Each further one
+//! starts with a `WindowOutline` line (no values), written only for a second outline, so a file
+//! with one outline per plate is unchanged.
 
-use super::{Lugs, Mirror, Rivets, RimStyle, Section, SpokeGroup, WindowPlate};
+use super::{Lugs, Mirror, Rivets, RimStyle, Section, SpokeGroup, WindowPlate, Wire};
 use std::path::Path;
 
 const HEADER: &str = "# Motorhead rim v2 (rimshop)";
@@ -74,7 +83,7 @@ pub fn to_text(s: &RimStyle) -> String {
         let section = Section::ALL.iter().position(|&m| m == g.section).unwrap_or(0);
         line("Group", &[g.multiple as f32, g.phase, mirror as f32, section as f32, g.depth, g.smooth as u8 as f32, g.onto_lip as u8 as f32]);
         for p in &g.points {
-            line("GroupPoint", p);
+            line("GroupPoint", if p[5] != 0.0 { &p[..] } else { &p[..5] });
         }
     }
     if s.cap_sides != 0 || s.cap_dome != 0.0 {
@@ -86,10 +95,18 @@ pub fn to_text(s: &RimStyle) -> String {
     if let Some(r) = &s.rivets {
         line("Rivets", &[r.count as f32, r.radius, r.size]);
     }
+    if let Some(w) = &s.wire {
+        line("Wire", &[w.count as f32, w.hub, w.offset, w.thickness, w.cross]);
+    }
     for w in &s.windows {
         line("Window", &[w.r0, w.r1, w.depth, w.lift, w.count as f32, w.phase, w.corner, w.groove]);
-        for p in &w.outline {
-            line("WindowPoint", p);
+        for (i, o) in w.outlines.iter().enumerate() {
+            if i > 0 {
+                line("WindowOutline", &[]);
+            }
+            for p in o {
+                line("WindowPoint", p);
+            }
         }
     }
     t
@@ -158,15 +175,26 @@ pub fn from_text(text: &str) -> Result<RimStyle, String> {
             }
             "GroupPoint" => {
                 need(5)?;
-                groups.last_mut().ok_or(format!("line {}: GroupPoint before any Group", n + 1))?.points.push([v[0], v[1], v[2], v[3], v[4]]);
+                groups.last_mut().ok_or(format!("line {}: GroupPoint before any Group", n + 1))?.points.push([v[0], v[1], v[2], v[3], v[4], v.get(5).copied().unwrap_or(0.0)]);
+            }
+            "Wire" => {
+                need(5)?;
+                s.wire = Some(Wire { count: (v[0].max(0.0) as usize).min(96), hub: v[1], offset: v[2], thickness: v[3], cross: v[4] });
             }
             "Window" => {
                 need(8)?;
-                s.windows.push(WindowPlate { r0: v[0], r1: v[1], depth: v[2], lift: v[3], count: (v[4].max(0.0) as usize).min(64), phase: v[5], outline: Vec::new(), corner: v[6], groove: v[7] });
+                s.windows.push(WindowPlate { r0: v[0], r1: v[1], depth: v[2], lift: v[3], count: (v[4].max(0.0) as usize).min(64), phase: v[5], outlines: Vec::new(), corner: v[6], groove: v[7] });
             }
             "WindowPoint" => {
                 need(2)?;
-                s.windows.last_mut().ok_or(format!("line {}: WindowPoint before any Window", n + 1))?.outline.push([v[0], v[1]]);
+                let w = s.windows.last_mut().ok_or(format!("line {}: WindowPoint before any Window", n + 1))?;
+                match w.outlines.last_mut() {
+                    Some(o) => o.push([v[0], v[1]]),
+                    None => w.outlines.push(vec![[v[0], v[1]]]),
+                }
+            }
+            "WindowOutline" => {
+                s.windows.last_mut().ok_or(format!("line {}: WindowOutline before any Window", n + 1))?.outlines.push(Vec::new());
             }
             // v1
             "Depth" => { need(2)?; s.star_depth = v[0]; bar_depth = v[1]; }
@@ -212,7 +240,7 @@ mod tests {
         s.groups = Mirror::ALL.iter().zip(Section::ALL.iter().cycle()).enumerate().map(|(i, (&mirror, &section))| SpokeGroup {
             multiple: i + 1,
             phase: 0.25 * i as f32,
-            points: vec![[0.2, -0.1, 0.0, 0.1, 0.0], [0.6, 0.3, 0.04, 0.07, -0.05], [0.93, 0.9, 0.1, 0.09, 0.02]],
+            points: vec![[0.2, -0.1, 0.0, 0.1, 0.0, 0.0], [0.6, 0.3, 0.04, 0.07, -0.05, 0.0], [0.93, 0.9, 0.1, 0.09, 0.02, 0.0]],
             mirror,
             section,
             depth: 0.1 + 0.01 * i as f32,
@@ -243,20 +271,56 @@ mod tests {
         assert!(!from_text("Version 2\nGroup 1 0 0 0 0.1 0\nGroupPoint 0.2 0 0 0.1 0\nGroupPoint 0.9 0 0 0.1 0\n").unwrap().groups[0].onto_lip);
     }
 
+    /// #386: banked points and wire spokes round-trip; a rim without them writes 5-value
+    /// `GroupPoint`s and no `Wire`, and a 5-value point loads with bank 0
+    #[test]
+    fn twist_and_wire_round_trip() {
+        let mut s = RimStyle { wire: Some(Wire { count: 32, hub: 0.18, offset: 0.3, thickness: 0.012, cross: 2.0 }), ..Default::default() };
+        s.groups[0].points[0][5] = 0.1;
+        s.groups[0].points[1][5] = -0.45;
+        let t = to_text(&s);
+        assert_eq!(from_text(&t).unwrap(), s);
+        assert!(t.contains("Wire 32 0.18 0.3 0.012 2\n") && t.contains(" -0.45\n"));
+        let plain = to_text(&RimStyle::default());
+        assert!(!plain.contains("Wire"));
+        assert!(plain.lines().filter(|l| l.starts_with("GroupPoint")).all(|l| l.split_whitespace().count() == 6));
+        let g = &from_text("Version 2\nGroup 1 0 0 0 0.1 0\nGroupPoint 0.2 0 0 0.1 0\nGroupPoint 0.9 0 0 0.1 0 0.3\n").unwrap().groups[0];
+        assert_eq!((g.points[0][5], g.points[1][5]), (0.0, 0.3));
+        assert!(from_text("Wire 20 0.2").is_err());
+    }
+
     /// window plates of every kind, beside groups; a cover without windows
     #[test]
     fn windows_round_trip() {
         use super::super::rimplate::{circle, teardrop, trapezoid};
         let s = RimStyle { windows: vec![
             WindowPlate::default(),
-            WindowPlate { r0: 0.1, r1: 0.8, depth: 0.1, lift: -0.02, count: 6, phase: 0.25, outline: teardrop(0.3, 0.75, 0.0, 0.2), corner: 0.015, groove: 0.0 },
-            WindowPlate { count: 8, outline: trapezoid(0.3, 0.8, 0.12, 0.2), groove: 0.04, ..Default::default() },
-            WindowPlate { count: 0, outline: Vec::new(), ..Default::default() },
-            WindowPlate { outline: circle(0.5, 0.1, 7), ..Default::default() },
+            WindowPlate { r0: 0.1, r1: 0.8, depth: 0.1, lift: -0.02, count: 6, phase: 0.25, outlines: vec![teardrop(0.3, 0.75, 0.0, 0.2)], corner: 0.015, groove: 0.0 },
+            WindowPlate { count: 8, outlines: vec![trapezoid(0.3, 0.8, 0.12, 0.2)], groove: 0.04, ..Default::default() },
+            WindowPlate { count: 0, outlines: Vec::new(), ..Default::default() },
+            WindowPlate { outlines: vec![circle(0.5, 0.1, 7)], ..Default::default() },
         ], ..Default::default() };
-        assert_eq!(from_text(&to_text(&s)).unwrap(), s);
+        let t = to_text(&s);
+        assert_eq!(from_text(&t).unwrap(), s);
+        assert!(!t.contains("WindowOutline"));
         assert!(from_text("WindowPoint 0.5 0").is_err());
         assert!(from_text("Window 0 0.8 0.1 0 5 0.5 0").is_err());
+    }
+
+    /// #386: a plate with a window and two slots round-trips with a `WindowOutline` line before
+    /// each extra outline; a plain plate after it keeps its one outline
+    #[test]
+    fn window_outlines_round_trip() {
+        use super::super::rimplate::{ngon, trapezoid, turned};
+        let slot = trapezoid(0.3, 0.8, 0.05, 0.05);
+        let s = RimStyle { windows: vec![
+            WindowPlate { count: 5, phase: 0.0, outlines: vec![ngon(0.56, 0.2, 6, 0.0), turned(&slot, 0.53), turned(&slot, -0.53)], ..Default::default() },
+            WindowPlate::default(),
+        ], ..Default::default() };
+        let t = to_text(&s);
+        assert_eq!(t.matches("WindowOutline\n").count(), 2);
+        assert_eq!(from_text(&t).unwrap(), s);
+        assert!(from_text("WindowOutline").is_err());
     }
 
     /// v1 bars and curves load as one group with the bar depth, the star depth first

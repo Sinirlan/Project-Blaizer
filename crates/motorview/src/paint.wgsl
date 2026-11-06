@@ -4,7 +4,7 @@
 // silhouette) to its value facing the camera (n.v = 1) along a power curve. A finish is a set of hue-free
 // multipliers on the paint zone's colour; pearl turns that colour around the grey axis towards the edges.
 //
-// Binding-free and prefixed (`fin_`, `Finish`, `FIN_`) so it is appended to shader.wgsl (render.rs `SHADER_SRC`).
+// Binding-free and prefixed (`fin_`, `Finish`, `FIN_`) so it is appended to shader.wgsl (`shaders::scene`).
 // Gamma space, like fs_remaster. The caller owns light, shadow, the reflection source and the final cap.
 
 // One finish, eight vec4 so it can live in a uniform as is (21.9).

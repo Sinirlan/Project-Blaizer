@@ -5,8 +5,9 @@
 
 use crate::debug::Gizmos;
 use crate::fill_gizmo::{self, Delta, Mode};
+use crate::glass_ui::{self, HintPart};
 use crate::icons as ic;
-use crate::tune::section;
+use crate::tune::{section, section_counted};
 use crate::procgen::fill::{self, block_rotation, FillFile, Piece, Shape, Species};
 use crate::procgen::grass::{self, Body as GrassBody, Params as GrassParams, Style as GrassStyle};
 use crate::procgen::water::{Body, Params as WaterParams, Source, Style};
@@ -15,6 +16,7 @@ use crate::scene::Scene;
 use crate::gui::{wheel_drag, wheel_slider};
 use egui::{ComboBox, Grid, Ui};
 use glam::{Quat, Vec3};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 const UNDO_LIMIT: usize = 100;
@@ -84,7 +86,7 @@ fn kind_of(p: &Piece) -> Kind {
         Shape::Hill { .. } => Kind::Hill,
         Shape::Patch { .. } => Kind::Patch,
         Shape::Skirt { .. } => Kind::Skirt,
-        Shape::Plant { .. } => Kind::Plant,
+        Shape::Plant { .. } | Shape::Model { .. } => Kind::Plant,
     }
 }
 
@@ -134,6 +136,8 @@ struct GizmoDrag {
     pivot: Vec3,
     start: f32,
     vertex: Option<usize>,
+    /// a hill's meshed ridge heights at the grab (`fill_gizmo::apply_crest`)
+    crest: Vec<f32>,
     /// the axis directions and gizmo length when it was grabbed (scaling turns with the piece)
     axes: [Vec3; 3],
     len: f32,
@@ -150,6 +154,9 @@ pub struct Brush {
     /// the species on this track (`fill::plant_textures`), else the last piece's
     pub texture: String,
     pub trunk: String,
+    /// a pack model (`trees::names`) or family (`trees::families`, a random member per plant) to place instead
+    /// of a generated plant; empty = the species (#390)
+    pub model: String,
     /// paint mode: hold the button and drag to plant along the mouse path (else one scatter per click)
     pub paint: bool,
     /// paint mode: metres between two stamps along the path
@@ -158,8 +165,21 @@ pub struct Brush {
 
 impl Default for Brush {
     fn default() -> Self {
-        Brush { species: Species::Tree, count: 1, radius: 25.0, scale: 1.0, texture: String::new(), trunk: String::new(), paint: false, spacing: 8.0 }
+        Brush { species: Species::Tree, count: 1, radius: 25.0, scale: 1.0, texture: String::new(), trunk: String::new(), model: String::new(), paint: false, spacing: 8.0 }
     }
+}
+
+/// The pack models a brush `model` choice stands for: a family (`Tree-01`: any of its members), a single
+/// model, or None (empty / unknown: the generated plants).
+fn brush_models(model: &str) -> Option<Vec<&'static str>> {
+    if model.is_empty() {
+        return None;
+    }
+    let fam = crate::procgen::trees::families();
+    if let Some((_, m)) = fam.iter().find(|(f, _)| *f == model) {
+        return Some(m.clone());
+    }
+    crate::procgen::trees::names().into_iter().find(|n| *n == model).map(|n| vec![n])
 }
 
 /// The ground height under a game-space point (None: nothing there).
@@ -212,6 +232,9 @@ pub struct WorldEdit {
     /// the skirt's centre and the world's lowest y, game space, from the last fill mesh (`fill::mesh_pieces`);
     /// the skirt gizmo needs them
     pub skirt_base: Option<(Vec3, f32)>,
+    /// per hill piece (index into the pieces): the ridge height at each point, pinned or draped, from the
+    /// last fill mesh (`FillMesh::hills`); the handles of a draped point sit there
+    pub hill_crest: Vec<(usize, Vec<f32>)>,
     /// height shown for handles without one, set to the last click's
     pub work_y: f32,
     pub holes: bool,
@@ -226,6 +249,8 @@ pub struct WorldEdit {
     confirm_gen: bool,
     /// selected water body and the texture the next "mark texture" uses
     water_sel: Option<usize>,
+    /// the corner of a water area last clicked: (body, corner); the move arrows act on it alone
+    water_corner: Option<(usize, usize)>,
     water_tex: String,
     /// "split piece" armed: the texture the next click's connected piece becomes a body of
     water_split: Option<String>,
@@ -257,9 +282,10 @@ pub struct WorldEdit {
 pub fn handles(p: &Piece, y: f32) -> Vec<Vec3> {
     match &p.shape {
         Shape::Ground { points } => points.iter().map(|&([x, z], h)| Vec3::new(x, h.unwrap_or(y), z)).collect(),
-        Shape::Block { centre, .. } | Shape::Plant { centre, .. } => vec![Vec3::from(*centre)],
+        Shape::Block { centre, .. } | Shape::Plant { centre, .. } | Shape::Model { centre, .. } => vec![Vec3::from(*centre)],
         Shape::Wall { from, to, .. } => vec![Vec3::from(*from), Vec3::from(*to)],
-        Shape::Hill { points, .. } => points.iter().map(|&[x, z]| Vec3::new(x, y, z)).collect(),
+        // a draped ridge point has no height of its own: `y` + the hill's height (APPROX; the editor passes the meshed ones, see `WorldEdit::baked`)
+        Shape::Hill { points, height, .. } => points.iter().map(|&([x, z], h)| Vec3::new(x, h.unwrap_or(y + height), z)).collect(),
         Shape::Patch { verts } => verts.iter().map(|&v| Vec3::from(v)).collect(),
         Shape::Skirt { .. } => Vec::new(),
     }
@@ -275,12 +301,15 @@ pub fn set_handle(p: &mut Piece, i: usize, to: Vec3) {
                 }
             }
         }
-        Shape::Block { centre, .. } | Shape::Plant { centre, .. } if i == 0 => *centre = to.into(),
+        Shape::Block { centre, .. } | Shape::Plant { centre, .. } | Shape::Model { centre, .. } if i == 0 => *centre = to.into(),
         Shape::Wall { from, .. } if i == 0 => *from = to.into(),
         Shape::Wall { to: t, .. } if i == 1 => *t = to.into(),
         Shape::Hill { points, .. } => {
             if let Some(q) = points.get_mut(i) {
-                *q = [to.x, to.z];
+                q.0 = [to.x, to.z];
+                if q.1.is_some() {
+                    q.1 = Some(to.y);
+                }
             }
         }
         Shape::Patch { verts } => {
@@ -337,6 +366,12 @@ fn outline(p: &Piece, y: f32) -> Vec<(Vec<Vec3>, bool)> {
             let ring = (0..12).map(|k| c + Vec3::new((k as f32 / 12.0 * std::f32::consts::TAU).cos(), 0.0, (k as f32 / 12.0 * std::f32::consts::TAU).sin()) * 2.0 * scale).collect();
             vec![(ring, true), (vec![c, c + Vec3::Y * 10.0 * scale], false)]
         }
+        Shape::Model { name, centre, scale, .. } => {
+            // a ring on the ground and the model's own height
+            let (c, h) = (Vec3::from(*centre), crate::procgen::trees::height(name).unwrap_or(5.0) * scale);
+            let ring = (0..12).map(|k| c + Vec3::new((k as f32 / 12.0 * std::f32::consts::TAU).cos(), 0.0, (k as f32 / 12.0 * std::f32::consts::TAU).sin()) * 0.25 * h).collect();
+            vec![(ring, true), (vec![c, c + Vec3::Y * h], false)]
+        }
         Shape::Skirt { .. } => Vec::new(),
     }
 }
@@ -347,7 +382,7 @@ impl WorldEdit {
         if !self.open || self.track != track {
             self.file = fill::load(root, track);
             self.saved = self.file.clone();
-            (self.undo, self.redo, self.sel, self.drawing, self.drag, self.edit_base, self.sel_handle, self.gdrag, self.pdrag) = Default::default();
+            (self.undo, self.redo, self.sel, self.drawing, self.drag, self.edit_base, self.sel_handle, self.water_corner, self.gdrag, self.pdrag) = Default::default();
         }
         (self.root, self.track, self.open, self.dirty_mesh) = (root.to_path_buf(), track, true, true);
         self.stroke = None;
@@ -432,11 +467,38 @@ impl WorldEdit {
         self.commit();
         self.drag = Some(i);
         self.sel_handle = self.sel.map(|s| (s, i));
+        // no piece selected: the handles are a water area's corners
+        self.water_corner = self.sel.is_none().then_some(self.water_sel).flatten().map(|w| (w, i));
     }
 
     /// A click that hit nothing: no vertex stays selected.
     pub fn clear_vertex(&mut self) {
-        self.sel_handle = None;
+        (self.sel_handle, self.water_corner) = (None, None);
+    }
+
+    /// The clicked corner of the selected water area (none if it was removed or another body is selected).
+    fn water_vertex(&self) -> Option<usize> {
+        let (w, i) = self.water_corner?;
+        (self.water_sel == Some(w) && i < self.water_points().len()).then_some(i)
+    }
+
+    /// The meshed ridge heights of hill piece `s`, while they still fit its points.
+    fn crest_of(&self, s: usize) -> Option<&[f32]> {
+        let Shape::Hill { points, .. } = &self.file.pieces.get(s)?.shape else { return None };
+        self.hill_crest.iter().find(|(i, _)| *i == s).map(|(_, c)| c.as_slice()).filter(|c| c.len() == points.len())
+    }
+
+    /// Piece `s` as its handles show it: a hill's draped ridge points pinned at their meshed heights
+    /// (a pinned point keeps its own); any other piece as it is.
+    fn baked<'a>(&self, s: usize, p: &'a Piece) -> Cow<'a, Piece> {
+        let (Some(crest), Shape::Hill { .. }) = (self.crest_of(s), &p.shape) else { return Cow::Borrowed(p) };
+        let mut q = p.clone();
+        if let Shape::Hill { points, .. } = &mut q.shape {
+            for (pt, &c) in points.iter_mut().zip(crest) {
+                pt.1.get_or_insert(c);
+            }
+        }
+        Cow::Owned(q)
     }
 
     /// The selected vertex of the selected piece, when the piece has more than one (else the
@@ -458,10 +520,16 @@ impl WorldEdit {
                 Mode::Rotate => [false, true, false],
                 Mode::Scale => [true, false, true],
             };
+            // a clicked corner: the arrows move it alone, along X and Z (the surface stays level)
+            if let (Mode::Move, Some(i)) = (self.mode, self.water_vertex()) {
+                return Some(GizmoTarget { pivot: self.water_points()[i], enabled: [true, false, true], axes: fill_gizmo::AXES, vertex: Some(i) });
+            }
             return en.contains(&true).then(|| GizmoTarget { pivot: fill_gizmo::pivot(&p, 0.0), enabled: en, axes: fill_gizmo::AXES, vertex: None });
         }
-        let p = self.sel.and_then(|s| self.file.pieces.get(s).map(|p| (s, p))).filter(|&(s, p)| !self.is_hidden(s, p)).map(|(_, p)| p)?;
+        let (s, p) = self.sel.and_then(|s| self.file.pieces.get(s).map(|p| (s, p))).filter(|&(s, p)| !self.is_hidden(s, p))?;
         let en = fill_gizmo::enabled(p, self.mode);
+        let baked = self.baked(s, p);
+        let p = &*baked;
         if !en.contains(&true) {
             return None;
         }
@@ -503,7 +571,8 @@ impl WorldEdit {
         let (Some(start), Some(base)) = (start, self.sel.and_then(|s| self.file.pieces.get(s)).cloned().or_else(|| self.water_piece())) else { return false };
         self.commit();
         self.hot = Some(axis);
-        self.gdrag = Some(GizmoDrag { axis, base, pivot, start, vertex, axes, len: fill_gizmo::length(pivot, eye) });
+        let crest = self.sel.and_then(|s| self.crest_of(s)).map(<[f32]>::to_vec).unwrap_or_default();
+        self.gdrag = Some(GizmoDrag { axis, base, pivot, start, vertex, crest, axes, len: fill_gizmo::length(pivot, eye) });
         true
     }
 
@@ -520,7 +589,7 @@ impl WorldEdit {
             _ => fill_gizmo::plane_angle(d.pivot, d.axis, ray).map(|a| Delta::Rotate(Quat::from_axis_angle(fill_gizmo::AXES[d.axis], fill_gizmo::angle_diff(d.start, a)))),
         };
         let Some(delta) = delta else { return };
-        let piece = fill_gizmo::apply(&d.base, delta, d.vertex, self.work_y);
+        let piece = fill_gizmo::apply_crest(&d.base, delta, d.vertex, self.work_y, &d.crest);
         if self.sel.is_none() {
             self.set_water_piece(&piece);
             self.dirty_mesh = true;
@@ -554,7 +623,7 @@ impl WorldEdit {
         let (Some(start), Some(base)) = (start, self.sel.and_then(|s| self.file.pieces.get(s)).cloned()) else { return false };
         self.commit();
         self.hot = Some(axis);
-        self.gdrag = Some(GizmoDrag { axis, base, pivot, start, vertex: None, axes: fill_gizmo::AXES, len: 1.0 });
+        self.gdrag = Some(GizmoDrag { axis, base, pivot, start, vertex: None, crest: Vec::new(), axes: fill_gizmo::AXES, len: 1.0 });
         true
     }
 
@@ -578,7 +647,7 @@ impl WorldEdit {
     /// Per piece: true when it is not ground for placing things on (hidden, a plant, the skirt, or
     /// `except`, the piece being dragged). Index = `FillFile::pieces`.
     pub fn ground_skip(&self, except: Option<usize>) -> Vec<bool> {
-        self.file.pieces.iter().enumerate().map(|(i, p)| Some(i) == except || self.is_hidden(i, p) || matches!(p.shape, Shape::Plant { .. } | Shape::Skirt { .. })).collect()
+        self.file.pieces.iter().enumerate().map(|(i, p)| Some(i) == except || self.is_hidden(i, p) || matches!(p.shape, Shape::Plant { .. } | Shape::Model { .. } | Shape::Skirt { .. })).collect()
     }
 
     /// The piece held by a viewport drag.
@@ -595,7 +664,7 @@ impl WorldEdit {
     /// it and get ready to drag it. Nothing changes until the cursor travels (a click is no undo step).
     pub fn piece_press(&mut self, i: usize, grab: Vec3, cursor: (f32, f32)) {
         let Some(p) = self.file.pieces.get(i).cloned() else { return };
-        (self.sel, self.water_sel, self.sel_handle, self.hot) = (Some(i), None, None, None);
+        (self.sel, self.water_sel, self.sel_handle, self.water_corner, self.hot) = (Some(i), None, None, None, None);
         // a skirt has no position: selecting it is all a click does
         self.pdrag = (!matches!(p.shape, Shape::Skirt { .. })).then_some(PieceDrag { index: i, base: p, grab, press: cursor, moved: false });
     }
@@ -626,7 +695,7 @@ impl WorldEdit {
         }
         let delta = (o + dir * t - grab).with_y(0.0);
         let mut piece = fill_gizmo::apply(&d.base, Delta::Move(delta), None, self.work_y);
-        if let Shape::Block { centre, .. } | Shape::Plant { centre, .. } = &mut piece.shape {
+        if let Shape::Block { centre, .. } | Shape::Plant { centre, .. } | Shape::Model { centre, .. } = &mut piece.shape {
             if let Some(y) = ground(Vec3::from(*centre)) {
                 centre[1] = y;
             }
@@ -677,7 +746,12 @@ impl WorldEdit {
         }
         let Some(s) = self.sel else { return };
         if let Some(piece) = self.file.pieces.get_mut(s) {
-            set_handle(piece, i, p);
+            // the mouse hits the ground, not the crest: a pinned hill point keeps its height (the gizmo and the panel change it)
+            let to = match &piece.shape {
+                Shape::Hill { points, .. } => points.get(i).and_then(|q| q.1).map_or(p, |y| p.with_y(y)),
+                _ => p,
+            };
+            set_handle(piece, i, to);
             self.work_y = p.y;
             self.dirty_mesh = true;
         }
@@ -685,8 +759,8 @@ impl WorldEdit {
 
     /// Handles of the selected piece, game space.
     pub fn sel_handles(&self) -> Vec<Vec3> {
-        match self.sel.and_then(|s| self.file.pieces.get(s)) {
-            Some(p) => handles(p, self.work_y),
+        match self.sel.and_then(|s| self.file.pieces.get(s).map(|p| (s, p))) {
+            Some((s, p)) => handles(&self.baked(s, p), self.work_y),
             None => self.water_points(),
         }
     }
@@ -752,7 +826,7 @@ impl WorldEdit {
             Kind::Ground => Shape::Ground { points: pts.iter().map(|v| (xz(v), None)).collect() },
             Kind::Block => Shape::Block { centre: pts[0].into(), size: [20.0, 30.0, 20.0], yaw: 0.0, pitch: 0.0, roll: 0.0, roof: None },
             Kind::Wall => Shape::Wall { from: pts[0].into(), to: pts[1].into(), height: 20.0 },
-            Kind::Hill => Shape::Hill { points: pts.iter().map(xz).collect(), height: 15.0, width: 40.0 },
+            Kind::Hill => Shape::Hill { points: pts.iter().map(|v| (xz(v), None)).collect(), height: 15.0, width: 40.0, base: 0.0 },
             Kind::Patch => Shape::Patch { verts: pts.iter().map(|&v| v.into()).collect() },
             Kind::Skirt => Shape::Skirt { radius: 1500.0, drop: 30.0 },
             Kind::Water | Kind::Plant => return,
@@ -763,11 +837,16 @@ impl WorldEdit {
         self.note = format!("added {}", kind.name());
     }
 
+    /// What the brush places, for the status note.
+    fn brush_label(&self) -> &str {
+        if self.brush.model.is_empty() { self.brush.species.name() } else { &self.brush.model }
+    }
+
     /// One brush click at `at` (game space): `brush.count` plants as one undo step.
     fn place_plants(&mut self, at: Vec3, scene: &Scene, ground: &Ground) {
         self.commit();
         let n = self.stamp(at, scene, ground);
-        self.note = format!("placed {n} {} (Esc ends)", self.brush.species.name());
+        self.note = format!("placed {n} {} (Esc ends)", self.brush_label());
     }
 
     /// The mouse reached `at` (game space) with the paint stroke held: stamp along the way.
@@ -784,7 +863,7 @@ impl WorldEdit {
     /// The button went up: the stroke is one finished undo step.
     pub fn stroke_end(&mut self) {
         if self.stroke.take().is_some() {
-            self.note = format!("painted {} {} (Esc ends)", self.stroke_plants, self.brush.species.name());
+            self.note = format!("painted {} {} (Esc ends)", self.stroke_plants, self.brush_label());
         }
     }
 
@@ -798,8 +877,18 @@ impl WorldEdit {
         let trunk = (b.species.trunk() && !b.trunk.is_empty()).then(|| b.trunk.clone());
         let seed = self.file.seed.wrapping_add(self.file.pieces.len() as u32 * 7919).wrapping_add(1);
         let before = self.file.pieces.len();
-        for shape in fill::scatter(b.species, at, b.radius, b.count.max(1), b.scale, seed, scene) {
+        let shapes = match brush_models(&b.model) {
+            Some(names) => fill::scatter_models(&names, at, b.radius, b.count.max(1), b.scale, seed, scene),
+            None => fill::scatter(b.species, at, b.radius, b.count.max(1), b.scale, seed, scene),
+        };
+        for shape in shapes {
             let shape = match shape {
+                Shape::Model { name, mut centre, scale, yaw } => {
+                    if let Some(y) = ground(Vec3::new(centre[0], centre[1].max(at.y), centre[2])) {
+                        centre[1] = y;
+                    }
+                    Shape::Model { name, centre, scale, yaw }
+                }
                 Shape::Plant { species, mut centre, scale, variant, .. } => {
                     // the probe starts above the higher of the click and the original ground there
                     if let Some(y) = ground(Vec3::new(centre[0], centre[1].max(at.y), centre[2])) {
@@ -812,6 +901,7 @@ impl WorldEdit {
             // the variant spreads automatic plants over the track's pictures of the species
             let texture = match &shape {
                 Shape::Plant { variant, .. } if !auto.is_empty() => auto[*variant as usize % auto.len()].clone(),
+                Shape::Model { .. } => String::new(),
                 _ => fallback.clone(),
             };
             self.file.pieces.push(Piece { shape, texture, uv_scale: DEFAULT_UV });
@@ -946,14 +1036,15 @@ impl WorldEdit {
             }
             let sel = self.sel == Some(i);
             let c = if sel { SELECTED } else { OTHER };
-            for (pts, closed) in outline(p, self.work_y) {
+            let shown = self.baked(i, p);
+            for (pts, closed) in outline(&shown, self.work_y) {
                 g.polyline(&pts, closed, c, sel);
             }
             if sel {
-                for h in handles(p, self.work_y) {
+                for h in handles(&shown, self.work_y) {
                     g.cross(h, 1.5, c, true);
                 }
-                if let Some(&h) = handles(p, self.work_y).first() {
+                if let Some(&h) = handles(&shown, self.work_y).first() {
                     g.label(h, format!("#{i} {}", kind_of(p).name()), c);
                 }
             }
@@ -966,6 +1057,9 @@ impl WorldEdit {
                 g.cross(h, 1.5, SELECTED, true);
             }
             g.label(wp[0], format!("water {}", self.water_sel.unwrap_or(0)), SELECTED);
+            if let Some(&h) = self.water_vertex().and_then(|i| wp.get(i)) {
+                g.cross(h, 3.0, SELECTED, true);
+            }
         }
         // a split texture body: the point that picks its piece
         if let Some(Source::Texture { piece: Some(p), .. }) = self.water_sel.and_then(|i| self.file.water.get(i)).map(|b| &b.source) {
@@ -974,7 +1068,7 @@ impl WorldEdit {
             g.label(h, format!("water {} piece", self.water_sel.unwrap_or(0)), SELECTED);
         }
         if let Some(&(s, i)) = self.sel_handle.as_ref().filter(|_| self.vertex().is_some()) {
-            if let Some(h) = self.file.pieces.get(s).and_then(|p| handles(p, self.work_y).get(i).copied()) {
+            if let Some(h) = self.file.pieces.get(s).and_then(|p| handles(&self.baked(s, p), self.work_y).get(i).copied()) {
                 g.cross(h, 3.0, SELECTED, true);
             }
         }
@@ -1011,12 +1105,12 @@ impl WorldEdit {
         if self.hidden_len != self.file.pieces.len() {
             (self.hidden_pieces, self.hidden_len) = (Vec::new(), self.file.pieces.len());
         }
-        let status = if self.unsaved() { "unsaved changes" } else { "saved" };
-        ui.weak(format!("track {}: {} pieces, {status}", self.track, self.file.pieces.len()));
-        section(ui, ic::LIST, "Outliner", false, |ui| self.outliner(ui));
+        let count = self.file.pieces.len().to_string();
+        section_counted(ui, ic::LIST, "Outliner", Some(&count), false, true, |ui| self.outliner(ui));
+        let crest = self.sel.and_then(|s| self.crest_of(s)).map(<[f32]>::to_vec).unwrap_or_default();
         if let Some(p) = self.sel.and_then(|s| self.file.pieces.get_mut(s)) {
             let cmds = &mut self.cmds;
-            section(ui, ic::BOX, "Piece", false, |ui| piece_fields(ui, p, textures, cmds));
+            section(ui, ic::BOX, "Piece", false, |ui| piece_fields(ui, p, textures, &crest, cmds));
         }
         self.water_ui(ui, textures);
         self.grass_ui(ui, textures);
@@ -1033,66 +1127,89 @@ impl WorldEdit {
         }
     }
 
-    /// The status bar's hint: what the mouse and keys do now (fill editor open, else free
-    /// camera or race camera).
-    pub fn hint(&self, open: bool, free: bool, race: bool, shift: bool) -> String {
-        if open {
-            let snap = if shift { "  [snapping to a vertex]" } else { "" };
+    /// The status bar's hint: what the mouse and keys do now (fill editor open, else free camera or race camera), as
+    /// `glass_ui::hint` markup: `[key]` caps, `*MODE*` bold.
+    pub fn hint(&self, open: bool, free: bool, race: bool) -> Vec<HintPart> {
+        glass_ui::hint(&if open {
             if let Some((Kind::Plant, _)) = &self.drawing {
                 if self.brush.paint {
-                    format!("plant brush: hold LMB and drag to paint every {:.0} m, Esc ends{snap}", self.brush.spacing)
+                    format!("*PLANT BRUSH* [LMB] hold and drag: a plant every {:.0} m [Shift] snap [Esc] end", self.brush.spacing)
                 } else {
-                    format!("plant brush: LMB places plants, Esc ends{snap}")
+                    "*PLANT BRUSH* [LMB] place [Shift] snap [Esc] end".to_string()
                 }
             } else if let Some((k, pts)) = &self.drawing {
-                format!("{} tool, {} points: LMB add, Enter finish, Backspace removes the last, Esc cancel{snap}", k.name(), pts.len())
+                format!("*{}* {} points [LMB] add [Enter] finish [Backspace] drop last [Shift] snap [Esc] cancel", k.name().to_uppercase(), pts.len())
             } else {
-                format!("LMB select a piece (drag moves it), pick a handle or gizmo axis, Shift snaps to a vertex, RMB look{snap}")
+                "*SELECT* [LMB] pick a piece or handle, drag to move [Shift] snap to a vertex [RMB] look".to_string()
             }
         } else if free {
-            "WASD move, Q/E down/up, RMB look, Shift fast, LMB copies target".into()
+            "[WASD] move [Q][E] down / up [Shift] fast [RMB] look [P] pause".to_string()
         } else if race {
-            "arrows drive, V camera, R respawn, Tab free camera".into()
+            "[Arrows] drive [V] camera [R] respawn [Tab] free cam [P] pause [F3] telemetry".to_string()
         } else {
-            String::new()
-        }
+            "[Tab] free cam [P] pause [F3] telemetry".to_string()
+        })
     }
 
-    /// REMASTER plant brush options (the tool options strip while the plant tool is armed).
+    /// REMASTER plant brush options (the tool options strip while the plant tool is armed): the mockup's `#opts` row
+    /// in `glass_ui` widgets, with the model, spacing and trunk controls of #390 added to it.
     pub fn brush_ui(&mut self, ui: &mut Ui, textures: &[String]) {
-        ui.selectable_value(&mut self.brush.paint, false, "Click").on_hover_text("one scatter per click");
-        ui.selectable_value(&mut self.brush.paint, true, "Brush").on_hover_text("hold LMB and drag: plants along the mouse path");
-        ui.add_enabled_ui(self.brush.paint, |ui| {
-            ui.label("spacing");
-            wheel_drag(ui, &mut self.brush.spacing, Some(1.0..=100.0), |d| d.speed(0.5));
-        });
-        ui.separator();
-        for sp in Species::ALL {
-            if ui.selectable_label(self.brush.species == sp, format!("{}  {}", species_icon(sp), sp.name())).clicked() {
-                self.brush.species = sp;
-            }
+        use glass_ui::{cap_label, choice_box, num_count, num_w, seg, vsep, SegOpt};
+        let b = &mut self.brush;
+        let mode = seg(ui, &[SegOpt { icon: "", text: "CLICK" }, SegOpt { icon: "", text: "BRUSH" }], usize::from(b.paint), None);
+        if let Some(i) = mode {
+            b.paint = i == 1;
         }
-        ui.separator();
-        ui.label("per click");
-        wheel_drag(ui, &mut self.brush.count, Some(1..=60), |d| d);
-        ui.add_enabled_ui(self.brush.count > 1, |ui| {
-            ui.label("radius");
-            wheel_drag(ui, &mut self.brush.radius, Some(2.0..=150.0), |d| d.speed(0.5));
+        if b.paint {
+            cap_label(ui, "spacing").on_hover_text("metres between two plants along the mouse path");
+            num_w(ui, 70.0, &mut b.spacing, 0.5, Some(1.0..=100.0), " m");
+        }
+        vsep(ui, 24.0);
+        let models = !b.model.is_empty();
+        ui.add_enabled_ui(!models, |ui| {
+            let names: Vec<String> = Species::ALL.iter().map(|sp| sp.name().to_uppercase()).collect();
+            let opts: Vec<SegOpt> = Species::ALL.iter().zip(&names).map(|(sp, n)| SegOpt { icon: species_icon(*sp), text: n }).collect();
+            if let Some(i) = seg(ui, &opts, Species::ALL.iter().position(|s| *s == b.species).unwrap_or(0), None) {
+                b.species = Species::ALL[i];
+            }
         });
-        ui.label("scale");
-        wheel_drag(ui, &mut self.brush.scale, Some(0.05..=20.0), |d| d.speed(0.05));
-        for (id, label, v) in [("brush_tex", "texture", true), ("brush_trunk", "trunk", self.brush.species.trunk())] {
-            if !v {
+        cap_label(ui, "model").on_hover_text("a model of the tree pack instead of a generated plant: a family picks a random member per plant");
+        let cur = &mut b.model;
+        ComboBox::from_id_salt("brush_model").selected_text(if cur.is_empty() { "(generated)" } else { cur.as_str() }).show_ui(ui, |ui| {
+            ui.selectable_value(cur, String::new(), "(generated)");
+            for (f, members) in crate::procgen::trees::families() {
+                if members.len() > 1 {
+                    ui.selectable_value(cur, f.to_string(), format!("{f} (any of {})", members.len()));
+                }
+                for m in members {
+                    ui.selectable_value(cur, m.to_string(), m);
+                }
+            }
+        });
+        vsep(ui, 24.0);
+        cap_label(ui, "count").on_hover_text("plants per click");
+        num_count(ui, 60.0, &mut b.count, 1..=60);
+        ui.add_enabled_ui(b.count > 1, |ui| {
+            cap_label(ui, "radius");
+            num_w(ui, 76.0, &mut b.radius, 0.5, Some(2.0..=150.0), " m");
+        });
+        cap_label(ui, "scale");
+        num_w(ui, 64.0, &mut b.scale, 0.05, Some(0.05..=20.0), "");
+        let trunk = b.species.trunk() && !models;
+        for (label, on) in [("texture", !models), ("trunk", trunk)] {
+            if !on {
                 continue;
             }
-            let cur = if id == "brush_tex" { &mut self.brush.texture } else { &mut self.brush.trunk };
-            ui.label(label);
-            ComboBox::from_id_salt(id).selected_text(if cur.is_empty() { "(auto)" } else { cur.as_str() }).show_ui(ui, |ui| {
-                ui.selectable_value(cur, String::new(), "(auto)");
-                for t in textures {
-                    ui.selectable_value(cur, t.clone(), t);
-                }
-            });
+            vsep(ui, 24.0);
+            cap_label(ui, label);
+            let cur = if label == "texture" { &mut b.texture } else { &mut b.trunk };
+            // (auto) first, then the world textures: the triangles step through them
+            let at = textures.iter().position(|t| t == cur).map_or(0, |i| i + 1);
+            let step = choice_box(ui, 150.0, if cur.is_empty() { "(auto)" } else { cur.as_str() }, at > 0, at < textures.len());
+            if step != 0 {
+                let to = (at as i32 + step as i32).clamp(0, textures.len() as i32) as usize;
+                *cur = if to == 0 { String::new() } else { textures[to - 1].clone() };
+            }
         }
     }
 
@@ -1149,7 +1266,7 @@ impl WorldEdit {
                     if ui.selectable_label(self.water_sel == Some(i), format!("{i}: {name} ({})", if b.params.style == Style::Ocean { "ocean" } else { "still" })).clicked() {
                         self.water_sel = Some(i);
                         // its corners become the handles
-                        (self.sel, self.sel_handle) = (None, None);
+                        (self.sel, self.sel_handle, self.water_corner) = (None, None, None);
                     }
                     if ui.small_button("x").clicked() {
                         remove = Some(i);
@@ -1321,15 +1438,17 @@ impl WorldEdit {
         });
     }
 
-    /// Pieces grouped by kind with an eye toggle each; click selects, double-click frames it.
+    /// Pieces grouped by kind (`.ol-kind` headers with their counts, `.ol-row` rows with the eye and the size); click
+    /// selects, double-click frames it. A kind opens with a click on its header; the selection's kind starts open and
+    /// a filter opens every kind it matches.
     fn outliner(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.label(ic::FILTER);
-            ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter").desired_width(f32::INFINITY));
-        });
+        glass_ui::search_with(ui, &mut self.filter, "filter pieces", ic::FILTER);
+        ui.add_space(4.0);
         let needle = self.filter.to_lowercase();
+        let sel_kind = self.sel.and_then(|i| self.file.pieces.get(i)).map(kind_of);
         let mut focus = None;
-        egui::ScrollArea::vertical().max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
             for kind in Kind::ALL.into_iter().filter(|k| *k != Kind::Water) {
                 let rows: Vec<usize> = (0..self.file.pieces.len())
                     .filter(|&i| {
@@ -1340,36 +1459,54 @@ impl WorldEdit {
                 if rows.is_empty() {
                     continue;
                 }
-                egui::CollapsingHeader::new(format!("{}  {} ({})", kind_icon(kind), kind.name(), rows.len())).id_salt(("outliner", kind as usize)).default_open(true).show(ui, |ui| {
-                    for i in rows {
-                        ui.horizontal(|ui| {
-                            let off = self.hidden_pieces.contains(&i);
-                            if ui.add(egui::Button::new(if off { ic::EYE_OFF } else { ic::EYE }).frame(false)).on_hover_text("hide while editing (not saved)").clicked() {
-                                if off {
-                                    self.hidden_pieces.retain(|&h| h != i);
-                                } else {
-                                    self.hidden_pieces.push(i);
-                                }
-                            }
-                            let r = ui.selectable_label(self.sel == Some(i), format!("{} #{i}  {}", kind.name(), self.file.pieces[i].texture));
-                            if r.clicked() {
-                                self.sel = Some(i);
-                                self.water_sel = None;
-                            }
-                            if r.double_clicked() {
-                                focus = Some(self.extent(&self.file.pieces[i]));
-                            }
-                        });
+                let id = ui.scope_id().with(("outliner", kind as usize));
+                let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(sel_kind == Some(kind));
+                if glass_ui::kind_header(ui, open || !needle.is_empty(), kind_icon(kind), kind.name(), rows.len()).clicked() {
+                    open = !open;
+                }
+                ui.data_mut(|d| d.insert_temp(id, open));
+                if !(open || !needle.is_empty()) {
+                    continue;
+                }
+                for i in rows {
+                    let off = self.hidden_pieces.contains(&i);
+                    let (r, eye) = glass_ui::piece_row(ui, off, self.sel == Some(i), &format!("{} #{i}", kind.name().to_lowercase()), &piece_meta(&self.file.pieces[i]));
+                    if eye {
+                        if off {
+                            self.hidden_pieces.retain(|&h| h != i);
+                        } else {
+                            self.hidden_pieces.push(i);
+                        }
+                    } else if r.clicked() {
+                        self.sel = Some(i);
+                        self.water_sel = None;
                     }
-                });
+                    if r.double_clicked() {
+                        focus = Some(self.extent(&self.file.pieces[i]));
+                    }
+                }
             }
             if self.file.pieces.is_empty() {
-                ui.weak("no pieces: pick a place tool on the left");
+                ui.label(egui::RichText::new("no pieces: pick a place tool on the left").size(13.0).color(crate::theme::DIM));
             }
         });
         if focus.is_some() {
             self.focus = focus;
         }
+    }
+}
+
+/// The outliner row's size text (`24 × 6 m`): what tells two pieces of a kind apart.
+fn piece_meta(p: &Piece) -> String {
+    match &p.shape {
+        Shape::Block { size, .. } => format!("{:.0} × {:.0} m", size[0], size[2]),
+        Shape::Wall { from, to, .. } => format!("{:.0} m", Vec3::from(*from).distance(Vec3::from(*to))),
+        Shape::Hill { height, width, .. } => format!("{width:.0} × {height:.0} m"),
+        Shape::Ground { points } => format!("{} points", points.len()),
+        Shape::Patch { verts } => format!("{} vertices", verts.len()),
+        Shape::Skirt { radius, .. } => format!("r {radius:.0} m"),
+        Shape::Plant { species, .. } => species.name().to_lowercase(),
+        Shape::Model { name, .. } => name.clone(),
     }
 }
 
@@ -1396,114 +1533,149 @@ fn hole_edges(scene: &Scene, centre: &[Vec3]) -> Vec<[Vec3; 2]> {
         .collect()
 }
 
-fn xyz(ui: &mut Ui, label: &str, v: &mut [f32; 3]) {
-    ui.label(label);
-    ui.horizontal(|ui| {
-        for x in v.iter_mut() {
-            wheel_drag(ui, x, None, |d| d.speed(0.5));
-        }
-    });
-    ui.end_row();
-}
-
 fn num(ui: &mut Ui, label: &str, v: &mut f32, speed: f64) {
     ui.label(label);
     wheel_drag(ui, v, None, |d| d.speed(speed));
     ui.end_row();
 }
 
-fn texture_combo(ui: &mut Ui, id: &str, label: &str, cur: &mut String, textures: &[String]) {
-    ui.label(label);
-    ComboBox::from_id_salt(id).selected_text(cur.clone()).show_ui(ui, |ui| {
-        for t in textures {
-            ui.selectable_value(cur, t.clone(), t);
+/// A texture choice row: ◀ name ▶ through `textures` (`none_label` = the empty choice, offered first when given).
+fn texture_row(ui: &mut Ui, label: &str, cur: &mut String, textures: &[String], none_label: Option<&str>) {
+    glass_ui::prow(ui, label, false, None, |ui| {
+        let off = usize::from(none_label.is_some());
+        let at = textures.iter().position(|t| t == cur).map_or(0, |i| i + off);
+        let shown = if cur.is_empty() { none_label.unwrap_or("(none)") } else { cur.as_str() };
+        let step = glass_ui::choice_box(ui, 170.0, shown, at > 0, at + 1 < textures.len() + off);
+        if step != 0 {
+            let to = (at as i32 + i32::from(step)).clamp(0, (textures.len() + off) as i32 - 1) as usize;
+            *cur = if to < off { String::new() } else { textures[to - off].clone() };
         }
     });
-    ui.end_row();
 }
 
-fn piece_fields(ui: &mut Ui, p: &mut Piece, textures: &[String], cmds: &mut Vec<Cmd>) {
+/// One number row of the piece fields.
+fn num_row(ui: &mut Ui, label: &str, v: &mut f32, speed: f32, unit: Option<&str>) {
+    glass_ui::prow(ui, label, false, unit, |ui| {
+        glass_ui::num_field(ui, v, speed, None, false);
+    });
+}
+
+/// An X / Y / Z row.
+fn xyz_row(ui: &mut Ui, label: &str, v: &mut [f32; 3]) {
+    glass_ui::prow(ui, label, false, None, |ui| {
+        let mut g = Vec3::from(*v);
+        glass_ui::vec3_field(ui, &mut g, 0.5, None);
+        *v = g.into();
+    });
+}
+
+/// `crest`: a hill's meshed ridge heights (the `y` switch pins a point where it is now).
+fn piece_fields(ui: &mut Ui, p: &mut Piece, textures: &[String], crest: &[f32], cmds: &mut Vec<Cmd>) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    let kind = kind_of(p);
+    glass_ui::prow(ui, "Kind", false, None, |ui| {
+        ui.label(egui::RichText::new(format!("{}  {}", kind_icon(kind), kind.name().to_uppercase())).font(crate::theme::glass_font(14.0)).color(crate::theme::WHITE));
+    });
     if matches!(p.shape, Shape::Ground { .. } | Shape::Patch { .. }) && ui.button("Level (make planar)").on_hover_text("every point to the mean height").clicked() {
         cmds.push(Cmd::Level);
     }
-    Grid::new("piece").num_columns(2).striped(true).show(ui, |ui| {
-        texture_combo(ui, "tex", "texture", &mut p.texture, textures);
-        num(ui, "uv scale", &mut p.uv_scale, 0.1);
-        match &mut p.shape {
-            Shape::Ground { points } => {
-                for (i, (xz, y)) in points.iter_mut().enumerate() {
-                    ui.label(format!("point {i}"));
-                    ui.horizontal(|ui| {
-                        wheel_drag(ui, &mut xz[0], None, |d| d.speed(0.5));
-                        wheel_drag(ui, &mut xz[1], None, |d| d.speed(0.5));
-                        let mut fixed = y.is_some();
-                        if ui.checkbox(&mut fixed, "y").changed() {
-                            *y = fixed.then_some(0.0);
-                        }
-                        if let Some(h) = y {
-                            wheel_drag(ui, h, None, |d| d.speed(0.5));
-                        }
-                    });
-                    ui.end_row();
-                }
-            }
-            Shape::Block { centre, size, yaw, pitch, roll, roof } => {
-                xyz(ui, "base centre", centre);
-                xyz(ui, "size w h d", size);
-                num(ui, "yaw", yaw, 1.0);
-                num(ui, "pitch", pitch, 1.0);
-                num(ui, "roll", roll, 1.0);
-                let mut r = roof.clone().unwrap_or_default();
-                texture_combo(ui, "roof", "roof", &mut r, textures);
-                *roof = (!r.is_empty()).then_some(r);
-            }
-            Shape::Wall { from, to, height } => {
-                xyz(ui, "from", from);
-                xyz(ui, "to", to);
-                num(ui, "height", height, 0.5);
-            }
-            Shape::Hill { points, height, width } => {
-                num(ui, "height", height, 0.5);
-                num(ui, "width", width, 0.5);
-                for (i, q) in points.iter_mut().enumerate() {
-                    ui.label(format!("point {i}"));
-                    ui.horizontal(|ui| {
-                        wheel_drag(ui, &mut q[0], None, |d| d.speed(0.5));
-                        wheel_drag(ui, &mut q[1], None, |d| d.speed(0.5));
-                    });
-                    ui.end_row();
-                }
-            }
-            Shape::Patch { verts } => {
-                for (i, v) in verts.iter_mut().enumerate() {
-                    xyz(ui, &format!("vertex {i}"), v);
-                }
-            }
-            Shape::Skirt { radius, drop } => {
-                num(ui, "radius", radius, 5.0);
-                num(ui, "drop", drop, 0.5);
-            }
-            Shape::Plant { species, centre, scale, variant, trunk } => {
-                ui.label("species");
-                ui.horizontal(|ui| {
-                    for sp in Species::ALL {
-                        ui.selectable_value(species, sp, sp.name());
+    if !matches!(p.shape, Shape::Model { .. }) {
+        texture_row(ui, "Texture", &mut p.texture, textures, None);
+        num_row(ui, "UV scale", &mut p.uv_scale, 0.1, None);
+    }
+    match &mut p.shape {
+        Shape::Ground { points } => {
+            for (i, (xz, y)) in points.iter_mut().enumerate() {
+                // right to left: the height, its switch, then the two coordinates
+                glass_ui::prow(ui, &format!("Point {i}"), false, None, |ui| {
+                    if let Some(h) = y {
+                        glass_ui::num_w(ui, 56.0, h, 0.5, None, "");
                     }
+                    let mut fixed = y.is_some();
+                    if ui.checkbox(&mut fixed, "y").changed() {
+                        *y = fixed.then_some(0.0);
+                    }
+                    glass_ui::num_w(ui, 56.0, &mut xz[1], 0.5, None, "");
+                    glass_ui::num_w(ui, 56.0, &mut xz[0], 0.5, None, "");
                 });
-                ui.end_row();
-                xyz(ui, "base", centre);
-                num(ui, "scale", scale, 0.05);
-                ui.label("variant");
-                wheel_drag(ui, variant, None, |d| d);
-                ui.end_row();
-                if species.trunk() {
-                    let mut t = trunk.clone().unwrap_or_default();
-                    texture_combo(ui, "trunk", "trunk", &mut t, textures);
-                    *trunk = (!t.is_empty()).then_some(t);
-                }
             }
         }
-    });
+        Shape::Block { centre, size, yaw, pitch, roll, roof } => {
+            xyz_row(ui, "Base centre", centre);
+            xyz_row(ui, "Size w h d", size);
+            num_row(ui, "Yaw", yaw, 1.0, Some("°"));
+            num_row(ui, "Pitch", pitch, 1.0, Some("°"));
+            num_row(ui, "Roll", roll, 1.0, Some("°"));
+            let mut r = roof.clone().unwrap_or_default();
+            texture_row(ui, "Roof", &mut r, textures, Some("(none)"));
+            *roof = (!r.is_empty()).then_some(r);
+        }
+        Shape::Wall { from, to, height } => {
+            xyz_row(ui, "From", from);
+            xyz_row(ui, "To", to);
+            num_row(ui, "Height", height, 0.5, Some("m"));
+        }
+        Shape::Hill { points, height, width, base } => {
+            num_row(ui, "Height", height, 0.5, Some("m"));
+            num_row(ui, "Width", width, 0.5, Some("m"));
+            // the slope feet above the ground (negative = buried); the crest does not move
+            num_row(ui, "Base", base, 0.5, Some("m"));
+            for (i, (xz, y)) in points.iter_mut().enumerate() {
+                // right to left: the crest height, its switch, then the two coordinates
+                glass_ui::prow(ui, &format!("Point {i}"), false, None, |ui| {
+                    if let Some(h) = y {
+                        glass_ui::num_w(ui, 56.0, h, 0.5, None, "");
+                    }
+                    let mut fixed = y.is_some();
+                    if ui.checkbox(&mut fixed, "y").changed() {
+                        *y = fixed.then(|| crest.get(i).copied().unwrap_or(0.0));
+                    }
+                    glass_ui::num_w(ui, 56.0, &mut xz[1], 0.5, None, "");
+                    glass_ui::num_w(ui, 56.0, &mut xz[0], 0.5, None, "");
+                });
+            }
+        }
+        Shape::Patch { verts } => {
+            for (i, v) in verts.iter_mut().enumerate() {
+                xyz_row(ui, &format!("Vertex {i}"), v);
+            }
+        }
+        Shape::Model { name, centre, scale, yaw } => {
+            glass_ui::prow(ui, "Model", false, None, |ui| {
+                ComboBox::from_id_salt("piece_model").selected_text(name.as_str()).show_ui(ui, |ui| {
+                    for n in crate::procgen::trees::names() {
+                        ui.selectable_value(name, n.to_string(), n);
+                    }
+                });
+            });
+            xyz_row(ui, "Base", centre);
+            num_row(ui, "Scale", scale, 0.05, None);
+            num_row(ui, "Yaw", yaw, 1.0, Some("°"));
+        }
+        Shape::Skirt { radius, drop } => {
+            num_row(ui, "Radius", radius, 5.0, Some("m"));
+            num_row(ui, "Drop", drop, 0.5, Some("m"));
+        }
+        Shape::Plant { species, centre, scale, variant, trunk } => {
+            glass_ui::prow(ui, "Species", false, None, |ui| {
+                let names: Vec<String> = Species::ALL.iter().map(|sp| sp.name().to_uppercase()).collect();
+                let opts: Vec<glass_ui::SegOpt> = Species::ALL.iter().zip(&names).map(|(sp, n)| glass_ui::SegOpt { icon: species_icon(*sp), text: n }).collect();
+                if let Some(i) = glass_ui::seg(ui, &opts, Species::ALL.iter().position(|s| s == species).unwrap_or(0), None) {
+                    *species = Species::ALL[i];
+                }
+            });
+            xyz_row(ui, "Base", centre);
+            num_row(ui, "Scale", scale, 0.05, None);
+            glass_ui::prow(ui, "Variant", false, None, |ui| {
+                wheel_drag(ui, variant, None, |d| d);
+            });
+            if species.trunk() {
+                let mut t = trunk.clone().unwrap_or_default();
+                texture_row(ui, "Trunk", &mut t, textures, Some("(piece texture)"));
+                *trunk = (!t.is_empty()).then_some(t);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1527,8 +1699,17 @@ mod tests {
     }
 
     #[test]
+    fn brush_model_choice_is_a_family_a_model_or_the_generated_plants() {
+        assert_eq!(brush_models(""), None);
+        assert_eq!(brush_models("Nope"), None);
+        assert_eq!(brush_models("Tree-01-3"), Some(vec!["Tree-01-3"]));
+        assert_eq!(brush_models("Tree-01").map(|m| m.len()), Some(4));
+        assert_eq!(brush_models("Bush").map(|m| m.len()), Some(5));
+    }
+
+    #[test]
     fn handles_round_trip() {
-        let (f, w) = fill::from_text("Piece ground Texture A Point 0 0 Point 10 0 2 Point 10 10\nPiece wall Texture A From 0 0 0 To 5 1 5 Height 3\nPiece block Texture A Centre 1 2 3 Size 4 5 6 Yaw 0\nPiece patch Texture A Vertex 0 0 0 Vertex 1 0 0 Vertex 1 1 0\n");
+        let (f, w) = fill::from_text("Piece ground Texture A Point 0 0 Point 10 0 2 Point 10 10\nPiece wall Texture A From 0 0 0 To 5 1 5 Height 3\nPiece block Texture A Centre 1 2 3 Size 4 5 6 Yaw 0\nPiece patch Texture A Vertex 0 0 0 Vertex 1 0 0 Vertex 1 1 0\nPiece model Name Bush-02 Centre 1 2 3 Scale 2 Yaw 40\n");
         assert!(w.is_empty());
         for p in f.pieces {
             let mut q = p.clone();
@@ -1554,6 +1735,25 @@ mod tests {
         // selecting a piece takes the handles back
         e.sel = Some(0);
         assert!(e.sel_handles().is_empty());
+    }
+
+    #[test]
+    fn water_corner_gets_its_own_gizmo() {
+        let (f, _) = fill::from_text("Water Area Level -3 Point 0 0 Point 10 0 Point 10 10 Style still\n");
+        let mut e = WorldEdit { file: f, water_sel: Some(0), mode: Mode::Move, ..Default::default() };
+        // no corner clicked: the gizmo is on the area, all three axes
+        let t = e.gizmo_target().unwrap();
+        assert_eq!((t.vertex, t.enabled), (None, [true; 3]));
+        e.begin_drag(1);
+        e.drag = None;
+        let t = e.gizmo_target().unwrap();
+        assert_eq!((t.vertex, t.pivot, t.enabled), (Some(1), Vec3::new(10.0, -3.0, 0.0), [true, false, true]));
+        // another body or a click on nothing takes it back
+        e.water_sel = Some(1);
+        assert_eq!(e.water_vertex(), None);
+        e.water_sel = Some(0);
+        e.clear_vertex();
+        assert_eq!(e.gizmo_target().unwrap().vertex, None);
     }
 
     #[test]
@@ -1666,7 +1866,25 @@ mod tests {
         let (f, _) = fill::from_text("Piece hill Texture A Point 0 0 Point 5 5 Height 4 Width 6\n");
         let mut p = f.pieces[0].clone();
         set_handle(&mut p, 1, Vec3::new(7.0, 0.0, 8.0));
-        assert_eq!(handles(&p, 0.0)[1], Vec3::new(7.0, 0.0, 8.0));
+        // a draped ridge point shows at the working height + the hill's height
+        assert_eq!(handles(&p, 0.0)[1], Vec3::new(7.0, 4.0, 8.0));
+    }
+
+    #[test]
+    fn hill_handles_use_the_meshed_crest_and_a_pinned_height() {
+        let (f, _) = fill::from_text("Piece hill Texture A Point 0 0 Point 5 5 12 Height 4 Width 6\n");
+        let e = WorldEdit { file: f, hill_crest: vec![(0, vec![9.0, 12.0])], ..Default::default() };
+        let shown = e.baked(0, &e.file.pieces[0]);
+        assert_eq!(handles(&shown, 0.0).iter().map(|h| h.y).collect::<Vec<_>>(), vec![9.0, 12.0]);
+        // a mouse drag of a pinned point keeps its height; a draped one stays draped
+        let mut p = e.file.pieces[0].clone();
+        set_handle(&mut p, 1, Vec3::new(7.0, 50.0, 8.0));
+        let Shape::Hill { points, .. } = &p.shape else { panic!() };
+        assert_eq!(points[1], ([7.0, 8.0], Some(50.0)));
+        assert_eq!(points[0].1, None);
+        // a stale cache (other point count) is ignored
+        let e = WorldEdit { hill_crest: vec![(0, vec![9.0])], ..e };
+        assert_eq!(handles(&e.baked(0, &e.file.pieces[0]), 3.0).iter().map(|h| h.y).collect::<Vec<_>>(), vec![7.0, 12.0]);
     }
 
     #[test]

@@ -8,7 +8,8 @@
 
 use super::aero::{Fins, Foil, Splitter, Wing};
 use super::body::{BodyStyle, Glass};
-use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken};
+use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken, Warp};
+use super::diffuser::Diffuser;
 use super::exhaust::Exhaust;
 use super::lamps::{Lamp, LampKind, LedPath, LedStyle};
 use super::smooth::Smooth;
@@ -163,8 +164,11 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
     let mut thickens: Vec<Thicken> = Vec::new();
     let mut carbon = Vec::new();
     let mut exhaust = None;
+    let mut diffusers = Vec::new();
     let mut smooths = Vec::new();
+    let mut warps = Vec::new();
     let mut refine = 0.0;
+    let mut refine_seams = false;
     for (n, raw) in text.lines().enumerate() {
         let l = raw.split('#').next().unwrap_or("").trim();
         let mut it = l.split_whitespace();
@@ -210,8 +214,11 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                     mirror_glass: None,
                     carbon: Vec::new(),
                     exhaust: None,
+                    diffusers: Vec::new(),
                     smooths: Vec::new(),
+                    warps: Vec::new(),
                     refine: 0.0,
+                    refine_seams: false,
                 });
             }
             "MirrorGlass" => mirror_glass = Some(kv.rgb("rgb")?),
@@ -273,7 +280,8 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 })
             }
             "Foil" => foils.push(Foil {
-                from: kv.rgb("from")?,
+                // one tag, or a `;` list (#177 phase 3: a wing in two colours)
+                from: kv.list::<3>("from")?.into_iter().map(|c| c.map(|x| x as u8)).collect(),
                 lo: kv.v3("lo")?,
                 hi: kv.v3("hi")?,
                 le: kv.list::<3>("le")?,
@@ -308,6 +316,22 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                     lip: kv.f("lip")?,
                     pipe: kv.f("pipe")?,
                     depth: kv.f("depth")?,
+                    // optional (#388): one tip on the centre line
+                    centre: kv.f_or("centre", 0.0)? != 0.0,
+                })
+            }
+            "Diffuser" => {
+                diffusers.push(Diffuser {
+                    lo: kv.v3("lo")?,
+                    hi: kv.v3("hi")?,
+                    width: kv.f("width")?,
+                    wall: kv.f("wall")?,
+                    roof: kv.list::<2>("roof")?,
+                    keel: kv.list::<2>("keel")?,
+                    keel_bottom: kv.f("keel_bottom")?,
+                    keel_top: kv.f("keel_top")?,
+                    keel_round: kv.f("keel_round")?,
+                    step: kv.f("step")?,
                 })
             }
             "Smooth" => {
@@ -318,7 +342,23 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 }
                 smooths.push(Smooth { from: kv.list::<3>("from")?.into_iter().map(|c| c.map(|x| x as u8)).collect(), lo, hi, max_deg: kv.f("max_deg")?, step: kv.f("step")?, loose: kv.b("loose")?, round: kv.f("round")? })
             }
-            "Refine" => refine = kv.f("step")?,
+            "Warp" => {
+                // `y` and `z` are optional: a missing table weighs 1
+                let by = kv.v3("by")?;
+                let x = kv.list::<2>("x")?;
+                let y = if kv.pairs.contains_key("y") { kv.list::<2>("y")? } else { Vec::new() };
+                let z = if kv.pairs.contains_key("z") { kv.list::<2>("z")? } else { Vec::new() };
+                for (k, t) in [("x", &x), ("y", &y), ("z", &z)] {
+                    if t.windows(2).any(|w| w[1][0] <= w[0][0]) {
+                        return Err(kv.err(format!("{k}= needs rising coordinates")));
+                    }
+                }
+                warps.push(Warp { by, x, y, z });
+            }
+            "Refine" => {
+                refine = kv.f("step")?;
+                refine_seams = kv.f_or("seams", 0.0)? != 0.0;
+            }
             _ => return Err(kv.err("unknown record".into())),
         }
         kv.done()?;
@@ -341,8 +381,11 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
     st.thickens = thickens;
     st.carbon = carbon;
     st.exhaust = exhaust;
+    st.diffusers = diffusers;
     st.smooths = smooths;
+    st.warps = warps;
     st.refine = refine;
+    st.refine_seams = refine_seams;
     Ok(st)
 }
 
@@ -440,7 +483,7 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
         let struts: Vec<String> = f.struts.iter().map(|s| format!("{},{}", s[0], s[1])).collect();
         *t += &format!(
             "Foil from={} lo={} hi={} le={} te={} thickness={} camber={} step={} struts={} strut_chord={} strut_width={}\n",
-            rgb(f.from), v3(f.lo), v3(f.hi), pts(&f.le), pts(&f.te), f.thickness, f.camber, f.step, struts.join(";"), f.strut_chord, f.strut_width
+            f.from.iter().map(|&c| rgb(c)).collect::<Vec<_>>().join(";"), v3(f.lo), v3(f.hi), pts(&f.le), pts(&f.te), f.thickness, f.camber, f.step, struts.join(";"), f.strut_chord, f.strut_width
         );
     }
     if let Some(f) = &st.fins {
@@ -467,16 +510,28 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
     }
     if let Some(e) = &st.exhaust {
         *t += &format!(
-            "Exhaust x={} y={} z={} width={} height={} chamfer={} slant={} round={} lip={} pipe={} depth={}\n",
-            e.x, e.y, e.z, e.width, e.height, e.chamfer, e.slant, e.round, e.lip, e.pipe, e.depth
+            "Exhaust x={} y={} z={} width={} height={} chamfer={} slant={} round={} lip={} pipe={} depth={}{}\n",
+            e.x, e.y, e.z, e.width, e.height, e.chamfer, e.slant, e.round, e.lip, e.pipe, e.depth, if e.centre { " centre=1" } else { "" }
+        );
+    }
+    for d in &st.diffusers {
+        let pts = |l: &[[f32; 2]]| l.iter().map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join(";");
+        *t += &format!(
+            "Diffuser lo={} hi={} width={} wall={} roof={} keel={} keel_bottom={} keel_top={} keel_round={} step={}\n",
+            v3(d.lo), v3(d.hi), d.width, d.wall, pts(&d.roof), pts(&d.keel), d.keel_bottom, d.keel_top, d.keel_round, d.step
         );
     }
     for s in &st.smooths {
         let boxes = |b: &[[f32; 3]]| b.iter().map(|&p| v3(p)).collect::<Vec<_>>().join(";");
         *t += &format!("Smooth from={} lo={} hi={} max_deg={} step={} loose={} round={}\n", s.from.iter().map(|&c| rgb(c)).collect::<Vec<_>>().join(";"), boxes(&s.lo), boxes(&s.hi), s.max_deg, s.step, s.loose as u8, s.round);
     }
+    for w in &st.warps {
+        let table = |name: &str, t: &[[f32; 2]]| if t.is_empty() { String::new() } else { format!(" {name}={}", t.iter().map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join(";")) };
+        *t += &format!("Warp by={}{}{}{}\n", v3(w.by), table("x", &w.x), table("y", &w.y), table("z", &w.z));
+    }
     if st.refine > 0.0 {
-        *t += &format!("Refine step={}\n", st.refine);
+        // `seams` is optional and written only when set (#177)
+        *t += &format!("Refine step={}{}\n", st.refine, if st.refine_seams { " seams=1" } else { "" });
     }
 }
 
@@ -492,6 +547,20 @@ mod tests {
         assert_eq!(st.centre, 0.0);
         assert!(!to_text(&st).contains("centre"));
         assert_eq!(from_text(embedded(6).unwrap()).unwrap().centre, 0.003);
+    }
+
+    /// `Refine seams=` is optional: off when not given and not written then (#177)
+    #[test]
+    fn refine_seams_is_optional() {
+        let body = "Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0\n";
+        let st = from_text(&format!("{body}Refine step=0.04\n")).unwrap();
+        assert!(!st.refine_seams && !to_text(&st).contains("seams"));
+        let st = from_text(&format!("{body}Refine step=0.04 seams=1\n")).unwrap();
+        assert!(st.refine_seams && to_text(&st).contains("Refine step=0.04 seams=1"));
+        // the cars whose seams the mesh check showed closing without a new defect (#177, #387)
+        for n in [1, 3, 4, 5, 6] {
+            assert!(from_text(embedded(n).unwrap()).unwrap().refine_seams, "car {n}");
+        }
     }
 
     /// every embedded recipe parses and survives a round trip through `to_text`; all ten cars

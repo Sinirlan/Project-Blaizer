@@ -65,4 +65,7 @@ Smooth from=244,129,0;249,181,0 lo=0,0.55,1.0 hi=0.7,0.95,1.99 max_deg=50 step=0
 
 # Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
 # #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
-Refine step=0.04
+# `seams=1` (#387, as the Avalanche's, #177): [O] the original meets a long edge with two or more
+# shorter ones in places (T-junctions); cutting the open edges at those corners first closes the
+# seam. Mesh check, open edges 5,744 -> 5,698, no new defect.
+Refine step=0.04 seams=1

@@ -10,7 +10,8 @@
 
 use super::lamps::Lamp;
 use super::aero::{Fins, Foil, Splitter, Wing};
-use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken};
+use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken, Warp};
+use super::diffuser::Diffuser;
 use super::exhaust::Exhaust;
 use super::smooth::Smooth;
 use super::vents::Vent;
@@ -116,11 +117,19 @@ pub struct BodyStyle {
     pub carbon: Vec<Pick>,
     /// exhaust tips (`super::exhaust`)
     pub exhaust: Option<Exhaust>,
+    /// rear diffusers carved into the cage (`super::diffuser`, #388)
+    pub diffusers: Vec<Diffuser>,
     /// faceted panels curved into smooth ones (`super::smooth`)
     pub smooths: Vec<Smooth>,
+    /// smooth bulges of the finished cage, after the refine (`super::cuts::warp`, #388)
+    pub warps: Vec<Warp>,
     /// every edge cut and every face remeshed at this spacing (m; 0: ear clipping, the faces
     /// as they are), `super::smooth::refine`
     pub refine: f32,
+    /// REMASTER (#177): before the refine's cuts, every open edge is cut at the corners lying on
+    /// it (a T-junction's long side), so the seam pairs whole (`super::smooth::refine`); per
+    /// recipe until the other cars are checked with it
+    pub refine_seams: bool,
 }
 
 impl BodyStyle {
@@ -162,6 +171,10 @@ pub fn drop_repeats(faces: &mut Vec<Face>) -> usize {
 fn near_tag(a: [u8; 3], b: [u8; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= 2)
 }
+
+/// how close (m) a body corner must lie to a rim edge of an arch tunnel to count as a rim point
+/// (`round_arches`): [O] the Avalanche's door panel corner is 3.5 mm off its tunnel's edge
+const RIM_T: f32 = 5e-3;
 
 /// Round the wheel arches of `faces` (game space, before `body`). [O] The Titan's arch is a
 /// tunnel of flat black faces (the ceiling, front and back walls) between an outer rim on the
@@ -210,6 +223,37 @@ pub fn round_arches(faces: &mut Vec<Face>, hubs: &[[f32; 3]], radius: f32, st: &
         }
         let (lo, hi) = pts.iter().fold((f32::MAX, 0.0f32), |(lo, hi), p| (lo.min(p.x.abs()), hi.max(p.x.abs())));
         let mid = (lo + hi) * 0.5;
+        // REMASTER (#177): a corner of a body face lying on a rim edge of the tunnel without
+        // being a tunnel corner (a T-junction) is a rim point too. [O] The Avalanche's nose and
+        // door panels meet its front tunnel's walls at y 0.517 and 0.514, 0.5 and 3.5 mm off the
+        // edges: left where they were while the rim moved out to the circle, the panels' corners
+        // stood 4-6 cm inside the arch.
+        let rim_edges: Vec<(Vec3, Vec3)> = tunnel
+            .iter()
+            .flat_map(|&i| {
+                let f = &faces[i];
+                (0..f.pts.len()).map(move |k| (Vec3::from(f.pts[k]), Vec3::from(f.pts[(k + 1) % f.pts.len()])))
+            })
+            .filter(|(a, b)| (a.x.abs() >= mid) == (b.x.abs() >= mid))
+            .collect();
+        let on_rim = |p: Vec3| {
+            rim_edges.iter().any(|&(a, b)| {
+                let len = a.distance(b);
+                let t = (p - a).dot(b - a) / len.max(1e-6);
+                t > RIM_T && t < len - RIM_T && p.distance(a.lerp(b, t / len.max(1e-6))) < RIM_T
+            })
+        };
+        for (i, f) in faces.iter().enumerate() {
+            if tunnel.contains(&i) {
+                continue;
+            }
+            for &p in &f.pts {
+                let v = Vec3::from(p);
+                if v.x * h.x > 0.0 && !pts.iter().any(|q| weld_key(q.to_array()) == weld_key(p)) && on_rim(v) {
+                    pts.push(v);
+                }
+            }
+        }
         // angle round a centre in (z, y), 0 forward-level, increasing over the top
         let ang = |c: Vec2, p: Vec3| {
             let a = (p.y - c.y).atan2(p.z - c.x);
@@ -1513,6 +1557,35 @@ mod tests {
         assert!(near_tag([0, 0, 0], [1, 1, 1]) && !near_tag([0, 0, 0], [0, 0, 3]) && !near_tag([244, 129, 0], [0, 0, 0]));
     }
 
+    /// #177: a body corner on a rim edge of the tunnel (a T-junction, 3 mm off it) moves onto
+    /// the arch's circle with the rim, not left inside the arch
+    #[test]
+    fn body_corner_on_the_rim_moves_with_it() {
+        let st = crate::procgen::bodyfile::from_text("Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.0 drop=0\n").unwrap();
+        let rim = [(-0.5, 0.0), (-0.45, 0.4), (0.0, 0.62), (0.45, 0.4), (0.5, 0.0)];
+        let hub = Vec3::new(0.75, 0.3, 0.0);
+        let mut faces = Vec::new();
+        for w in rim.windows(2) {
+            let at = |x: f32, (z, y): (f32, f32)| [x, y, z];
+            let pts = [at(0.95, w[0]), at(0.95, w[1]), at(0.5, w[1]), at(0.5, w[0])];
+            let c = pts.iter().map(|&p| Vec3::from(p)).sum::<Vec3>() / 4.0;
+            let mut f = face(&pts, Vec3::new(0.0, hub.y - c.y, hub.z - c.z).normalize().to_array());
+            f.rgb = [0, 0, 0];
+            faces.push(f);
+        }
+        // the side panel in front of the arch: its corner `t` lies on the outer rim's front edge
+        let t = [0.953, 0.2, 0.475];
+        faces.push(face(&[[0.95, 0.0, 0.5], [0.95, 0.0, 1.0], [0.95, 0.4, 1.0], [0.95, 0.4, 0.45], t], [1.0, 0.0, 0.0]));
+        // a tyre bigger than the original arch: the rim moves out to the circle
+        round_arches(&mut faces, &[hub.to_array()], 0.5, &st);
+        let side = faces.iter().find(|f| f.rgb == [200; 3]).unwrap();
+        let r = 0.5 + 0.035;
+        for p in side.pts.iter().map(|&p| Vec3::from(p)).filter(|p| p.z < 0.9) {
+            let d = Vec2::new(p.z - hub.z, p.y - hub.y).length();
+            assert!(d > r - 1e-3, "{p:?} lies {:.3} m inside the arch", r - d);
+        }
+    }
+
     /// merge by distance: a fan wedge between two ring points 0.3 mm apart collapses and its
     /// neighbour takes the kept point; a move that would turn a thin triangle over is refused
     #[test]
@@ -1566,7 +1639,7 @@ mod tests {
     /// faces out
     #[test]
     fn cube_bevels_inside() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, smooths: Vec::new(), refine: 0.0 };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let v = body(&cube(), &st);
         for p in v.iter().map(|v| Vec3::from(v.pos)) {
             assert!(p.x >= -1e-5 && p.x <= 1.0 + 1e-5 && p.y >= -1e-5 && p.y <= 1.0 + 1e-5 && -p.z >= -1e-5 && -p.z <= 1.0 + 1e-5, "{p}");
@@ -1597,7 +1670,7 @@ mod tests {
     /// body stays watertight and inside the cube (#232: each kept its own, a T-junction)
     #[test]
     fn crease_fan_shares_its_inset() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, smooths: Vec::new(), refine: 0.0 };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         let v = [0.5, 1.0, 0.0];
         faces[0] = face(&[[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], v, [0., 1., 0.]], [0., 0., -1.]);
@@ -1624,7 +1697,7 @@ mod tests {
     #[test]
     fn glass_top_insets() {
         let g = Glass { rgb: [21, 25, 29], frame: 0.1, inset: 0.05, tint: 0.5 };
-        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, smooths: Vec::new(), refine: 0.0 };
+        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         faces[5].rgb = g.rgb;
         inset_glass(&mut faces, &g, &[]);
@@ -1653,7 +1726,7 @@ mod tests {
     #[test]
     fn flat_glass_one_pane() {
         let g = Glass { rgb: [21, 25, 29], frame: 0.1, inset: 0.05, tint: 0.5 };
-        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, smooths: Vec::new(), refine: 0.0 };
+        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         faces.pop();
         let (m, up) = ([0.5, 1.05, 0.5], [0., 1., 0.]);
@@ -1701,7 +1774,7 @@ mod tests {
     /// a flat square split in two stays flat and the same size: nothing to bevel
     #[test]
     fn coplanar_split_is_smooth() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, smooths: Vec::new(), refine: 0.0 };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let up = [0.0, 1.0, 0.0];
         let f = [face(&[[0., 0., 0.], [1., 0., 0.], [1., 0., 1.]], up), face(&[[0., 0., 0.], [1., 0., 1.], [0., 0., 1.]], up)];
         let v = body(&f, &st);

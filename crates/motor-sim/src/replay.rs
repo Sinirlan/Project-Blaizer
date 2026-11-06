@@ -6,13 +6,18 @@
 //! through `Race::step` reproduces the race exactly; a ghost run or a replay viewer only needs
 //! to step a second `Race` the same way.
 //!
+//! Frames are per rendered frame (dt, input), also on the fixed tick: the same dts through the same
+//! accumulator give the same ticks, so the header's `tick_hz` is all a replay needs (#374).
+//!
 //! Layout, little endian:
 //! ```text
-//! "MHR2"     ("MHR1" has no driver list and reads as the fixed line-up)
+//! "MHR3"     ("MHR2" has no tick rate and plays on the per-frame path; "MHR1" has no driver list either and
+//!             reads as the fixed line-up)
 //! u32 track, u32 laps, u8 flags (1 catchup, 2 manual, 4 knockout), u8 ai row kind (0 difficulty,
 //! 1 division), u8 ai row value, i8 player slot (-1 none), u8 car count, u32 car id × count
 //! str track name, str player nick, str car name       (u8 length + Latin-1; for listings)
-//! u8 driver count, str driver nick × count            (MHR2: the profile in each slot, "" for you)
+//! u8 driver count, str driver nick × count            (MHR2+: the profile in each slot, "" for you)
+//! f32 tick hz (MHR3: the fixed physics tick the run was made on, #374; 0 = one step per frame)
 //! u32 race ms (0 = not finished), u32 best lap ms (0 = none)
 //! u32 frame count, then per frame:
 //!   f32 dt, f32 throttle, f32 brake, f32 steer, u8 bits (1 up, 2 down, 4 handbrake),
@@ -27,7 +32,8 @@ use crate::session::{load_drivers, AiRow, Difficulty, Driver, Race, Rules};
 use glam::{Mat3, Vec3};
 use std::path::Path;
 
-const MAGIC: &[u8; 4] = b"MHR2";
+const MAGIC: &[u8; 4] = b"MHR3";
+const MAGIC_V2: &[u8; 4] = b"MHR2";
 const MAGIC_V1: &[u8; 4] = b"MHR1";
 const FRAME_BYTES: usize = 18;
 
@@ -49,6 +55,9 @@ pub struct Header {
     /// PlayerNick of the League profile driving each slot ("" for you); empty = MHR1, the fixed
     /// line-up of `load_drivers` (the single-race field is drawn at random, #217)
     pub drivers: Vec<String>,
+    /// the fixed physics tick the run was made on (`Race::fixed_hz`, #374); `None` = one step per frame
+    /// (MHR1/MHR2 files, which replay on that path)
+    pub tick_hz: Option<f32>,
     /// race time in ms once the player finished
     pub race_ms: Option<u32>,
     pub best_lap_ms: Option<u32>,
@@ -106,6 +115,7 @@ impl Recording {
         if let Some(r) = h.player.and_then(|p| race.racers.get_mut(p)) {
             r.car.manual = h.manual;
         }
+        race.set_fixed_tick(h.tick_hz);
         Ok(race)
     }
 
@@ -147,6 +157,7 @@ impl Recording {
             o.push(b.len() as u8);
             o.extend(b);
         }
+        o.extend_from_slice(&h.tick_hz.unwrap_or(0.0).to_le_bytes());
         o.extend_from_slice(&h.race_ms.unwrap_or(0).to_le_bytes());
         o.extend_from_slice(&h.best_lap_ms.unwrap_or(0).to_le_bytes());
         o.extend_from_slice(&(self.frames.len() as u32).to_le_bytes());
@@ -162,9 +173,10 @@ impl Recording {
 
     pub fn from_bytes(d: &[u8]) -> Result<Recording, String> {
         let mut r = Reader { d, o: 0 };
-        let v2 = match r.take(4)? {
-            m if m == MAGIC => true,
-            m if m == MAGIC_V1 => false,
+        let version = match r.take(4)? {
+            m if m == MAGIC => 3,
+            m if m == MAGIC_V2 => 2,
+            m if m == MAGIC_V1 => 1,
             _ => return Err("not a Motorhead recording".into()),
         };
         let track = r.u32()?;
@@ -186,7 +198,8 @@ impl Recording {
         let track_name = r.string()?;
         let nick = r.string()?;
         let car_name = r.string()?;
-        let drivers = if v2 { (0..r.u8()?).map(|_| r.string()).collect::<Result<Vec<_>, _>>()? } else { Vec::new() };
+        let drivers = if version >= 2 { (0..r.u8()?).map(|_| r.string()).collect::<Result<Vec<_>, _>>()? } else { Vec::new() };
+        let tick_hz = if version >= 3 { Some(r.f32()?).filter(|&h| h > 0.0) } else { None };
         let race_ms = Some(r.u32()?).filter(|&t| t > 0);
         let best_lap_ms = Some(r.u32()?).filter(|&t| t > 0);
         let count = r.u32()? as usize;
@@ -200,7 +213,7 @@ impl Recording {
             let input = Input { throttle, brake, steer, shift_up: bits & 1 != 0, shift_down: bits & 2 != 0, handbrake: bits & 4 != 0, hold: false };
             frames.push(Frame { dt, input, respawn: resp.checked_sub(1).map(|s| s as usize), skip: bits & 8 != 0, hand: (bits >> 4).checked_sub(1).map(|h| h as usize) });
         }
-        let header = Header { track, laps, catchup: flags & 1 != 0, manual: flags & 2 != 0, rules: if flags & 4 != 0 { Rules::Elimination } else { Rules::Normal }, row, player, cars, track_name, nick, car_name, drivers, race_ms, best_lap_ms };
+        let header = Header { track, laps, catchup: flags & 1 != 0, manual: flags & 2 != 0, rules: if flags & 4 != 0 { Rules::Elimination } else { Rules::Normal }, row, player, cars, track_name, nick, car_name, drivers, tick_hz, race_ms, best_lap_ms };
         Ok(Recording { header, frames })
     }
 
@@ -227,6 +240,10 @@ impl Recording {
             Self::step(&mut race, f);
             let r = &race.racers[slot];
             roll += r.car.vel.z * f.dt;
+            // on the fixed tick a frame between two ticks has the same state and clock as the one before
+            if race.ticks_last_frame() == 0 {
+                continue;
+            }
             poses.push(GhostPose { clock_ms: race.clock_ms, pos: r.car.pos, rot: r.car.rot, wheel_ext: r.car.wheel_ext, steer_smooth: r.car.steer_smooth, roll });
             if r.progress.lap > 1 || r.progress.finished_ms.is_some() {
                 break;
@@ -458,6 +475,7 @@ mod tests {
             nick: "Ann".into(),
             car_name: "Kobra X3".into(),
             drivers: vec!["Abe".into(), "Okkun".into(), String::new()],
+            tick_hz: Some(60.0),
             race_ms: Some(91_234),
             best_lap_ms: None,
         };
@@ -533,14 +551,44 @@ mod tests {
         assert!(hand.racers[3].car.kmh() < ai.racers[3].car.kmh());
     }
 
+    /// Bytes from the end of the header (race ms, best lap, frame count) back to the driver count.
+    fn tail(rec: &Recording) -> usize {
+        rec.frames.len() * FRAME_BYTES + 12
+    }
+
+    #[test]
+    fn mhr3_keeps_the_tick() {
+        for hz in [Some(60.0), Some(144.5), None] {
+            let mut rec = sample();
+            rec.header.tick_hz = hz;
+            let b = rec.to_bytes();
+            assert_eq!(&b[..4], b"MHR3");
+            assert_eq!(Recording::from_bytes(&b).unwrap(), rec);
+        }
+    }
+
+    #[test]
+    fn mhr2_files_still_load_on_the_per_frame_path() {
+        let rec = sample();
+        let mut b = rec.to_bytes();
+        // an MHR2 file: the old magic and no tick rate (the f32 before race ms, best lap, frame count)
+        b.drain(b.len() - tail(&rec) - 4..b.len() - tail(&rec));
+        b[3] = b'2';
+        let old = Recording::from_bytes(&b).unwrap();
+        assert_eq!(old.header.tick_hz, None);
+        assert_eq!(old, Recording { header: Header { tick_hz: None, ..rec.header.clone() }, ..rec });
+    }
+
     #[test]
     fn mhr1_files_still_load() {
         let mut rec = sample();
         rec.header.drivers.clear();
+        rec.header.tick_hz = None;
         let mut b = rec.to_bytes();
-        // an MHR1 file: the old magic and no driver count (the byte before race ms, best lap, frame count)
-        let at = b.len() - rec.frames.len() * FRAME_BYTES - 12 - 1;
-        b.remove(at);
+        // an MHR1 file: the old magic, no tick rate and no driver count (the bytes before race ms, best lap, frame count)
+        let end = b.len() - tail(&rec);
+        b.drain(end - 4..end);
+        b.remove(end - 5);
         b[3] = b'1';
         assert_eq!(Recording::from_bytes(&b).unwrap(), rec);
     }
@@ -588,6 +636,46 @@ mod tests {
         let last = g.poses.last().unwrap();
         assert_eq!(last.pos, live.racers[3].car.pos);
         assert_eq!(g.pose_at(last.clock_ms).unwrap().pos, last.pos);
+    }
+
+    /// #374: a recording made on the fixed tick replays to the same state at any frame length (the tick itself
+    /// is the same at every rate: session::tick_tests). Needs the game install (skipped without it).
+    #[test]
+    fn tick_replay_matches_live_race() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.exists() {
+            return;
+        }
+        for (name, frame_s) in [("30 fps", 1.0 / 30.0), ("60 fps", 1.0 / 60.0), ("144 fps", 1.0 / 144.0)] {
+            let mut rec = sample();
+            rec.header.cars = vec![1, 2, 3, 4];
+            rec.header.player = Some(3);
+            rec.header.race_ms = None;
+            rec.header.tick_hz = Some(60.0);
+            rec.frames.clear();
+            let mut live = rec.load_race(&root).unwrap();
+            assert_eq!(live.fixed_hz(), Some(60.0), "load_race turns the tick on");
+            let frames = (30.0 / frame_s) as usize;
+            for i in 0..frames {
+                let t = i as f32 * frame_s;
+                let input = Input { throttle: 1.0, steer: (t * 1.2).sin() * 0.4, shift_up: i % 97 == 0, ..Default::default() };
+                rec.push(frame_s, input, None, i == 10);
+                let f = *rec.frames.last().unwrap();
+                Recording::step(&mut live, &f);
+            }
+            let rec = Recording::from_bytes(&rec.to_bytes()).unwrap();
+            let mut again = rec.load_race(&root).unwrap();
+            for f in &rec.frames {
+                Recording::step(&mut again, f);
+            }
+            for (a, b) in live.racers.iter().zip(&again.racers) {
+                assert_eq!((a.car.pos, a.car.rot, a.car.vel), (b.car.pos, b.car.rot, b.car.vel), "{name}");
+            }
+            assert_eq!(live.clock_ms, again.clock_ms, "{name}");
+            // the ghost has a pose per tick, not per frame
+            let g = rec.ghost(&root).unwrap();
+            assert!(g.poses.len() <= 30 * 60 + 2, "{name}: {} poses", g.poses.len());
+        }
     }
 
     #[test]

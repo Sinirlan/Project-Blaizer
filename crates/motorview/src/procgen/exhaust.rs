@@ -35,6 +35,10 @@ pub struct Exhaust {
     pub pipe: f32,
     /// how deep the dark inside goes before the end plate (m)
     pub depth: f32,
+    /// REMASTER (#388, the Serpent's, after the reference model veyron.blend): one tip on the
+    /// centre line instead of the pair, `width` across its top, each side leaning in by `slant`
+    /// towards the bottom, the `chamfer` on its two lower corners; `x` unused
+    pub centre: bool,
 }
 
 /// polished steel, shaded as metal (`super::METAL_ENV`)
@@ -42,8 +46,14 @@ const STEEL: [f32; 4] = [0.75, 0.75, 0.78, 1.0];
 /// sooty inside
 const SOOT: [f32; 4] = [0.04, 0.035, 0.03, 1.0];
 
-/// The +x tip's sharp outline (x, y round `e.y`), counter-clockwise, convex.
+/// The +x tip's sharp outline (x, y round `e.y`), counter-clockwise, convex; the centre tip's
+/// is symmetric about x = 0.
 fn corners(e: &Exhaust) -> Vec<Vec2> {
+    if e.centre {
+        let (t, h, c) = (0.5 * e.width, 0.5 * e.height, e.chamfer);
+        let b = t - e.slant;
+        return vec![Vec2::new(-b + c, -h), Vec2::new(b - c, -h), Vec2::new(b, -h + c), Vec2::new(t, h), Vec2::new(-t, h), Vec2::new(-b, -h + c)];
+    }
     let (x0, x1, h, c) = (e.x, e.x + e.width, 0.5 * e.height, e.chamfer);
     vec![
         Vec2::new(x0, h - c),
@@ -130,7 +140,8 @@ pub fn exhausts(e: &Exhaust) -> Vec<Vertex> {
     let (right_out, right_in) = outlines(e);
     let m = super::METAL_ENV;
     let (zl, zf, zd) = (e.z, e.z + e.pipe, e.z + e.depth);
-    for sx in [1.0, -1.0] {
+    let sides: &[f32] = if e.centre { &[1.0] } else { &[1.0, -1.0] };
+    for &sx in sides {
         // the -x tip is the mirror image (`tri` sorts out the winding)
         let mirror = |q: &(Vec2, Vec2)| (Vec2::new(sx * q.0.x, q.0.y), Vec2::new(sx * q.1.x, q.1.y));
         let outer: Outline = right_out.iter().map(mirror).collect();
@@ -183,7 +194,7 @@ pub fn exhausts(e: &Exhaust) -> Vec<Vertex> {
 mod tests {
     use super::*;
 
-    const E: Exhaust = Exhaust { x: 0.025, y: 0.5, z: -2.03, width: 0.26, height: 0.11, chamfer: 0.02, slant: 0.05, round: 0.012, lip: 0.006, pipe: 0.08, depth: 0.06 };
+    const E: Exhaust = Exhaust { x: 0.025, y: 0.5, z: -2.03, width: 0.26, height: 0.11, chamfer: 0.02, slant: 0.05, round: 0.012, lip: 0.006, pipe: 0.08, depth: 0.06, centre: false };
 
     /// two tips inside their boxes, from the lip forward by the pipe's length
     #[test]
@@ -197,6 +208,20 @@ mod tests {
             assert!((-2.03 - 1e-5..=-1.95 + 1e-5).contains(&z), "{z}");
         }
         assert!(v.iter().any(|p| p.pos[0] > 0.0) && v.iter().any(|p| p.pos[0] < 0.0));
+    }
+
+    /// the centre tip (#388): one, symmetric about x = 0, `width` across at the top and
+    /// narrower at the bottom
+    #[test]
+    fn centre_tip() {
+        let e = Exhaust { x: 0.0, y: 0.47, z: -2.2, width: 0.136, height: 0.096, chamfer: 0.02, slant: 0.022, round: 0.012, lip: 0.01, pipe: 0.08, depth: 0.06, centre: true };
+        let v = exhausts(&e);
+        let xs: Vec<f32> = v.iter().map(|p| p.pos[0]).collect();
+        let (lo, hi) = (xs.iter().fold(f32::MAX, |a, &b| a.min(b)), xs.iter().fold(f32::MIN, |a, &b| a.max(b)));
+        // the fillets pull the sharp top corners in a little
+        assert!((lo + hi).abs() < 1e-4 && hi <= 0.068 + 1e-5 && hi > 0.06, "{lo} {hi}");
+        let bottom = v.iter().filter(|p| p.pos[1] < 0.47 - 0.047).map(|p| p.pos[0].abs()).fold(0.0, f32::max);
+        assert!(bottom < 0.068 - 0.015, "{bottom}");
     }
 
     /// every triangle keeps its smallest angle over the mesh check's sliver limit: the rim

@@ -2,6 +2,7 @@
 //! triangles grouped per MYW object, car meshes and scene objects under their per-frame model
 //! matrices. All in view space, like the renderer.
 
+use crate::probes::Bvh;
 use crate::scene::{Scene, CAR_MESHES};
 use glam::{Mat4, Vec3};
 use std::ops::Range;
@@ -41,6 +42,15 @@ pub struct Bounds {
     pub radius: f32,
 }
 
+impl Bounds {
+    fn of(tris: &[[Vec3; 3]]) -> Bounds {
+        let (lo, hi) = tris.iter().flatten().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| (lo.min(p), hi.max(p)));
+        let center = (lo + hi) * 0.5;
+        let radius = tris.iter().flatten().map(|p| p.distance(center)).fold(0.0, f32::max);
+        Bounds { lo, hi, center, radius }
+    }
+}
+
 struct Mesh {
     tris: Vec<[Vec3; 3]>,
     bounds: Bounds,
@@ -48,10 +58,8 @@ struct Mesh {
 
 impl Mesh {
     fn new(tris: Vec<[Vec3; 3]>) -> Mesh {
-        let (lo, hi) = tris.iter().flatten().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), &p| (lo.min(p), hi.max(p)));
-        let center = (lo + hi) * 0.5;
-        let radius = tris.iter().flatten().map(|p| p.distance(center)).fold(0.0, f32::max);
-        Mesh { tris, bounds: Bounds { lo, hi, center, radius } }
+        let bounds = Bounds::of(&tris);
+        Mesh { tris, bounds }
     }
 
     /// Nearest hit in this mesh's space: ray `o + t d` (d need not be unit length).
@@ -101,8 +109,12 @@ fn triangle(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 }
 
 pub struct Picker {
-    /// per MYW object: its mesh, triangle range in `Scene::tris`, file offset
-    world: Vec<(Mesh, Range<usize>, usize)>,
+    /// per MYW object: its bounds, triangle range in `Scene::tris`, file offset
+    world: Vec<(Bounds, Range<usize>, usize)>,
+    /// every world triangle in one hierarchy, objects concatenated in order
+    world_bvh: Bvh,
+    /// per `world_bvh` triangle: (object index, index in `Scene::tris`)
+    world_tri: Vec<(u32, u32)>,
     world_texture: Vec<u32>,
     cars: Vec<Mesh>,
     props: Vec<Mesh>,
@@ -119,8 +131,17 @@ fn tris_of(v: &[crate::scene::Vertex]) -> Vec<[Vec3; 3]> {
 
 impl Picker {
     pub fn new(s: &Scene) -> Picker {
+        let (mut world, mut all, mut world_tri) = (Vec::new(), Vec::new(), Vec::new());
+        for (object, (r, off)) in s.world_objects.iter().enumerate() {
+            let tris = tris_of(&s.tris[r.start * 3..r.end * 3]);
+            world.push((Bounds::of(&tris), r.clone(), *off));
+            world_tri.extend(r.clone().map(|g| (object as u32, g as u32)));
+            all.extend(tris);
+        }
         Picker {
-            world: s.world_objects.iter().map(|(r, off)| (Mesh::new(tris_of(&s.tris[r.start * 3..r.end * 3])), r.clone(), *off)).collect(),
+            world,
+            world_bvh: Bvh::new(all),
+            world_tri,
             world_texture: s.world_tri_texture.clone(),
             cars: s.cars.iter().map(|m| Mesh::new(tris_of(m))).collect(),
             props: s.props.iter().map(|m| Mesh::new(tris_of(m))).collect(),
@@ -155,7 +176,7 @@ impl Picker {
 
     /// Bounds of every MYW object (`Target::World::object` order), view space.
     pub fn world_bounds(&self) -> impl Iterator<Item = Bounds> + '_ {
-        self.world.iter().map(|w| w.0.bounds)
+        self.world.iter().map(|w| w.0)
     }
 
     /// Bounds of a car mesh (car-local) or a scene object mesh (object-local); None if empty.
@@ -192,11 +213,12 @@ impl Picker {
                 best = Some(Hit { t, point: o + dir * t, origin, target, tri });
             }
         };
-        for (object, (m, range, offset)) in self.world.iter().enumerate() {
-            if let Some((t, i)) = m.cast(o, dir, max_t) {
-                let texture = self.world_texture.get(range.start + i).filter(|&&x| x != u32::MAX).map(|&x| x as usize);
-                keep((t, range.start + i), m.bounds.center, Target::World { object, offset: *offset, texture });
-            }
+        if let Some(h) = self.world_bvh.cast(o, dir, max_t) {
+            let (object, tri) = self.world_tri[h.tri];
+            let (object, tri) = (object as usize, tri as usize);
+            let (bounds, _, offset) = &self.world[object];
+            let texture = self.world_texture.get(tri).filter(|&&x| x != u32::MAX).map(|&x| x as usize);
+            keep((h.t, tri), bounds.center, Target::World { object, offset: *offset, texture });
         }
         // instances: the ray goes into model space unnormalised, so t stays the view-space t
         let instance = |m: &Mesh, model: &Mat4| {
@@ -244,7 +266,7 @@ mod tests {
     fn cast_fill_returns_the_nearest_piece_and_honours_skip() {
         let mut verts = quad_at(5.0);
         verts.extend(quad_at(2.0));
-        let mut p = Picker { world: Vec::new(), world_texture: Vec::new(), cars: Vec::new(), props: Vec::new(), world_textures: Vec::new(), prop_names: Vec::new(), car_names: Vec::new(), fill: Vec::new() };
+        let mut p = Picker { world: Vec::new(), world_bvh: Bvh::new(Vec::new()), world_tri: Vec::new(), world_texture: Vec::new(), cars: Vec::new(), props: Vec::new(), world_textures: Vec::new(), prop_names: Vec::new(), car_names: Vec::new(), fill: Vec::new() };
         p.set_fill(&verts, &[(7, 0..6), (3, 6..12)]);
         let (o, d) = (Vec3::new(0.2, 10.0, 0.1), Vec3::NEG_Y);
         let (i, t) = p.cast_fill(o, d, 100.0, &|_| false).unwrap();
@@ -256,5 +278,57 @@ mod tests {
         assert!((p.ground_t(o, d, 100.0, &|_| false).unwrap() - 5.0).abs() < 1e-4);
         assert!((p.ground_t(o, d, 100.0, &|i| i == 7).unwrap() - 8.0).abs() < 1e-4);
         assert!(p.ground_t(o, d, 100.0, &|_| true).is_none());
+    }
+
+    /// The world hierarchy finds the same nearest triangle as testing every triangle.
+    #[test]
+    fn world_bvh_matches_brute_force() {
+        let mut seed = 12345u32;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let mut verts = Vec::new();
+        let mut objects = Vec::new();
+        for _ in 0..12 {
+            let first = verts.len() / 3;
+            let c = Vec3::new(rnd() * 60.0 - 30.0, rnd() * 10.0, rnd() * 60.0 - 30.0);
+            for _ in 0..120 {
+                let at = c + Vec3::new(rnd() * 8.0, rnd() * 8.0, rnd() * 8.0);
+                for _ in 0..3 {
+                    let p = at + Vec3::new(rnd() * 3.0, rnd() * 3.0, rnd() * 3.0);
+                    verts.push(Vertex { pos: p.to_array(), ..bytemuck::Zeroable::zeroed() });
+                }
+            }
+            objects.push((first..verts.len() / 3, objects.len() * 16));
+        }
+        let mut p = Picker { world: Vec::new(), world_bvh: Bvh::new(Vec::new()), world_tri: Vec::new(), world_texture: Vec::new(), cars: Vec::new(), props: Vec::new(), world_textures: Vec::new(), prop_names: Vec::new(), car_names: Vec::new(), fill: Vec::new() };
+        let (mut all, mut tri_of) = (Vec::new(), Vec::new());
+        for (object, (r, off)) in objects.iter().enumerate() {
+            let tris = tris_of(&verts[r.start * 3..r.end * 3]);
+            p.world.push((Bounds::of(&tris), r.clone(), *off));
+            tri_of.extend(r.clone().map(|g| (object as u32, g as u32)));
+            all.extend(tris);
+        }
+        p.world_bvh = Bvh::new(all);
+        p.world_tri = tri_of;
+        let brute: Vec<Mesh> = objects.iter().map(|(r, _)| Mesh::new(tris_of(&verts[r.start * 3..r.end * 3]))).collect();
+        let mut hits = 0;
+        for _ in 0..300 {
+            let o = Vec3::new(rnd() * 80.0 - 40.0, rnd() * 30.0 - 5.0, rnd() * 80.0 - 40.0);
+            let d = (Vec3::new(rnd() * 60.0 - 30.0, rnd() * 14.0, rnd() * 60.0 - 30.0) - o).normalize();
+            let want = brute.iter().enumerate().filter_map(|(i, m)| m.cast(o, d, 500.0).map(|(t, _)| (t, i))).min_by(|a, b| a.0.total_cmp(&b.0));
+            let got = p.cast(o, d, 500.0, &[], &[]);
+            match (want, got) {
+                (None, None) => {}
+                (Some((t, i)), Some(h)) => {
+                    hits += 1;
+                    assert!((t - h.t).abs() < 1e-4, "t {t} vs {}", h.t);
+                    assert!(matches!(h.target, Target::World { object, .. } if object == i));
+                }
+                (a, b) => panic!("brute {a:?} vs bvh {:?}", b.map(|h| h.t)),
+            }
+        }
+        assert!(hits > 20, "test rays should hit something ({hits})");
     }
 }

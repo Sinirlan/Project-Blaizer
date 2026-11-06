@@ -174,6 +174,49 @@ fn regions<'a>(faces: &[&'a Face]) -> Vec<Vec<&'a Face>> {
     g
 }
 
+/// One sample across a bar: its left and right foot on the floor, each with the floor's normal;
+/// `None` where a foot misses the floor (the bar is cut there).
+type Sample = Option<[(Vec3, Vec3); 2]>;
+
+/// a run of samples is one straight piece when its inner feet lie this close (m) to the line
+/// between its end feet
+const MERGE_TOL: f32 = 2e-4;
+
+/// `s` with the inner samples of straight runs dropped (#372): a run over one floor plane (the
+/// same normal at every foot) whose inner feet lie within `MERGE_TOL` of the chord between its
+/// end feet becomes one segment. The cuts (`None`) and the samples next to them stay, so the
+/// bar is clipped as before; over a fold the runs break at the samples either side of it.
+fn merge(s: &[Sample]) -> Vec<Sample> {
+    let straight = |run: &[Sample]| {
+        let (Some(first), Some(last)) = (run[0], run[run.len() - 1]) else { return false };
+        run.iter().all(|q| {
+            q.is_some_and(|q| {
+                (0..2).all(|k| {
+                    let (a, b, p) = (first[k].0, last[k].0, q[k].0);
+                    let along = (b - a).normalize_or_zero();
+                    let off = (p - a).reject_from_normalized(along).length();
+                    (q[k].1 - first[k].1).length() < 1e-4 && off <= MERGE_TOL
+                })
+            })
+        })
+    };
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        out.push(s[i]);
+        if s[i].is_none() {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j + 1 < s.len() && straight(&s[i..=j + 1]) {
+            j += 1;
+        }
+        i = j;
+    }
+    out
+}
+
 /// A bar `w` wide and `h` tall standing on the floor (`at`: a point of the vent's plane frame
 /// onto the floor, with the floor's normal) from `a` to `b`: a top and two walls, kept where
 /// both its edges land on the floor. `lean` (radians) tips it over towards its lower side,
@@ -187,12 +230,13 @@ fn bar(out: &mut Vec<Vertex>, at: &dyn Fn(Vec2) -> Option<(Vec3, Vec3)>, a: Vec2
     }
     let side = d.perp() / len * (w / 2.0);
     let n = (len / STEP).ceil() as usize;
-    let s: Vec<Option<[(Vec3, Vec3); 2]>> = (0..=n)
+    let s: Vec<Sample> = (0..=n)
         .map(|i| {
             let p = a + d * (i as f32 / n as f32);
             Some([at(p - side)?, at(p + side)?])
         })
         .collect();
+    let s = merge(&s);
     if lean != 0.0 {
         leaning(out, &s, h, lean);
         return;
@@ -216,7 +260,7 @@ fn bar(out: &mut Vec<Vertex>, at: &dyn Fn(Vec2) -> Option<(Vec3, Vec3)>, a: Vec2
 /// `bar`'s leaning plank over its floor samples `s` (left and right foot, each with the floor's
 /// normal): the floor normal turned by `lean` towards the lower foot gives the plank's
 /// direction; the two walls are its lower and upper faces, the top its outer edge.
-fn leaning(out: &mut Vec<Vertex>, s: &[Option<[(Vec3, Vec3); 2]>], h: f32, lean: f32) {
+fn leaning(out: &mut Vec<Vertex>, s: &[Sample], h: f32, lean: f32) {
     let (sl, cl) = lean.sin_cos();
     let len = h / cl;
     for pair in s.windows(2) {
@@ -294,6 +338,50 @@ mod tests {
         }
         assert!(tall.iter().any(|p| (p.pos[0] - 0.14).abs() < 1e-4) && tall.iter().any(|p| (p.pos[0] - 0.61).abs() < 1e-4));
     }
+    /// #372: on a flat floor every slat is one segment (6 triangles): no vertex inside its
+    /// length; the honeycomb too keeps no sample between a wall's two corners
+    #[test]
+    fn flat_bars_are_one_segment() {
+        let faces = vec![quad(0.0, 0.3)];
+        let housing = Glass { rgb: TAG, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let v = Vent { from: [1; 3], lo: [0.0; 3], hi: [1.0; 3], housing, kind: VentKind::Slats { pitch: 0.02, width: 0.006, blades: 0, spine: 0.01, tilt: 0.0 } };
+        let out = vents(&faces, &[v], &[true]);
+        assert!(!out.is_empty() && out.len().is_multiple_of(18));
+        assert!(out.iter().all(|p| p.pos[0] < 1e-4 || p.pos[0] > 0.3 - 1e-4), "a slat split along its length");
+        // a straight row of samples on one plane collapses to its ends; a cut stays a cut
+        let foot = |x: f32| Some([(Vec3::new(x, 0.0, 0.0), Vec3::Z), (Vec3::new(x, 0.01, 0.0), Vec3::Z)]);
+        let s: Vec<Sample> = vec![foot(0.0), foot(0.01), foot(0.02), None, foot(0.04), foot(0.05), foot(0.06)];
+        let m = merge(&s);
+        assert_eq!(m.len(), 5);
+        assert!(m[2].is_none() && m[0] == s[0] && m[1] == s[2] && m[3] == s[4] && m[4] == s[6]);
+    }
+
+    /// #372: over a folded floor (two planes meeting at 30 deg) a slat keeps its samples either
+    /// side of the fold, and every vertex stays within the slat height of a floor plane
+    #[test]
+    fn folded_floor_keeps_the_fold() {
+        let (c, s) = (30f32.to_radians().cos(), 30f32.to_radians().sin());
+        // plane A: x 0..0.15 at z 0; plane B: from x 0.15 rising to z 0.15 s over 0.15 c
+        let a = Face { pts: vec![[0.0, 0.0, 0.0], [0.15, 0.0, 0.0], [0.15, 0.1, 0.0], [0.0, 0.1, 0.0]], ..quad(0.0, 0.1) };
+        let e = |x: f32| [0.15 + x * c, 0.0, x * s];
+        let f = |x: f32| [0.15 + x * c, 0.1, x * s];
+        let b = Face { pts: vec![e(0.0), e(0.15), f(0.15), f(0.0)], normal: [-s, 0.0, c], ..quad(0.0, 0.1) };
+        let housing = Glass { rgb: TAG, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let v = Vent { from: [1; 3], lo: [0.0; 3], hi: [1.0; 3], housing, kind: VentKind::Slats { pitch: 0.05, width: 0.006, blades: 0, spine: 0.01, tilt: 0.0 } };
+        let out = vents(&[a, b], &[v], &[true]);
+        assert!(!out.is_empty());
+        // per slat: one segment on A, the step across the fold, one segment on B
+        assert!(out.len().is_multiple_of(54), "{}", out.len());
+        let (na, nb) = (Vec3::Z, Vec3::new(-s, 0.0, c));
+        let ob = Vec3::new(0.15, 0.0, 0.0);
+        for q in &out {
+            let g = Vec3::new(q.pos[0], q.pos[1], -q.pos[2]);
+            let (ha, hb) = (g.dot(na), (g - ob).dot(nb));
+            let near = |h: f32| (-1e-4..=0.03 * SLAT_HEIGHT + 1e-4).contains(&h);
+            assert!(near(ha) || near(hb), "{g}");
+        }
+    }
+
     /// window-blind slats (#174 phase 4) on a floor tilted 45 deg like the Serpent's tail grille
     /// (facing back and up): leaning 45 deg down the vent, their outer edges face straight back
     /// (level slats), and nothing rises more than the slat height off the floor

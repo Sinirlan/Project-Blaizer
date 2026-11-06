@@ -28,6 +28,12 @@ The source can also be a `.bin`/`.img` (its `.cue` beside it is used when presen
 
 Ready-made `motorhead` and `motorinstall` for Linux and Windows (x86_64) are attached to each tag on the
 Releases page, with `SHA256SUMS`. They contain no game data: you still need your own copy of the game.
+The installer is also a download of its own (`motorinstall-<tag>-<platform>`).
+
+The optional **Remaster pack** (`motorhead-remaster-<tag>.zip`, about 180 MB, with a `.sha256` file) holds the
+Remaster mode's data: per-track fog, world fill, custom rims, HDRI skies, track pictures and the simulated
+engine sound. Unzip it over the install folder (the one with `motor.exe`); it adds a `remaster/` folder.
+Classic mode does not use it, and Remaster falls back to plainer defaults without it.
 
 ## Build and play
 

@@ -3,7 +3,7 @@
 //! motorview (never committed); the modern Track screen shows it in place of the original's
 //! 324 x 270 `_menuimg` (`trk:N`) when it exists.
 
-use crate::png;
+use crate::texpack::decode_png;
 use motor_data::fs;
 use std::path::Path;
 
@@ -17,7 +17,12 @@ pub const MAX: (u32, u32) = (1020, 850);
 /// Track `track`'s photo (w, h, RGBA), centre-cropped to 6:5 and capped at `MAX`.
 pub fn load(root: &Path, track: u32) -> Option<(u32, u32, Vec<u8>)> {
     let name = format!("{DIR}/track{track:02}.png");
-    let (w, h, rgba) = png::read(&fs::read(root, &name).ok()?).map_err(|e| eprintln!("{name}: {e}")).ok()?;
+    // Any PNG an image editor saves (compressed, filtered, RGB or RGBA), not only our own screenshot format.
+    let Some(map) = decode_png(&fs::read(root, &name).ok()?) else {
+        eprintln!("{name}: not a readable 8/16-bit PNG");
+        return None;
+    };
+    let (w, h, rgba) = (map.w, map.h, map.rgba);
     let (w, h, rgba) = crop(w, h, &rgba);
     Some(shrink(w, h, rgba))
 }

@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+motor-tune = { path = "../motor-tune" }
 motor-data = { path = "../motor-data" }
 motor-version = { path = "../motor-version" }
 wgpu = "30.0.1"
@@ -27,3 +28,7 @@ lyon_tessellation = "1"
 exr = "1.74.2"
 half = "2.7.1"
 miniz_oxide = "0.8.9"
+gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
+
+[build-dependencies]
+winresource = "0.1.34"

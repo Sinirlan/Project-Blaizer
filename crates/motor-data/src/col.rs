@@ -39,11 +39,48 @@ pub struct Collision {
     pub edges: Vec<[f32; 4]>,
 }
 
-/// Tolerance of the inside test in the ray query (0x4cfd17).
-pub const EDGE_EPS: f32 = -0.001;
-/// Skin of the segment test (0x4cfcf7 = +0.08, 0x4cfcfb = -0.08): a start point up to this far
+/// Tolerance of the inside test in the ray query (0x4cfd17, a double).
+pub const EDGE_EPS: f64 = -0.001;
+/// Skin of the segment test (0x4cfcf7 = +0.08, 0x4cfcfb = -0.08, f32): a start point up to this far
 /// behind a face's plane and an end point up to this far in front of it still count as a crossing.
 const SKIN: f32 = 0.08;
+/// The skin thresholds the start and end are compared with are doubles (0x4cfd07 = -0.08,
+/// 0x4cfd0f = +0.08; 0x4cfccf / 0x4cfcdf in 0x416480).
+const SKIN_LIMIT: f64 = 0.08;
+
+// CLASSIC: the ray query runs on the x87 with the precision control at 53 bits: the game sets it
+// to double at 0x41473e and 0x43a499 (0x405c88), and only the renderer 0x439e84 switches it to
+// single (0x405c64) [O]. So sums are rounded to f64 and only stored values to f32. The f64
+// arithmetic below follows the original's operation order and its store points.
+
+/// `n . p + d` the way the original sums it: `((nx*px + d) + ny*py) + nz*pz` in f64.
+fn plane_dist(n: [f32; 3], d: f32, p: [f32; 3]) -> f64 {
+    let f = |v: f32| v as f64;
+    f(n[0]) * f(p[0]) + f(d) + f(n[1]) * f(p[1]) + f(n[2]) * f(p[2])
+}
+
+/// The crossing of a segment with a plane, given the start's distance `da` (already stored to
+/// f32, as the original does) and the end `b`, with the skin rules (0x416a7e..0x416be4,
+/// 0x416486..0x416546) [O]. Returns `t` before it is stored (f64, 0 = start, 1 = `b`) and the
+/// skin shift `extra` (0 or 0.08).
+fn crossing(n: [f32; 3], d: f32, b: [f32; 3], da: f32) -> Option<(f64, f32)> {
+    let (mut da, mut extra) = (da, 0.0f32);
+    if da <= 0.0 && da as f64 > -SKIN_LIMIT {
+        extra = SKIN;
+        da = (da as f64 + SKIN as f64) as f32;
+    }
+    if da <= 0.0 {
+        return None;
+    }
+    let mut db = (plane_dist(n, d, b) + extra as f64) as f32;
+    if db > 0.0 && (db as f64) < SKIN_LIMIT {
+        db = (db as f64 - SKIN as f64) as f32;
+    }
+    if db > 0.0 {
+        return None;
+    }
+    Some((da as f64 / (da as f64 - db as f64), extra))
+}
 
 impl Collision {
     /// Face ids stored in leaf `index` (units of 4 bytes): u16 count, u16 ids...
@@ -74,12 +111,14 @@ impl Collision {
         Ok((0..self.faces.len() as u16).filter(|&i| seen[i as usize]).collect())
     }
 
-    /// Is `p` inside all edge half-spaces of `face`?
+    /// Is `p` inside all edge half-spaces of `face`? The edge distance is summed in f64, stored
+    /// to f32, its sign flipped for bit 15, and compared with the double `EDGE_EPS` (0x416ccc..0x416d19).
     pub fn inside(&self, face: &Face, p: [f32; 3]) -> bool {
         face.edge_slots().all(|e| {
             let Some(&[nx, ny, nz, d]) = self.edges.get(((e - 1) & 0x7fff) as usize) else { return false };
-            let s = if e & 0x8000 != 0 { -1.0 } else { 1.0 };
-            s * (nx * p[0] + ny * p[1] + nz * p[2] + d) >= EDGE_EPS
+            let v = plane_dist([nx, ny, nz], d, p) as f32;
+            let v = if e & 0x8000 != 0 { -v } else { v };
+            v as f64 >= EDGE_EPS
         })
     }
 
@@ -168,31 +207,23 @@ impl Collision {
     fn face_hit(&self, f: u16, a: [f32; 3], b: [f32; 3], reach: f32, best_t: f32) -> Option<Hit> {
         let face = self.faces.get(f as usize)?;
         let [nx, ny, nz, d] = face.plane;
-        let mut da = nx * a[0] + d + ny * a[1] + nz * a[2];
-        if da >= reach {
+        let n = [nx, ny, nz];
+        // the reach test compares the unrounded sum (0x416a7e `fst` keeps it in the register)
+        let da = plane_dist(n, d, a);
+        if da >= reach as f64 {
             return None;
         }
-        let mut extra = 0.0;
-        if da <= 0.0 && da > -SKIN {
-            extra = SKIN;
-            da += SKIN;
-        }
-        if da <= 0.0 {
+        let (t64, extra) = crossing(n, d, b, da as f32)?;
+        // CLASSIC 0x416be9: the new t, still at double precision, against the leaf's best t as
+        // stored (f32). For coplanar faces the later one wins when storing t rounded it up [O].
+        if t64 >= best_t as f64 {
             return None;
         }
-        let mut db = nx * b[0] + d + ny * b[1] + nz * b[2] + extra;
-        if db > 0.0 && db < SKIN {
-            db -= SKIN;
-        }
-        if db > 0.0 {
-            return None;
-        }
-        let t = da / (da - db);
-        if t >= best_t {
-            return None;
-        }
-        let p = [(b[0] - a[0]) * t + a[0] + nx * extra, (b[1] - a[1]) * t + a[1] + ny * extra, (b[2] - a[2]) * t + a[2] + nz * extra];
-        self.inside(face, p).then_some(Hit { t, point: p, normal: [nx, ny, nz], d, material: face.material, face: f })
+        let t = t64 as f32;
+        let along = |k: usize| (b[k] - a[k]) * t + a[k];
+        let shift = |k: usize, v: f32| (n[k] as f64 * extra as f64 + v as f64) as f32;
+        let p = [shift(0, along(0)), shift(1, along(1)), shift(2, along(2))];
+        self.inside(face, p).then_some(Hit { t, point: p, normal: n, d, material: face.material, face: f })
     }
 
     /// Re-test a segment `a` -> `b` against one plane (`normal`, `d`): transliteration of
@@ -202,35 +233,50 @@ impl Collision {
     /// wheel that touched in the second one (0x47eaa4).
     // CLASSIC 0x416480
     pub fn plane_hit(normal: [f32; 3], d: f32, a: [f32; 3], b: [f32; 3]) -> Option<f32> {
-        let [nx, ny, nz] = normal;
-        let mut da = nx * a[0] + d + ny * a[1] + nz * a[2];
-        let mut extra = 0.0;
-        if da <= 0.0 && da > -SKIN {
-            extra = SKIN;
-            da += SKIN;
-        }
-        if da <= 0.0 {
-            return None;
-        }
-        let mut db = nx * b[0] + d + ny * b[1] + nz * b[2] + extra;
-        if db > 0.0 && db < SKIN {
-            db -= SKIN;
-        }
-        (db <= 0.0).then(|| da / (da - db))
+        crossing(normal, d, b, plane_dist(normal, d, a) as f32).map(|(t, _)| t as f32)
+    }
+
+    /// Diagnostic (`origreplay`, #402): how segment `a` -> `b` stands against face `f` alone,
+    /// with the sums of `face_hit` but no voxel walk, reach or leaf best-t test.
+    pub fn face_probe(&self, f: u16, a: [f32; 3], b: [f32; 3]) -> Option<FaceProbe> {
+        let face = self.faces.get(f as usize)?;
+        let [nx, ny, nz, d] = face.plane;
+        let n = [nx, ny, nz];
+        let (da, db) = (plane_dist(n, d, a), plane_dist(n, d, b));
+        let cross = crossing(n, d, b, da as f32);
+        let p = match cross {
+            Some((t64, extra)) => {
+                let t = t64 as f32;
+                std::array::from_fn(|k| (n[k] as f64 * extra as f64 + ((b[k] - a[k]) * t + a[k]) as f64) as f32)
+            }
+            None => b,
+        };
+        let edge = face
+            .edge_slots()
+            .filter_map(|e| {
+                let &[ex, ey, ez, ed] = self.edges.get(((e - 1) & 0x7fff) as usize)?;
+                let v = plane_dist([ex, ey, ez], ed, p) as f32;
+                Some(if e & 0x8000 != 0 { -v } else { v })
+            })
+            .fold(f32::INFINITY, f32::min);
+        Some(FaceProbe { da, db, t: cross.map(|(t, _)| t as f32), edge, hit: cross.is_some() && edge as f64 >= EDGE_EPS })
     }
 
     /// Segment query from `a` to `b`: transliteration of 0x416840 [O]. The voxels along the
     /// segment (`walk`) are visited in order; each leaf's faces are tested (`face_hit`) and the
-    /// leaf's nearest crossing (smallest t, an equal t keeps the earlier face) is returned as
-    /// soon as a leaf has one, so a nearer face that only a later voxel lists is not seen. `t`
-    /// runs from `a` (0) to `b` (1). A zero-length segment hits nothing.
+    /// leaf's nearest crossing (smallest t) is returned as soon as a leaf has one, so a nearer
+    /// face that only a later voxel lists is not seen. An equal t keeps the earlier face unless
+    /// storing t rounded it up (see `face_hit`): coplanar overlapping faces (27 pairs on Olympos)
+    /// then return either one. `t` runs from `a` (0) to `b` (1). A zero-length segment hits nothing.
     // CLASSIC 0x416840
     pub fn raycast(&self, a: [f32; 3], b: [f32; 3]) -> Option<Hit> {
-        let len = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt();
+        // (dy² + dx²) + dz² in f64 (0x416870..0x416899); the zero test sees the unrounded root
+        let sq = |k: usize| (b[k] as f64 - a[k] as f64).powi(2);
+        let len = (sq(1) + sq(0) + sq(2)).sqrt();
         if len == 0.0 {
             return None;
         }
-        let reach = len + SKIN;
+        let reach = (len as f32 as f64 + SKIN as f64) as f32;
         let mut tested: Vec<u16> = Vec::new();
         for v in self.walk(self.voxel_f(a), self.voxel_f(b)) {
             let Some(leaf) = self.leaf_at(v) else { continue };
@@ -265,6 +311,21 @@ pub struct Hit {
     /// index into the track's .SRF material list
     pub material: u16,
     pub face: u16,
+}
+
+/// One segment against one face (`Collision::face_probe`).
+#[derive(Debug, Clone, Copy)]
+pub struct FaceProbe {
+    /// plane distance of the start and the end (f64, as the ray query sums them)
+    pub da: f64,
+    pub db: f64,
+    /// the plane crossing with the skin rules, if any
+    pub t: Option<f32>,
+    /// the smallest signed edge distance at the crossing point (at the end without a crossing);
+    /// the inside test passes from `EDGE_EPS` up
+    pub edge: f32,
+    /// a crossing inside the face
+    pub hit: bool,
 }
 
 pub fn parse(d: &[u8]) -> Result<Collision> {
@@ -340,6 +401,42 @@ mod tests {
             faces: Vec::new(),
             edges: Vec::new(),
         }
+    }
+
+    /// One voxel (0..1 on every axis) whose leaf lists two faces on the plane y = 0.5 without edge
+    /// planes (inside everywhere): face 0 material 10, face 1 material 20.
+    fn two_coplanar_faces() -> Collision {
+        let mut c = grid([1, 1, 1]);
+        c.root = vec![0x8000];
+        c.leaf_words = [2u16, 0, 1, 0].iter().flat_map(|w| w.to_le_bytes()).collect();
+        let face = |material| Face { material, edges: [0; 4], edge5: 0, plane: [0.0, 1.0, 0.0, -0.5] };
+        c.faces = vec![face(10), face(20)];
+        c
+    }
+
+    /// 0x416be9: the new t at double precision against the stored f32 best t. On coplanar faces
+    /// the later face wins exactly when storing t rounded it up.
+    #[test]
+    fn coplanar_tie_follows_the_rounding_of_t() {
+        let c = two_coplanar_faces();
+        let (mut first, mut second) = (0, 0);
+        for i in 0..2000 {
+            let top = 0.52 + i as f32 * 0.0001;
+            let (a, b) = ([0.5, top, 0.5], [0.5, 0.05, 0.5]);
+            let hit = c.raycast(a, b).expect("the segment crosses the plane");
+            let da = (top as f64 - 0.5) as f32 as f64;
+            let db = (0.05f32 as f64 - 0.5) as f32 as f64;
+            let t64 = da / (da - db);
+            let want = if t64 < t64 as f32 as f64 { 20 } else { 10 };
+            assert_eq!(hit.material, want, "top {top} t {t64}");
+            if want == 10 {
+                first += 1;
+            } else {
+                second += 1;
+            }
+        }
+        // a coin flip per segment, as in the original's trace on Olympos (202 / 202)
+        assert!(first > 600 && second > 600, "first {first} second {second}");
     }
 
     #[test]

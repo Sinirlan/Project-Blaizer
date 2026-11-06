@@ -414,6 +414,11 @@ pub struct Controls {
     pub tune: PadTune,
     /// digital pad buttons held right now, from the events (see `track_held`)
     pad_held: HashSet<(gilrs::GamepadId, gilrs::Button)>,
+    /// rumble effects on the pads that support force feedback: strong (low frequency) and weak
+    /// motor, played for good with the gain set per frame (#383)
+    ff: Vec<gilrs::ff::Effect>,
+    /// the (strong, weak) gains last sent
+    ff_gain: (f32, f32),
 }
 
 /// One frame of the active layout: every task's value (0..1) and the tasks that went down.
@@ -433,7 +438,7 @@ impl Controls {
     pub fn new(root: &Path) -> Controls {
         let layouts = load_layouts(root);
         let active = layouts.iter().position(|l| l.name.eq_ignore_ascii_case(DEFAULT_LAYOUT_NAME)).unwrap_or(0);
-        Controls { layouts, active, gilrs: None, mouse_buttons: [false; 3], mouse: (0.0, 0.0), stick_dir: None, pressed: None, held: [false; TASKS.len()], last: Device::Keyboard, pad_pressed: None, pad_bind: DEFAULT_PAD_BIND, tune: PadTune::default(), pad_held: HashSet::new() }
+        Controls { layouts, active, gilrs: None, mouse_buttons: [false; 3], mouse: (0.0, 0.0), stick_dir: None, pressed: None, held: [false; TASKS.len()], last: Device::Keyboard, pad_pressed: None, pad_bind: DEFAULT_PAD_BIND, tune: PadTune::default(), pad_held: HashSet::new(), ff: Vec::new(), ff_gain: (0.0, 0.0) }
     }
 
     /// Start reading gamepads, joysticks and wheels (interactive runs only).
@@ -444,8 +449,54 @@ impl Controls {
                     println!("gamepad: {}", p.name());
                 }
                 self.gilrs = Some(g);
+                self.rebuild_ff();
             }
             Err(e) => eprintln!("gamepads: {e}"),
+        }
+    }
+
+    /// Rumble effects (the strong and the weak motor) on every connected pad that supports force
+    /// feedback; called at start and when a pad comes or goes. REMASTER-era feature, design choice
+    /// (the original has none).
+    fn rebuild_ff(&mut self) {
+        use gilrs::ff::{BaseEffect, BaseEffectType, EffectBuilder, Replay, Ticks};
+        self.ff.clear();
+        self.ff_gain = (0.0, 0.0);
+        let Some(g) = &mut self.gilrs else { return };
+        let ids: Vec<gilrs::GamepadId> = g.gamepads().filter(|(_, p)| p.is_ff_supported()).map(|(id, _)| id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        let replay = Replay { after: Ticks::from_ms(0), play_for: Ticks::from_ms(1000), with_delay: Ticks::from_ms(0) };
+        for kind in [BaseEffectType::Strong { magnitude: u16::MAX }, BaseEffectType::Weak { magnitude: u16::MAX }] {
+            let built = EffectBuilder::new().add_effect(BaseEffect { kind, scheduling: replay, ..Default::default() }).gamepads(&ids).gain(0.0).finish(g);
+            match built {
+                Ok(e) => {
+                    if let Err(e) = e.play() {
+                        eprintln!("rumble: {e}");
+                    }
+                    self.ff.push(e);
+                }
+                Err(e) => {
+                    eprintln!("rumble: {e}");
+                    self.ff.clear();
+                    return;
+                }
+            }
+        }
+        println!("rumble: {} pad(s)", ids.len());
+    }
+
+    /// Set the rumble motors, 0..1 each (0, 0 stops them). Cheap: gilrs hears of a change only
+    /// when a motor moved by more than 2 %.
+    pub fn set_rumble(&mut self, strong: f32, weak: f32) {
+        let moved = |a: f32, b: f32| (a - b).abs() > 0.02 || (a != b && (a == 0.0 || b == 0.0));
+        if self.ff.len() != 2 || !(moved(strong, self.ff_gain.0) || moved(weak, self.ff_gain.1)) {
+            return;
+        }
+        self.ff_gain = (strong, weak);
+        for (e, v) in self.ff.iter().zip([strong, weak]) {
+            let _ = e.set_gain(v.clamp(0.0, 1.0));
         }
     }
 
@@ -532,11 +583,13 @@ impl Controls {
     pub fn poll(&mut self) -> Vec<PadKey> {
         let mut out = Vec::new();
         let Some(g) = &mut self.gilrs else { return out };
+        let mut reconnect = false;
         while let Some(ev) = g.next_event() {
             use gilrs::{Axis, Button, EventType};
             track_held(&mut self.pad_held, ev.id, &ev.event);
             let menu = |key| PadKey { key, in_race: false, start: false };
             match ev.event {
+                EventType::Connected | EventType::Disconnected => reconnect = true,
                 EventType::ButtonPressed(b, _) => {
                     self.last = pad_kind(&g.gamepad(ev.id));
                     if b != Button::Unknown {
@@ -607,6 +660,9 @@ impl Controls {
                 }
                 _ => {}
             }
+        }
+        if reconnect {
+            self.rebuild_ff();
         }
         out
     }

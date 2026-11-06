@@ -42,6 +42,11 @@ impl Gui {
         self.ctx.egui_wants_keyboard_input()
     }
 
+    /// A popup is open (a top-bar dropdown, a combo box): egui closes it on Esc, so the key must not also ask to exit.
+    pub fn popup_open(&self) -> bool {
+        egui::Popup::is_any_open(&self.ctx)
+    }
+
     /// egui is under the mouse or dragging a widget.
     pub fn wants_pointer(&self) -> bool {
         self.ctx.egui_wants_pointer_input() || self.ctx.is_pointer_over_egui()

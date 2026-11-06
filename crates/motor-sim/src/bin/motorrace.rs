@@ -6,6 +6,8 @@
 //!             [--trace-slot S --trace-from T --trace-to T --trace-every T]
 //!             [--gaps-every T]   live gap table (#299) every T s, and the check against the checkpoint splits
 //!             [--sheet]          the race sheet (#94): per car lap, sector and position-by-lap data, and its consistency check
+//!             [--dt S]           the frame length (default 1/60 s)
+//!             [--tick HZ]        step the physics on the fixed tick of HZ per second (#374) instead of once per frame
 
 use motor_sim::race::fmt_ms;
 use motor_sim::session::{GULLIVER_FEEL, GULLIVER_SCALE};
@@ -30,12 +32,14 @@ fn main() -> Result<(), String> {
         _ => Difficulty::Medium,
     };
     let mut race = Race::load_with(&root, track, &cars, None, (laps > 0).then_some(laps), difficulty)?;
+    let tick: f32 = arg(&args, "--tick", 0.0);
+    race.set_fixed_tick((tick > 0.0).then_some(tick));
     if arg(&args, "--rules", "normal".to_string()) == "elimination" {
         race.set_rules(Rules::Elimination);
     }
     // CHEAT gulliver: all cars small from the grid on (no human here: the AI's full-size feel)
     if arg(&args, "--cheat", String::new()).split(',').any(|c| c.eq_ignore_ascii_case("gulliver")) {
-        race.set_car_scale(GULLIVER_SCALE, GULLIVER_FEEL);
+        race.set_car_scale(GULLIVER_SCALE.get(), GULLIVER_FEEL.get());
     }
     // the original's profile-name cheat (`cheats::NameCheat`)
     race.set_name_cheat(motor_sim::cheats::NameCheat::of(&arg(&args, "--name", String::new()), &arg(&args, "--team", String::new())));

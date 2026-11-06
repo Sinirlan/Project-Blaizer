@@ -1,0 +1,9 @@
+[package]
+name = "motor-tune"
+description = "Live tuning values (tunable!), the constants catalog types and tune.cfg for motorview's Constants page."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+linkme = "0.3.33"

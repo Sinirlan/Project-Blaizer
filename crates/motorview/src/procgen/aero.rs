@@ -249,7 +249,10 @@ fn hexa(v: &mut Vec<Vertex>, b: [Vec3; 4], t: [Vec3; 4], q: &dyn Fn(Vec3, Vec3) 
 /// creases. Design choice throughout.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Foil {
-    pub from: [u8; 3],
+    /// the cage wing's tags; with several (#177 phase 3, [O] the Avalanche's wing is white with
+    /// an orange stripe down its middle) each strip of the loft between two sections, each tip
+    /// cap and each strut takes the look of the cage wing face over its middle (`look_at`)
+    pub from: Vec<[u8; 3]>,
     pub lo: [f32; 3],
     pub hi: [f32; 3],
     /// the leading and trailing edges from the middle (x 0) out to the tip, game space, mirrored
@@ -330,11 +333,38 @@ impl Section {
     }
 }
 
+/// Whether (x, z) lies inside the face's outline seen from above (crossing count).
+fn over(f: &Face, x: f32, z: f32) -> bool {
+    let n = f.pts.len();
+    (0..n).filter(|&i| {
+        let (a, b) = (f.pts[i], f.pts[(i + 1) % n]);
+        (a[2] > z) != (b[2] > z) && x < a[0] + (b[0] - a[0]) * (z - a[2]) / (b[2] - a[2])
+    }).count() % 2 == 1
+}
+
+/// REMASTER (#177 phase 3): the look for a part of the rebuilt wing at (x, z): that of the first
+/// face of the tag of the picked face over it (the faces seen from above: tops, the sloping back,
+/// undersides; not the tips' upright walls), else of the one whose middle is nearest. One face
+/// per tag, so with one tag every part looks like the first picked face (the Serpent's, as before).
+fn look_at(picked: &[Face], x: f32, z: f32) -> &Face {
+    let flat: Vec<&Face> = picked.iter().filter(|f| f.normal[1].abs() > 0.5 * Vec3::from(f.normal).length()).collect();
+    let mid = |f: &Face| f.pts.iter().fold(Vec2::ZERO, |s, p| s + Vec2::new(p[0], p[2])) / f.pts.len() as f32;
+    let here = flat
+        .iter()
+        .find(|f| over(f, x, z))
+        .or_else(|| flat.iter().min_by(|a, b| mid(a).distance(Vec2::new(x, z)).total_cmp(&mid(b).distance(Vec2::new(x, z)))))
+        .map_or(picked[0].rgb, |f| f.rgb);
+    picked.iter().find(|f| f.rgb == here).unwrap_or(&picked[0])
+}
+
 /// Apply the foils: the picked cage faces out, the wing and its struts in.
 pub fn foils(faces: &mut Vec<Face>, foils: &[Foil]) {
     for fo in foils {
-        let picked = |f: &Face| f.rgb == fo.from && f.pts.iter().all(|p| (0..3).all(|i| (if i == 0 { p[0].abs() } else { p[i] }) >= fo.lo[i] && (if i == 0 { p[0].abs() } else { p[i] }) <= fo.hi[i]));
-        let Some(src) = faces.iter().find(|f| picked(f)).cloned() else { continue };
+        let picked = |f: &Face| fo.from.contains(&f.rgb) && f.pts.iter().all(|p| (0..3).all(|i| (if i == 0 { p[0].abs() } else { p[i] }) >= fo.lo[i] && (if i == 0 { p[0].abs() } else { p[i] }) <= fo.hi[i]));
+        let cage: Vec<Face> = faces.iter().filter(|f| picked(f)).cloned().collect();
+        if cage.is_empty() {
+            continue;
+        }
         faces.retain(|f| !picked(f));
         let mirrored = |pts: &[[f32; 3]]| -> Vec<Vec3> {
             let mut all: Vec<Vec3> = pts.iter().rev().filter(|p| p[0] > 1e-4).map(|p| Vec3::new(-p[0], p[1], p[2])).collect();
@@ -350,23 +380,27 @@ pub fn foils(faces: &mut Vec<Face>, foils: &[Foil]) {
         let n = (span / fo.step).ceil() as i32;
         let secs: Vec<Section> = (-n..=n).map(|i| Section::new(fo, &le, &te, span * i as f32 / n as f32)).collect();
         let mut added: Vec<Face> = Vec::new();
-        let mut add = |pts: [Vec3; 3], out: Vec3| added.push(facing(&src, pts.map(|p| p.to_array()).to_vec(), out));
+        let mut add = |src: &Face, pts: [Vec3; 3], out: Vec3| added.push(facing(src, pts.map(|p| p.to_array()).to_vec(), out));
         let m = 2 * FOIL_N;
+        let chord_mid = |s: &Section| s.le + s.d * 0.5;
         for w in secs.windows(2) {
             let (a, b) = (&w[0].ring, &w[1].ring);
             let up = (w[0].up + w[1].up).normalize_or(Vec3::Y);
+            let c = (chord_mid(&w[0]) + chord_mid(&w[1])) * 0.5;
+            let src = look_at(&cage, c.x, c.z);
             for k in 0..m {
                 let k2 = (k + 1) % m;
                 // the top runs from the trailing edge (0) to the leading edge (FOIL_N)
                 let out = if k < FOIL_N { up } else { -up };
-                add([a[k], a[k2], b[k2]], out);
-                add([a[k], b[k2], b[k]], out);
+                add(src, [a[k], a[k2], b[k2]], out);
+                add(src, [a[k], b[k2], b[k]], out);
             }
         }
         // the tip caps
         for (s, side) in [(secs.first(), -1.0), (secs.last(), 1.0)] {
             if let Some(s) = s {
-                added.push(facing(&src, s.ring.iter().map(|p| p.to_array()).collect(), Vec3::X * side));
+                let c = chord_mid(s);
+                added.push(facing(look_at(&cage, c.x, c.z), s.ring.iter().map(|p| p.to_array()).collect(), Vec3::X * side));
             }
         }
         // the struts: a symmetric aerofoil in plan along z, from the wing's camber line down
@@ -388,12 +422,13 @@ pub fn foils(faces: &mut Vec<Face>, foils: &[Foil]) {
                     .collect();
                 let feet: Option<Vec<Vec3>> = tops.iter().map(|t| hits(faces, t.x, t.z).into_iter().find(|&y| y < t.y - 0.01).map(|y| Vec3::new(t.x, y - BURY, t.z))).collect();
                 let Some(feet) = feet else { continue };
+                let src = look_at(&cage, mid.x, mid.z);
                 let r = ring.len();
                 for k in 0..r {
                     let k2 = (k + 1) % r;
                     let mid_xz = (ring[k] + ring[k2]) / 2.0;
                     let out = Vec3::new(mid_xz.x - mid.x, 0.0, mid_xz.z - mid.z);
-                    added.push(facing(&src, vec![feet[k].to_array(), feet[k2].to_array(), tops[k2].to_array(), tops[k].to_array()], out));
+                    added.push(facing(src, vec![feet[k].to_array(), feet[k2].to_array(), tops[k2].to_array(), tops[k].to_array()], out));
                 }
             }
         }
@@ -523,7 +558,7 @@ mod tests {
         wing.pts = vec![[-0.5, 1.2, -1.8], [0.5, 1.2, -1.8], [0.5, 1.2, -1.5], [-0.5, 1.2, -1.5]];
         let mut faces = vec![flat(1.0, [1, 2, 3]), wing];
         let fo = Foil {
-            from: [9, 9, 9],
+            from: vec![[9, 9, 9]],
             lo: [0.0, 1.1, -1.9],
             hi: [0.6, 1.3, -1.4],
             le: vec![[0.0, 1.2, -1.5], [0.3, 1.2, -1.45], [0.5, 1.21, -1.4]],
@@ -554,6 +589,39 @@ mod tests {
             }
         }
         assert!(uses.values().all(|&n| n == 2), "open or doubled edges: {}", uses.values().filter(|&&n| n != 2).count());
+    }
+
+    /// #177 phase 3: a wing in two tags (a stripe down its middle, like the Avalanche's): each
+    /// strip of the loft takes the tag of the cage face over it, so the stripe stays where it
+    /// was, and the struts out on the sides take the sides' look
+    #[test]
+    fn foil_keeps_a_stripe() {
+        let part = |x0: f32, x1: f32, rgb: [u8; 3]| {
+            let mut f = flat(1.2, rgb);
+            f.pts = vec![[x0, 1.2, -1.8], [x1, 1.2, -1.8], [x1, 1.2, -1.5], [x0, 1.2, -1.5]];
+            f
+        };
+        let mut faces = vec![flat(1.0, [1, 2, 3]), part(-0.5, -0.2, [9, 9, 9]), part(-0.2, 0.2, [7, 7, 7]), part(0.2, 0.5, [9, 9, 9])];
+        let fo = Foil {
+            from: vec![[9, 9, 9], [7, 7, 7]],
+            lo: [0.0, 1.1, -1.9],
+            hi: [0.6, 1.3, -1.4],
+            le: vec![[0.0, 1.2, -1.5], [0.5, 1.2, -1.5]],
+            te: vec![[0.0, 1.2, -1.8], [0.5, 1.2, -1.8]],
+            thickness: 0.12,
+            camber: -0.03,
+            step: 0.05,
+            struts: vec![[0.35, 0.5]],
+            strut_chord: 0.1,
+            strut_width: 0.012,
+        };
+        foils(&mut faces, &[fo]);
+        let xs = |rgb: [u8; 3]| -> Vec<f32> { faces.iter().filter(|f| f.rgb == rgb).flat_map(|f| f.pts.iter().map(|p| p[0].abs())).collect() };
+        let (stripe, sides) = (xs([7, 7, 7]), xs([9, 9, 9]));
+        assert!(!stripe.is_empty() && stripe.iter().all(|&x| x <= 0.2 + 1e-4), "the stripe stays in the middle");
+        assert!(!sides.is_empty() && sides.iter().all(|&x| x >= 0.2 - 1e-4), "the sides stay outside it");
+        assert!(faces.iter().any(|f| f.rgb == [9, 9, 9] && f.pts.iter().any(|p| p[1] < 1.1)), "the struts look like the sides");
+        assert!(faces.iter().all(|f| f.rgb == [1, 2, 3] || f.smooth_deg == FOIL_SMOOTH), "the cage wing is gone");
     }
 
     /// under a flat floor at y 0.3 the fins hang `depth` below it; under one at 0.26 they stop at

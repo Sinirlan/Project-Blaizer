@@ -10,7 +10,7 @@ use self::menu_modern::{Ask, PaintPick};
 use crate::movie::Movie;
 use crate::{hiscore, hud, stats};
 use glam::{Mat3, Mat4, Vec2, Vec3};
-use motor_sim::{Difficulty, Input, Rules, SteerKeys};
+use motor_sim::{Difficulty, Input, Pedals, Rules, SteerKeys};
 use motor_data::mde::{self, Mde};
 use motor_data::sprpos::SprPos;
 use motor_sim::demo::DemoRecorder;
@@ -404,10 +404,10 @@ impl Settings {
              PlayerName {}\nTeamName {}\nPlayerColour {}\nCustomCarColours {}\nCarColour1 {}\nCarColour2 {}\nCarColour3 {}\nCarFinish1 {}\nCarFinish2 {}\nCarFinish3 {}\n\
              Brightness {bright} {bright} {bright}\nInfoDetail {}\nCheckpointInfo {}\nCheckpointDelay {}\nRoadMap {}\n\
              DetailMode {}\nSkidMarks {}\nNamePlates {}\nSkyImage {}\nMotionBlur {}\nLensFlares {}\nSparks {}\nSmoke {}\nTrackDetail {}\nCarDetail {}\nPerspectiveOn {}\nPerspective {}\n\
-             GraphicsMode {}\nGraphicsModeSwitch {}\nRemasterCarPaint {}\nRemasterDynamicLights {}\nRemasterRenderAA {}\nRemasterRenderAAStrength {}\nRemasterPostAA {}\nRemasterPostAAStrength {}\nRemasterAnisotropy {}\nRemasterPixelLight {}\nRemasterPixelFog {}\nRemasterFogStyle {}\nRemasterFogStrength {}\nRemasterSkyHDRI {}\nRemasterClearCoat {}\nRemasterSigns {}\nRemasterWorldFill {}\nRemasterWater {}\nRemasterWaterReflections {}\nRemasterLocalLight {}\nRemasterTexturePack {}\nRemasterGrass {}\nRemasterGrassRange {}\nRemasterColourGrade {}\nRemasterVignette {}\nRemasterGrain {}\nRemasterHDR {}\nRemasterTonemap {}\nRemasterExposure {}\nRemasterBloom {}\nRemasterSSAO {}\nRemasterHalos {}\nRemasterFlares {}\nRemasterShadows {}\nRemasterHud {}\nRemasterMenu {}\nRemasterMotionBlur {}\nRemasterSkidMarks {}\nRemasterCarModels {}\nRemasterCarLodDistance {}\nRemasterLightShadows {}\nRemasterShadowQuality {}\nRemasterRevMeter {}\n\
-             HudCluster {}\nHudClocks {} {} {}\nHudLap {}\nHudPos {}\nHudMap {}\nHudProximity {}\nHudScale {}\nHudMargin {}\nHudMapMode {}\nHudMapRotate {}\nHudMapNumbers {}\nHudPlateFrame {}\nHudLapDelay {}\nHudLiveGaps {}\n\
+             GraphicsMode {}\nGraphicsModeSwitch {}\nRemasterCarPaint {}\nRemasterDynamicLights {}\nRemasterRenderAA {}\nRemasterRenderAAStrength {}\nRemasterPostAA {}\nRemasterPostAAStrength {}\nRemasterAnisotropy {}\nRemasterPixelLight {}\nRemasterPixelFog {}\nRemasterFogStyle {}\nRemasterFogStrength {}\nRemasterSkyHDRI {}\nRemasterClearCoat {}\nRemasterSigns {}\nRemasterWorldFill {}\nRemasterTreeModels {}\nRemasterWater {}\nRemasterWaterReflections {}\nRemasterLocalLight {}\nRemasterTexturePack {}\nRemasterGrass {}\nRemasterGrassRange {}\nRemasterColourGrade {}\nRemasterVignette {}\nRemasterGrain {}\nRemasterHDR {}\nRemasterTonemap {}\nRemasterExposure {}\nRemasterBloom {}\nRemasterSSAO {}\nRemasterHalos {}\nRemasterFlares {}\nRemasterShadows {}\nRemasterHud {}\nRemasterMenu {}\nRemasterMotionBlur {}\nRemasterSkidMarks {}\nRemasterCarModels {}\nRemasterCarLodDistance {}\nRemasterLightShadows {}\nRemasterShadowQuality {}\nRemasterRevMeter {}\n\
+             HudCluster {}\nHudClocks {} {} {}\nHudLap {}\nHudPos {}\nHudMap {}\nHudProximity {}\nHudScale {}\nHudMargin {}\nHudMapMode {}\nHudMapRotate {}\nHudMapNumbers {}\nHudPlateFrame {}\nHudLapDelay {}\nHudLiveGaps {}\nHudSectorDelay {}\n\
              Intro {}\nCDLoop {}\nMenuConfirmation {}\nMenuCDTrack {}\nCameraStart {}\nCameraMirror {}\nCameraFreeLook {}\nCameraPullIn {}\nCameraFollow {}\n{}\
-             PadStickDeadZone {}\nPadTriggerDeadZone {}\nPadSteerSensitivity {}\n{}{}{}",
+             PadStickDeadZone {}\nPadTriggerDeadZone {}\nPadSteerSensitivity {}\nPadVibration {}\n{}{}{}",
             cars.get(self.car).copied().unwrap_or(self.car as u32 + 1),
             // the track's file number (TrackN.trk), not its place in the Division-sorted list
             tracks.get(self.track).copied().unwrap_or(self.track as u32 + 1),
@@ -481,6 +481,7 @@ impl Settings {
             b(v.remaster.clear_coat),
             b(v.remaster.retro_signs),
             b(v.remaster.world_fill),
+            b(v.remaster.tree_models),
             b(v.remaster.water),
             b(v.remaster.water_ssr),
             b(v.remaster.local_light),
@@ -523,6 +524,7 @@ impl Settings {
             b(self.hud.plate_frame),
             self.hud.lap_delay,
             b(self.hud.live_gaps),
+            self.hud.sector_delay,
             b(self.intro),
             b(self.cd_loop),
             CONFIRMATIONS[self.menu_confirmation],
@@ -537,6 +539,7 @@ impl Settings {
             self.pad_tune[0],
             self.pad_tune[1],
             self.pad_tune[2],
+            self.pad_tune[3],
             // the modern Controller page's car tasks
             self.pad.iter().zip(TASKS).filter_map(|(c, t)| Some(format!("Pad{t} {}\n", c.as_ref()?.name()))).collect::<String>(),
             self.short_keys.iter().enumerate().filter(|(_, k)| !k.is_empty()).map(|(i, k)| format!("ShortKey{i} {k}\n")).collect::<String>(),
@@ -650,6 +653,7 @@ impl Settings {
                 "hudmapnumbers" => self.hud.map_numbers = on.unwrap_or(self.hud.map_numbers),
                 "hudplateframe" => self.hud.plate_frame = on.unwrap_or(self.hud.plate_frame),
                 "hudlivegaps" => self.hud.live_gaps = on.unwrap_or(self.hud.live_gaps),
+                "hudsectordelay" => self.hud.sector_delay = u(crate::hud_layout::LAP_DELAY_MAX as i64).unwrap_or(self.hud.sector_delay),
                 "hudlapdelay" => self.hud.lap_delay = u(crate::hud_layout::LAP_DELAY_MAX as i64).unwrap_or(self.hud.lap_delay),
                 "trackdetail" => self.track_detail = pick(v, &TRACK_DETAILS).unwrap_or(self.track_detail),
                 "perspectiveon" => self.perspective_on = pick(v, &PERSPECTIVE_ON).unwrap_or(self.perspective_on),
@@ -674,8 +678,8 @@ impl Settings {
                         self.binds.entry(v.to_ascii_lowercase()).or_insert([None; TASKS.len()])[i] = Some(c);
                     }
                 }
-                "padstickdeadzone" | "padtriggerdeadzone" | "padsteersensitivity" => {
-                    let i = ["padstickdeadzone", "padtriggerdeadzone", "padsteersensitivity"].iter().position(|x| k.eq_ignore_ascii_case(x)).unwrap_or(0);
+                "padstickdeadzone" | "padtriggerdeadzone" | "padsteersensitivity" | "padvibration" => {
+                    let i = ["padstickdeadzone", "padtriggerdeadzone", "padsteersensitivity", "padvibration"].iter().position(|x| k.eq_ignore_ascii_case(x)).unwrap_or(0);
                     let (lo, hi) = PAD_TUNE_RANGE[i];
                     self.pad_tune[i] = n.map_or(self.pad_tune[i], |x| x.clamp(lo as i64, hi as i64) as u32);
                 }
@@ -866,7 +870,7 @@ pub struct Settings {
     /// REMASTER the pad's car tasks (modern Controller page; `DEFAULT_PAD_BIND`)
     pub pad: [Option<PadIn>; CAR_TASKS],
     /// pad stick dead zone, trigger dead zone (percent of travel), steering sensitivity (percent)
-    pub pad_tune: [u32; 3],
+    pub pad_tune: [u32; 4],
     /// Personal: PlayerName, TeamName (< 5 chars), PlayerColour
     pub player_name: String,
     pub team: String,
@@ -1036,7 +1040,7 @@ impl Default for Settings {
                 car_shading: CarShading::Reflection,
                 car_detail: CarDetail::High,
                 distance: 1.0,
-                fov_x: motorview::render::FOV_X,
+                fov_x: motorview::render::FOV_X.get(),
                 sky_image: true,
                 motion_blur: false,
                 lens_flares: true,
@@ -1157,10 +1161,12 @@ pub struct RaceState {
     pub sounds: Option<crate::audio::RaceSounds>,
     pub track: usize,
     pub finished_for: Option<f32>,
-    /// (seconds left, lap time ms, best?) after a lap is completed
-    pub lap_flash: Option<(f32, u32, bool)>,
+    /// (seconds left, lap time ms, best?, delta ms against the best earlier lap) after a lap is completed
+    pub lap_flash: Option<(f32, u32, bool, Option<i64>)>,
     /// checkpoint split display: (seconds left, splits index, lap time at the split)
     pub split: Option<(f32, usize, u32)>,
+    /// REMASTER sector delta (#409): (seconds left, sector 1 / 2, delta ms against the best earlier lap at this checkpoint)
+    pub sector_flash: Option<(f32, u32, i64)>,
     last_lap: u32,
     last_cp: Option<(u32, u32)>,
     pub cam: Camera,
@@ -1213,6 +1219,30 @@ pub struct RaceState {
 type Models = Vec<(usize, Mat4)>;
 
 impl RaceState {
+    /// What the player's car does to the pad's rumble this frame (#383); `None` outside the race
+    /// proper (before the green light, after the finish).
+    fn rumble_in(&self, player: usize) -> Option<crate::rumble::RumbleIn> {
+        let race = &self.sess.race;
+        let me = &race.racers[player];
+        if !race.started() || me.progress.done() {
+            return None;
+        }
+        let car = &me.car;
+        let mats = &race.world.materials;
+        let mut i = crate::rumble::RumbleIn { speed: car.vel.length(), wheelspin: car.wheelspin, brake_locked: car.brake_locked, ..Default::default() };
+        for w in 0..4 {
+            if let Some(m) = car.wheel_mat[w].filter(|_| car.wheel_contact[w]) {
+                i.bumpy[w] = Some(mats[m].bumpy);
+                i.kerb[w] = mats[m].name.eq_ignore_ascii_case("kerbing");
+            }
+        }
+        // #374: a hit kicks once, on the frame whose tick had it (between ticks the flags are the last tick's)
+        if race.ticks_last_frame() > 0 {
+            i.hit = car.impact.max(car.bump.map_or(0.0, |b| b.impact.abs()));
+        }
+        Some(i)
+    }
+
     /// Statistics: this frame of the player's car goes into the run (nothing before the green
     /// light or after the finish).
     fn count_run(&mut self, dt: f32, player: usize) {
@@ -1227,14 +1257,16 @@ impl RaceState {
         let ahead: Vec<usize> = order[..pos].iter().copied().filter(racing).collect();
         let behind: Vec<usize> = order[(pos + 1).min(order.len())..].iter().copied().filter(racing).collect();
         let car = &me.car;
+        // #374: a hit counts once, on the frame whose tick had it
+        let fresh = race.ticks_last_frame() > 0;
         let sample = stats::FrameSample {
             running: true,
             speed: car.vel.length(),
             kmh: me.telemetry.kmh,
             drifting: self.sess.drifting(player),
             airborne: !car.wheel_contact.iter().any(|&c| c),
-            car_impact: car.bump.filter(|b| b.id == 0).map_or(0.0, |b| b.impact),
-            world_impact: car.impact,
+            car_impact: car.bump.filter(|b| b.id == 0 && fresh).map_or(0.0, |b| b.impact),
+            world_impact: if fresh { car.impact } else { 0.0 },
             ahead: &ahead,
             behind: &behind,
         };
@@ -1248,7 +1280,9 @@ impl RaceState {
         if p.finished_ms.is_some() {
             return None;
         }
-        self.ghost.as_ref()?.pose_at(self.sess.race.clock_ms - p.lap_start_ms as f64)
+        // #374: at the view time, so the ghost moves with the interpolated cars
+        let now = self.sess.race.clock_ms - self.sess.race.view_lag() as f64 * 1000.0;
+        self.ghost.as_ref()?.pose_at(now - p.lap_start_ms as f64)
     }
 
     /// REMASTER demo play (#346): the race was put at another moment. The lap and checkpoint the HUD last saw are
@@ -1256,7 +1290,7 @@ impl RaceState {
     fn resync(&mut self) {
         let p = &self.sess.race.racers[self.sess.focus].progress;
         (self.last_lap, self.last_cp) = (p.lap, p.last_checkpoint);
-        (self.lap_flash, self.split, self.ta_gaps, self.finished_for) = (None, None, [None; 3], None);
+        (self.lap_flash, self.split, self.sector_flash, self.ta_gaps, self.finished_for) = (None, None, None, [None; 3], None);
     }
 
     /// Watching a recording (an `.mhr` replay or an `.MDE` demo): no input, no records, no results.
@@ -1278,7 +1312,7 @@ impl RaceState {
     pub fn ghost_poses(&self) -> Vec<motor_sim::replay::GhostPose> {
         let mut out: Vec<_> = self.ghost_pose().into_iter().collect();
         if let Some(d) = &self.demo {
-            out.extend(d.poses(motor_sim::demo::race_ms(&self.sess.race)).into_iter().map(|(_, p)| p));
+            out.extend(d.poses(motor_sim::demo::view_ms(&self.sess.race)).into_iter().map(|(_, p)| p));
         }
         out
     }
@@ -1291,7 +1325,7 @@ impl RaceState {
 
     /// The recorded cars' meshes at the race clock (Ghost mode).
     pub fn demo_models(&self) -> Models {
-        self.demo.as_ref().map(|d| d.models(motor_sim::demo::race_ms(&self.sess.race), self.sess.race.car_scale.0)).unwrap_or_default()
+        self.demo.as_ref().map(|d| d.models(motor_sim::demo::view_ms(&self.sess.race), self.sess.race.car_scale.0)).unwrap_or_default()
     }
 
     /// The player's grid slot while the casper cheat is on (the car is drawn as a ghost).
@@ -1608,12 +1642,12 @@ const OPTION_ITEMS: [&str; 4] = ["tpers", "tgro", "tcon", "tso"];
 const CLASSIC_TASKS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, task::GAME_MENU];
 /// the task labels' sprites, in the same order
 const CLASSIC_LABELS: [&str; 10] = ["tlef", "trig", "tacc", "tbre", "tgup", "tgdo", "thorn", "thbr", "tsht", "tmenu"];
-pub(super) const CTL_TUNE_LABELS: [&str; 3] = ["Steering dead zone", "Trigger dead zone", "Steering sensitivity"];
+pub(super) const CTL_TUNE_LABELS: [&str; 4] = ["Steering dead zone", "Trigger dead zone", "Steering sensitivity", "Vibration"];
 /// Rows of the pause menu's Controls tab: the car tasks, the keyboard layout, the pad sliders.
-pub(super) const PAUSE_CTL_ROWS: usize = CAR_TASKS + 1 + 3;
+pub(super) const PAUSE_CTL_ROWS: usize = CAR_TASKS + 1 + 4;
 /// `Settings::pad_tune`: defaults and ranges in percent, the step of one ←/→
-const PAD_TUNE_DEFAULT: [u32; 3] = [15, 15, 100];
-pub(super) const PAD_TUNE_RANGE: [(u32, u32); 3] = [(0, 50), (0, 50), (50, 200)];
+const PAD_TUNE_DEFAULT: [u32; 4] = [15, 15, 100, 70];
+pub(super) const PAD_TUNE_RANGE: [(u32, u32); 4] = [(0, 50), (0, 50), (50, 200), (0, 100)];
 const PAD_TUNE_STEP: u32 = 5;
 const DEFAULT_PAD: [Option<PadIn>; CAR_TASKS] = {
     let mut b = [None; CAR_TASKS];
@@ -1736,6 +1770,7 @@ pub(super) enum GfxRow {
     ClearCoat,
     Signs,
     WorldFill,
+    TreeModels,
     Water,
     WaterReflect,
     Grass,
@@ -1786,6 +1821,8 @@ pub(super) enum GfxRow {
     LapDelay,
     /// the live gap to the car ahead and behind in the bottom-left block (Modern HUD, #302)
     LiveGaps,
+    /// the delta against the best lap at each checkpoint and the line (Modern HUD, #409)
+    SectorDelta,
 }
 
 /// The map row of the modern HUD page, as the HUD draws it: Off when the map toggle is off, Nearby when RoadMap
@@ -1848,7 +1885,7 @@ impl GfxRow {
     /// (Scale, Margin and Proximity arrows only work in the Modern HUD; the map's rows need the map)
     pub(super) fn active_in(self, s: &Settings) -> bool {
         match self {
-            GfxRow::HudScale | GfxRow::HudMargin | GfxRow::Proximity | GfxRow::LapDelay | GfxRow::LiveGaps => s.view.modern_hud(),
+            GfxRow::HudScale | GfxRow::HudMargin | GfxRow::Proximity | GfxRow::LapDelay | GfxRow::LiveGaps | GfxRow::SectorDelta => s.view.modern_hud(),
             GfxRow::MapView | GfxRow::MapNumbers => map_row(s) > 0,
             GfxRow::PlateFrame => s.view.modern_hud() && s.name_plates == 2,
             GfxRow::MapTurns => map_row(s) > 0 && s.hud.map_mode == MapMode::Close,
@@ -1870,7 +1907,7 @@ impl GfxRow {
             HudMap | MapView | MapTurns | MapNumbers => &[6],
             Proximity => &[7],
             NamePlates | PlateFrame => &[8],
-            LapDelay => &[10],
+            LapDelay | SectorDelta => &[10],
             CheckpointInfo | CheckpointDelay | LiveGaps => &[9],
             _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         }
@@ -1879,7 +1916,7 @@ impl GfxRow {
     /// the shadows, is a value of that option's row instead)
     pub(super) fn remaster(self) -> bool {
         use GfxRow::*;
-        matches!(self, CamPullIn | CamFollow | DynamicLights | LocalLight | TexturePack | RenderAa | RenderAaStrength | PostAa | PostAaStrength | Anisotropic | PixelLight | PixelFog | ClearCoat | Signs | WorldFill | Water | WaterReflect | Grass | GrassRange | FogStrength | ColourGrade | Vignette | Grain | Hdr | Tonemap | Exposure | Bloom | Ssao | HudStyle | MenuStyle | CarModels | CarLodDistance | LightShadows | ShadowQuality | HudScale | HudMargin | HudCluster | HudTotal | HudLapTime | HudBest | HudLap | HudPos | HudMap | MapView | MapTurns | MapNumbers | Proximity | PlateFrame | LapDelay | LiveGaps)
+        matches!(self, CamPullIn | CamFollow | DynamicLights | LocalLight | TexturePack | RenderAa | RenderAaStrength | PostAa | PostAaStrength | Anisotropic | PixelLight | PixelFog | ClearCoat | Signs | WorldFill | TreeModels | Water | WaterReflect | Grass | GrassRange | FogStrength | ColourGrade | Vignette | Grain | Hdr | Tonemap | Exposure | Bloom | Ssao | HudStyle | MenuStyle | CarModels | CarLodDistance | LightShadows | ShadowQuality | HudScale | HudMargin | HudCluster | HudTotal | HudLapTime | HudBest | HudLap | HudPos | HudMap | MapView | MapTurns | MapNumbers | Proximity | PlateFrame | LapDelay | LiveGaps | SectorDelta)
     }
     /// Restore this row to the default: the display rows on the draft `d`, the others live.
     /// Mode and MenuStyle are left: resetting them would drop the user out of the modern menu.
@@ -1941,6 +1978,7 @@ impl GfxRow {
             MapNumbers => s.hud.map_numbers = def.hud.map_numbers,
             PlateFrame => s.hud.plate_frame = def.hud.plate_frame,
             LiveGaps => s.hud.live_gaps = def.hud.live_gaps,
+            SectorDelta => s.hud.sector_delay = def.hud.sector_delay,
             Proximity => s.hud.proximity = def.hud.proximity,
             Mode | MenuStyle => {}
             ModeSwitch => s.mode_dissolve = def.mode_dissolve,
@@ -1957,6 +1995,7 @@ impl GfxRow {
             ClearCoat => r.clear_coat = q.clear_coat,
             Signs => r.retro_signs = q.retro_signs,
             WorldFill => r.world_fill = q.world_fill,
+            TreeModels => r.tree_models = q.tree_models,
             Water => r.water = q.water,
             WaterReflect => r.water_ssr = q.water_ssr,
             Grass => r.grass = q.grass,
@@ -2022,6 +2061,7 @@ impl GfxRow {
             ClearCoat => "A glossy top layer on the car paint with a sharp sun highlight.",
             Signs => "Road signs reflect the headlights back at night and show a faint sheen of the sky by day.",
             WorldFill => "Generated scenery that fills the void past the edge of the map and the holes inside it, so a long view distance shows no gaps.",
+            TreeModels => "3D trees and bushes in place of the original's flat cut-out pictures, so they look solid from every side. Off: the original pictures.",
             Water => "Animated water in place of the original's flat water texture: waves, depth you can see through, foam at the shore. Off: the original texture.",
             WaterReflect => "The water mirrors the banks, buildings and cars around it. Off: it mirrors only the sky. Needs Water. Costs GPU time where water fills the screen.",
             Grass => "Turf with depth and a light wind sway over the grass verges, fading back to the plain texture in the distance. Short draws half the layers to half the distance. Ultra grows real blades near the car.",
@@ -2065,6 +2105,7 @@ impl GfxRow {
             Proximity => "Arrows round your car point at rivals close by. Modern HUD only.",
             PlateFrame => "The glass frame round each See-through name plate. Off leaves only the colour bar and the name. Modern HUD only.",
             LapDelay => "How long BEST LAP and LAST LAP stay at the top of the screen after each lap. Modern HUD only.",
+            SectorDelta => "How long the time difference stays on screen at each checkpoint and on BEST / LAP / LAST LAP, against your best earlier lap of this race: green when you are ahead of it, red when behind. From the second lap on. Off hides it. Modern HUD only.",
             LiveGaps => "The gap to the car ahead and the car behind, bottom left, all race, as the Checkpoint splits row says: Nearby = the cars either side of you, All cars = the whole field, Off = none. It replaces the checkpoint list in races (a chime still marks each checkpoint); Time Attack keeps its list. Modern HUD only.",
         }
     }
@@ -2103,7 +2144,7 @@ pub(super) const GFX_PAGES: [(&str, &[GfxRow]); 4] = {
         (
             "Detail",
             &[
-                Mode, ModeSwitch, Fog, CarModels, CarLodDistance, ClearCoat, PixelLight, DynamicLights, LocalLight, TexturePack, LightShadows, ShadowQuality, PixelFog, FogStrength, Signs, WorldFill, Water, WaterReflect, Grass, GrassRange, Ssao, Hdr, Tonemap, Exposure, Bloom,
+                Mode, ModeSwitch, Fog, CarModels, CarLodDistance, ClearCoat, PixelLight, DynamicLights, LocalLight, TexturePack, LightShadows, ShadowQuality, PixelFog, FogStrength, Signs, WorldFill, TreeModels, Water, WaterReflect, Grass, GrassRange, Ssao, Hdr, Tonemap, Exposure, Bloom,
                 ColourGrade, Vignette, Grain, HudStyle, MenuStyle,
             ],
         ),
@@ -2139,7 +2180,7 @@ pub(super) const MODERN_GFX_PAGES: [(&str, &[GfxRow]); 2] = {
         (
             "Detail",
             &[
-                Mode, ModeSwitch, DetailMode, ViewDistance, CarModels, CarLodDistance, CarShading, ClearCoat, PixelLight, DynamicLights, LocalLight, TexturePack, Shadows, LightShadows, ShadowQuality, Halos, LensFlares, Fog, PixelFog, FogStrength, SkyImage, SkidMarks, Smoke, Sparks, Signs, WorldFill, Water, WaterReflect, Grass, GrassRange,
+                Mode, ModeSwitch, DetailMode, ViewDistance, CarModels, CarLodDistance, CarShading, ClearCoat, PixelLight, DynamicLights, LocalLight, TexturePack, Shadows, LightShadows, ShadowQuality, Halos, LensFlares, Fog, PixelFog, FogStrength, SkyImage, SkidMarks, Smoke, Sparks, Signs, WorldFill, TreeModels, Water, WaterReflect, Grass, GrassRange,
                 MotionBlur, Ssao, Hdr, Tonemap, Exposure, Bloom, ColourGrade, Vignette, Grain,
             ],
         ),
@@ -2152,7 +2193,7 @@ pub(super) const HUD_SECTIONS: [(&str, &[GfxRow]); 4] = {
     use GfxRow::*;
     [
         ("Look", &[HudStyle, HudScale, HudMargin]),
-        ("On screen", &[InfoDetail, HudCluster, HudTotal, HudLapTime, HudBest, HudLap, HudPos, LapDelay]),
+        ("On screen", &[InfoDetail, HudCluster, HudTotal, HudLapTime, HudBest, HudLap, HudPos, LapDelay, SectorDelta]),
         ("Map", &[HudMap, MapView, MapTurns, MapNumbers]),
         ("Rivals", &[NamePlates, PlateFrame, Proximity, LiveGaps, CheckpointInfo, CheckpointDelay]),
     ]
@@ -2483,6 +2524,8 @@ pub struct Game {
     pic: PicFade,
     menu_drive: Option<MenuDrive>,
     steer: SteerKeys,
+    /// CLASSIC (#376): the key / button brake ramp and the x1.1 analog pedals
+    pedals: Pedals,
     pub quit: bool,
     /// the movie on screen (`Screen::Intro`, `Screen::LeagueMovie`) and the movies after it (#42, #43)
     pub movie: Option<Movie>,
@@ -2510,6 +2553,10 @@ pub struct Game {
     /// shots and tests; `--locked` simulates an install)
     pub flagged: Option<Vec<bool>>,
     pub controls: Controls,
+    /// gamepad rumble (#383): the mixer, its Vibration setting (0..1) and this frame's motors
+    rumble: crate::rumble::Rumble,
+    rumble_gain: f32,
+    rumble_cmd: (f32, f32),
     /// control options: the car task waiting for a key or button
     pub(super) capture: Option<Capture>,
     /// CLASSIC Controls screen: the focus is on the task tree, not the layout column (0x7529d8)
@@ -2869,6 +2916,7 @@ impl Game {
             pic: PicFade::default(),
             menu_drive: None,
             steer: SteerKeys::default(),
+            pedals: Pedals::default(),
             quit: false,
             movie: None,
             movie_queue: Vec::new(),
@@ -2884,6 +2932,9 @@ impl Game {
             persist: false,
             flagged: None,
             controls,
+            rumble: Default::default(),
+            rumble_gain: PAD_TUNE_DEFAULT[3] as f32 / 100.0,
+            rumble_cmd: (0.0, 0.0),
             capture: None,
             ctl_tasks: false,
             results: Vec::new(),
@@ -2970,6 +3021,7 @@ impl Game {
         }
         let t = self.settings.pad_tune.map(|x| x as f32 / 100.0);
         c.tune = PadTune { stick_dead: t[0], trigger_dead: t[1], steer_sens: t[2] };
+        self.rumble_gain = t[3];
         c.active = c.find(&self.settings.layout).or_else(|| c.find(DEFAULT_LAYOUT_NAME)).unwrap_or(0);
         self.settings.layout = c.layout().name.clone();
     }
@@ -3911,6 +3963,8 @@ impl Game {
                 // Record race: the setup, then one record per stepped frame (drive); leagues are left
                 // out because their field comes from the league's profiles
                 let ta_ghost = self.game_type == GameType::TimeAttack && self.settings.ghost_car && !is_league && player.is_some();
+                // design choice (#374): the fixed physics tick; the recording names it (`tick_hz`), so its frames replay to the same race
+                sess.race.set_fixed_tick(Some(motor_sim::session::PHYSICS_HZ.get()));
                 let recording = player.filter(|_| self.save_mhr && self.settings.record_race && !is_league).map(|p| {
                     Recording::new(Header {
                         track: track_n,
@@ -3925,6 +3979,7 @@ impl Game {
                         nick: self.settings.player_name.clone(),
                         car_name: self.cars[self.settings.car].name.clone(),
                         drivers: if is_league || ids.len() < 2 { Vec::new() } else { sess.race.racers.iter().map(|r| if r.human { String::new() } else { r.driver.nick.clone() }).collect() },
+                        tick_hz: sess.race.fixed_hz(),
                         race_ms: None,
                         best_lap_ms: None,
                     })
@@ -3938,8 +3993,9 @@ impl Game {
                     (id == car).then_some(g)
                 });
                 let records = hiscore::Records::load(hiscore::dir(self.persist).as_deref(), &track_name, laps);
-                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, recording, notice: demo.is_some().then_some("Ghost play started!").or(demo_rec.is_some().then_some("Race recording started!")).map(|s| (4.0, s.to_string())), demo, demo_rec, demo_over: false, watch: None, pb: None, pending_respawn: None, pending_skip: false, playback: None, ghost, lap_rec: ta_ghost.then(LapRecorder::default), ghost_laps: 0, run: stats::Run::default() });
+                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, recording, notice: demo.is_some().then_some("Ghost play started!").or(demo_rec.is_some().then_some("Race recording started!")).map(|s| (4.0, s.to_string())), demo, demo_rec, demo_over: false, watch: None, pb: None, pending_respawn: None, pending_skip: false, playback: None, ghost, lap_rec: ta_ghost.then(LapRecorder::default), ghost_laps: 0, run: stats::Run::default() });
                 self.steer = SteerKeys::default();
+        self.pedals = Pedals::default();
                 self.controls.reset();
             }
             Finish::Watch(WatchFinish { track_idx, track_name, block, name, laps }) => {
@@ -3955,8 +4011,11 @@ impl Game {
                 let records = hiscore::Records::load(None, &track_name, laps);
                 // REMASTER (#346): the playback controls of the Race line HUD
                 let pb = demo.as_ref().map(|d| Playback::new(&d.mde, self.tracks[track_idx].profile.as_ref()));
-                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: None, recording: None, demo, demo_rec: None, demo_over: false, watch: Some(block), pb, notice: Some((4.0, "Demo play started!".into())), pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
+                // design choice (#374): demo play on the fixed physics tick (the recorded car is posed at the view time)
+                sess.race.set_fixed_tick(Some(motor_sim::session::PHYSICS_HZ.get()));
+                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: None, recording: None, demo, demo_rec: None, demo_over: false, watch: Some(block), pb, notice: Some((4.0, "Demo play started!".into())), pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
                 self.steer = SteerKeys::default();
+        self.pedals = Pedals::default();
                 self.controls.reset();
             }
         }
@@ -4392,6 +4451,7 @@ impl Game {
                 s.checkpoint_info as u32,
                 s.checkpoint_delay,
                 s.hud.lap_delay,
+                s.hud.sector_delay,
                 s.road_map as u32,
                 s.detail_mode as u32,
                 s.name_plates as u32,
@@ -4697,7 +4757,8 @@ impl Game {
     }
 
     /// Replay (`.mhr`): rebuild the recorded race and watch it. The sim takes the
-    /// recording's inputs in `drive`, so it plays out as it did (replay.rs).
+    /// recording's inputs in `drive`, so it plays out as it did (replay.rs); `for_recording` puts the sim on the
+    /// physics the file was made on (the fixed tick of an MHR3, #374; the per-frame path of an older file).
     pub fn start_playback(&mut self, rec: Recording) -> Result<(), String> {
         let h = &rec.header;
         let ti = self.tracks.iter().position(|t| t.n == h.track).ok_or("the recording's track is not installed")?;
@@ -4710,8 +4771,9 @@ impl Game {
         self.game_type = GameType::Single;
         let cam = Camera::looking(Vec3::ZERO, Vec3::NEG_Z);
         let records = hiscore::Records::load(None, &self.tracks[ti].name, h.laps);
-        self.race = Some(RaceState { sess, sounds: None, track: ti, finished_for: None, lap_flash: None, split: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: Some((rec, 0)), recording: None, demo: None, demo_rec: None, demo_over: false, watch: None, pb: None, notice: None, pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
+        self.race = Some(RaceState { sess, sounds: None, track: ti, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: Some((rec, 0)), recording: None, demo: None, demo_rec: None, demo_over: false, watch: None, pb: None, notice: None, pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
         self.steer = SteerKeys::default();
+        self.pedals = Pedals::default();
         self.controls.reset();
         Ok(())
     }
@@ -5366,6 +5428,7 @@ impl Game {
             GfxRow::CheckpointInfo => Self::cycle(&mut s.checkpoint_info, LEVELS.len(), !left),
             GfxRow::CheckpointDelay => s.checkpoint_delay = (s.checkpoint_delay as i32 + if left { -1 } else { 1 }).clamp(0, if classic { DELAY_CLASSIC_MAX } else { DELAY_MAX } as i32) as u32,
             GfxRow::LapDelay => s.hud.lap_delay = (s.hud.lap_delay as i32 + if left { -1 } else { 1 }).clamp(0, crate::hud_layout::LAP_DELAY_MAX as i32) as u32,
+            GfxRow::SectorDelta => s.hud.sector_delay = (s.hud.sector_delay as i32 + if left { -1 } else { 1 }).clamp(0, crate::hud_layout::LAP_DELAY_MAX as i32) as u32,
             GfxRow::RoadMap => {
                 Self::cycle(&mut s.road_map, LEVELS.len(), !left);
                 s.hud.apply_road_map(s.road_map);
@@ -5415,6 +5478,7 @@ impl Game {
             GfxRow::ClearCoat => v.remaster.clear_coat ^= true,
             GfxRow::Signs => v.remaster.retro_signs ^= true,
             GfxRow::WorldFill => v.remaster.world_fill ^= true,
+            GfxRow::TreeModels => v.remaster.tree_models ^= true,
             GfxRow::Water => v.remaster.water ^= true,
             GfxRow::WaterReflect => v.remaster.water_ssr ^= true,
             GfxRow::LocalLight => v.remaster.local_light ^= true,
@@ -5562,7 +5626,7 @@ impl Game {
 
     /// REMASTER Controls (the pause menu's tab and, #304 phase 2, the main menu's screen) [design choice]: one list of the car
     /// tasks (Enter, then the next key, mouse button or pad button is bound, Esc / Start cancel), the
-    /// keyboard layout and the three pad sliders; left / right turn the layout or a slider, R or F6
+    /// keyboard layout and the four pad sliders; left / right turn the layout or a slider, R or F6
     /// restores the defaults, Esc resumes the race.
     fn controls_key_list(&mut self, k: KeyCode) {
         let (up, down) = (k == KeyCode::ArrowUp, k == KeyCode::ArrowDown);
@@ -5580,7 +5644,7 @@ impl Game {
             self.settings.layout = self.controls.layouts[i].name.clone();
             self.sync_controls();
         } else if self.sel > CAR_TASKS && (left || right) {
-            let i = (self.sel - CAR_TASKS - 1).min(2);
+            let i = (self.sel - CAR_TASKS - 1).min(3);
             let (lo, hi) = PAD_TUNE_RANGE[i];
             let v = self.settings.pad_tune[i];
             self.settings.pad_tune[i] = if right { (v + PAD_TUNE_STEP).min(hi) } else { v.saturating_sub(PAD_TUNE_STEP).max(lo) };
@@ -5652,6 +5716,7 @@ impl Game {
             r.finished_for = None;
             r.lap_flash = None;
             r.split = None;
+            r.sector_flash = None;
             r.last_cp = None;
             r.last_lap = 1;
             // demo play starts over: playing, the end choice forgotten (#346)
@@ -6661,6 +6726,8 @@ impl Game {
                 self.finish_keep(false);
             }
         }
+        // pad rumble (#383): `drive` fills it in during a race; every other frame stops the motors
+        self.rumble_cmd = (0.0, 0.0);
         match self.screen {
             Screen::Loading if self.t > 0.05 => self.poll_load(),
             Screen::Race => self.drive(dt, keys),
@@ -6675,6 +6742,10 @@ impl Game {
             }
             _ => {}
         }
+        if self.screen != Screen::Race {
+            self.rumble.reset();
+        }
+        self.controls.set_rumble(self.rumble_cmd.0, self.rumble_cmd.1);
     }
 
     fn drive(&mut self, dt: f32, keys: &HashSet<KeyCode>) {
@@ -6721,9 +6792,11 @@ impl Game {
         // sticks and the mouse steer proportionally; keys use the game's half-lock ramp
         let (l, rt) = (c.value[task::TURN_LEFT], c.value[task::TURN_RIGHT]);
         let steer = if c.analog[task::TURN_LEFT] || c.analog[task::TURN_RIGHT] { rt - l } else { self.steer.update(l > 0.5, rt > 0.5, dt) };
+        // CLASSIC 0x45a6e8 / 0x45be6a (#376): the player's pedals (throttle x1.1, key brake ramp, analog brake x1.1); the AI cars do not go through it
+        let (throttle, brake) = self.pedals.update(c.value[task::ACCELERATE], c.value[task::BRAKE], r.sess.race.started(), dt);
         let input = Input {
-            throttle: c.value[task::ACCELERATE],
-            brake: c.value[task::BRAKE],
+            throttle,
+            brake,
             steer,
             shift_up: c.held(task::GEAR_UP),
             shift_down: c.held(task::GEAR_DOWN),
@@ -6739,8 +6812,8 @@ impl Game {
         // chase easing: Normal is the original's, Loose and Tight scale it [design choice]
         let follow = if remaster { self.settings.cam.follow.min(2) } else { 1 };
         let (ease, lag) = [(0.5, 0.5), (1.0, 0.3), (1.8, 0.15)][follow];
-        let base = motorview::drive::CamTune::default();
-        (r.sess.tune.k_xz, r.sess.tune.k_y, r.sess.tune.max_lag) = (base.k_xz * ease, (base.k_y * ease).min(1.0), if follow == 1 { base.max_lag } else { lag });
+        // on top of the tuned easing and lag (`CHASE_K_XZ`, `CHASE_K_Y`, `CHASE_MAX_LAG`; the Constants page, tune.cfg)
+        r.sess.follow = motorview::drive::Follow { ease, lag: (follow != 1).then_some(lag) };
         if c.went_down[task::HORN] && !pb_ui {
             self.sfx.push(Sfx::Horn);
         }
@@ -6787,7 +6860,7 @@ impl Game {
         if c.went_down[task::CYCLE_PLAYERS] {
             r.sess.cycle_focus();
             let p = &r.sess.race.racers[r.sess.focus].progress;
-            (r.last_lap, r.last_cp, r.lap_flash, r.split) = (p.lap, p.last_checkpoint, None, None);
+            (r.last_lap, r.last_cp, r.lap_flash, r.split, r.sector_flash) = (p.lap, p.last_checkpoint, None, None, None);
         }
         (r.sess.fx.smoke, r.sess.fx.sparks) = (self.settings.view.smoke, self.settings.view.sparks);
         let (scale, feel) = self.cheats.car_size();
@@ -6857,7 +6930,8 @@ impl Game {
         } else {
             r.sess.step_as(dt, input, hand);
             if let (Some(block), Some(d)) = (r.watch, &r.demo) {
-                if let Some(s) = d.state(block, motor_sim::demo::race_ms(&r.sess.race)) {
+                // #374: the recorded car is posed at the view time (the other cars are drawn up to a tick behind the clock)
+                if let Some(s) = d.state(block, motor_sim::demo::view_ms(&r.sess.race)) {
                     motor_sim::demo::drive_remote(&mut r.sess.race.racers[player], &s, dt, &r.sess.race.world.materials);
                 }
             }
@@ -6889,6 +6963,10 @@ impl Game {
         }
         if !r.watching() {
             r.count_run(dt, player);
+            // rumble (#383): the pad follows the player's own car only
+            if let Some(i) = r.rumble_in(player) {
+                self.rumble_cmd = self.rumble.mix(dt, &i, self.rumble_gain);
+            }
         }
         // Time Attack ghost: sample the lap; a completed lap that beats the ghost replaces it and
         // is saved at once (our own feature, design choice)
@@ -6940,10 +7018,13 @@ impl Game {
                 // REMASTER: the Modern HUD's lap message has its own time (HudLapDelay); CLASSIC keeps CheckpointDelay.
                 // The split just before the line goes, or it would show again when the lap message ends
                 let (secs, modern) = if self.settings.view.modern_hud() { (self.settings.hud.lap_delay as f32, true) } else { (delay, false) };
-                r.lap_flash = Some((secs, l, p.best_lap_ms == Some(l)));
+                // REMASTER sector delta: the lap against the best earlier lap, taken before the records change
+                let delta = (p.lap > 1 || p.finished_ms.is_some()).then(|| r.records.gaps(&lap_splits(&p.splits), p.finished_ms.map_or(p.lap - 1, |_| p.laps) as usize * 4)[0]).flatten();
+                r.lap_flash = Some((secs, l, p.best_lap_ms == Some(l), delta));
                 new_lap = true;
                 if modern {
                     r.split = None;
+                    r.sector_flash = None;
                 }
             }
             r.last_lap = p.lap;
@@ -6953,8 +7034,12 @@ impl Game {
         if p.last_checkpoint != r.last_cp {
             if let Some((cp, at)) = p.last_checkpoint {
                 let idx = p.lap as usize * 4 + cp as usize + 1;
-                r.split = Some((delay, idx, at.saturating_sub(p.lap_start_ms)));
                 r.ta_gaps = r.records.gaps(&lap_splits(&p.splits), idx - 4);
+                r.split = Some((delay, idx, at.saturating_sub(p.lap_start_ms)));
+                // REMASTER sector delta (#409, design choice [I]): slots lap*4 + 2 / + 3 = checkpoints 1 / 2 = sectors 1 / 2
+                if let (2..=3, Some(d)) = (idx % 4, r.ta_gaps[0]) {
+                    r.sector_flash = Some((self.settings.hud.sector_delay as f32, (idx % 4) as u32 - 1, d));
+                }
             }
             r.last_cp = p.last_checkpoint;
         }
@@ -6983,7 +7068,7 @@ impl Game {
                 }
             }
         }
-        for timer in [r.lap_flash.as_mut().map(|x| &mut x.0), r.split.as_mut().map(|x| &mut x.0)].into_iter().flatten() {
+        for timer in [r.lap_flash.as_mut().map(|x| &mut x.0), r.split.as_mut().map(|x| &mut x.0), r.sector_flash.as_mut().map(|x| &mut x.0)].into_iter().flatten() {
             *timer -= dt;
         }
         if r.lap_flash.is_some_and(|x| x.0 <= 0.0) {
@@ -6991,6 +7076,9 @@ impl Game {
         }
         if r.split.is_some_and(|x| x.0 <= 0.0) {
             r.split = None;
+        }
+        if r.sector_flash.is_some_and(|x| x.0 <= 0.0) {
+            r.sector_flash = None;
         }
         crate::proximity::update(r, dt);
         crate::hud::map_zoom_update(r, dt);
@@ -7217,7 +7305,7 @@ impl Game {
         if self.settings.view.shadows && !self.settings.view.car_shadows() {
             parts.shadows = r.sess.shadows_except(r.casper_slot(self.cheats.casper));
             if let Some(d) = &r.demo {
-                d.shadows(&r.sess, motor_sim::demo::race_ms(&r.sess.race), &mut parts.shadows);
+                d.shadows(&r.sess, motor_sim::demo::view_ms(&r.sess.race), &mut parts.shadows);
             }
         }
         (parts.cars, parts.hidden, parts.ghost) = r.cheat_cars(self.cheats.casper, self.settings.view.mode == RenderMode::Classic, std::mem::take(&mut parts.cars), std::mem::take(&mut parts.hidden));
@@ -7592,6 +7680,7 @@ impl Game {
                 GfxRow::ClearCoat => Some(("Clear coat:", Control::Switch(v.remaster.clear_coat))),
                 GfxRow::Signs => Some(("Reflective signs:", Control::Switch(v.remaster.retro_signs))),
                 GfxRow::WorldFill => Some(("World fill:", Control::Switch(v.remaster.world_fill))),
+                GfxRow::TreeModels => Some(("Tree models:", Control::Switch(v.remaster.tree_models))),
                 GfxRow::Water => Some(("Water:", Control::Switch(v.remaster.water))),
                 GfxRow::WaterReflect => Some(("Water reflections:", Control::Switch(v.remaster.water_ssr))),
                 GfxRow::LocalLight => Some(("Local light:", Control::Switch(v.remaster.local_light))),
@@ -7721,6 +7810,10 @@ impl Game {
             GfxRow::PlateFrame => ("Plate frame:", sw(h.plate_frame)),
             GfxRow::Proximity => ("Proximity arrows:", sw(h.proximity)),
             GfxRow::LiveGaps => ("Live gaps:", sw(h.live_gaps)),
+            GfxRow::SectorDelta => {
+                let d = h.sector_delay;
+                ("Sector delta:", slider(d as f32 / crate::hud_layout::LAP_DELAY_MAX as f32, if d == 0 { "Off".into() } else { format!("{d} s") }))
+            }
             GfxRow::NamePlates => ("Name plates:", with(names(&["Off", "Flat", "See-through"]), s.name_plates)),
             GfxRow::CheckpointInfo => ("Checkpoint splits:", with(names(&MAP_LEVELS), s.checkpoint_info)),
             GfxRow::LapDelay => {
@@ -9253,14 +9346,14 @@ mod tests {
                 car_shading: CarShading::Gouraud,
                 car_detail: CarDetail::Medium,
                 distance: 1.3,
-                fov_x: motorview::render::FOV_X,
+                fov_x: motorview::render::FOV_X.get(),
                 sky_image: false,
                 motion_blur: false,
                 lens_flares: true,
                 smoke: true,
                 sparks: true,
                 mode: RenderMode::Remaster,
-                remaster: RemasterView { enhanced_paint: false, dynamic_lights: true, render_aa: RenderAa::msaa(2), post_aa: PostAa { kind: PostAaKind::Off, strength: 50 }, anisotropy: 4, pixel_light: false, pixel_fog: true, fog_style: FogStyle::Classic, fog_tune: Default::default(), clear_coat: false, grade: 30, vignette: 70, grain: 10, hdr: false, tonemap: Tonemap::Agx, exposure: 130, bloom: 20, ssao: 0, smooth_halos: false, smooth_flares: false, retro_signs: false, modern_hud: false, modern_menu: false, car_shadows: false, velocity_blur: false, skids_detailed: false, generated_cars: false, world_fill: true, water: true, water_ssr: false, local_light: false, texture_pack: true, local_tune: Default::default(), sky_hdri: false, sky_tune: Default::default(), rev_meter: RevMeterTune { glow: 120, inner_glow: 80, glass_alpha: 60, spec: 150, bloom: 0, thickness: 90, depth: 55, roundness: 300 }, car_lights: Default::default(), lamp_lights: Default::default(), light_shadows: LightShadows::Headlights, shadow_quality: ShadowQuality::Low, grass: motorview::render::GrassLevel::Full, grass_range: 130, car_lod_distance: 100, fog_strength: 100 },
+                remaster: RemasterView { enhanced_paint: false, dynamic_lights: true, render_aa: RenderAa::msaa(2), post_aa: PostAa { kind: PostAaKind::Off, strength: 50 }, anisotropy: 4, pixel_light: false, pixel_fog: true, fog_style: FogStyle::Classic, fog_tune: Default::default(), clear_coat: false, grade: 30, vignette: 70, grain: 10, hdr: false, tonemap: Tonemap::Agx, exposure: 130, bloom: 20, ssao: 0, smooth_halos: false, smooth_flares: false, retro_signs: false, modern_hud: false, modern_menu: false, car_shadows: false, velocity_blur: false, skids_detailed: false, generated_cars: false, world_fill: true, tree_models: true, water: true, water_ssr: false, local_light: false, texture_pack: true, local_tune: Default::default(), sky_hdri: false, sky_tune: Default::default(), rev_meter: RevMeterTune { glow: 120, inner_glow: 80, glass_alpha: 60, spec: 150, bloom: 0, thickness: 90, depth: 55, roundness: 300 }, car_lights: Default::default(), lamp_lights: Default::default(), light_shadows: LightShadows::Headlights, shadow_quality: ShadowQuality::Low, grass: motorview::render::GrassLevel::Full, grass_range: 130, car_lod_distance: 100, fog_strength: 100 },
                 debug: Default::default(),
             },
             display: Display { monitor: 1, fullscreen: true, wide: false, size: (1024, 768), vsync: true },
@@ -9281,7 +9374,7 @@ mod tests {
                 p[10] = Some(PadIn::Button(gilrs::Button::West));
                 p
             },
-            pad_tune: [5, 30, 180],
+            pad_tune: [5, 30, 180, 70],
             player_name: "Max Power".into(),
             team: "DICE".into(),
             player_colour: [1, 2, 3],
@@ -9306,7 +9399,7 @@ mod tests {
             intro: false,
             menu_cd_track: 5,
             track_cd: BTreeMap::from([(3, 7)]),
-            hud: HudSettings { cluster: false, clocks: [true, false, true], lap: false, pos: true, map: false, proximity: false, scale: 150, margin: 40, map_mode: MapMode::Close, map_rotate: true, map_numbers: false, plate_frame: false, lap_delay: 7, live_gaps: true },
+            hud: HudSettings { cluster: false, clocks: [true, false, true], lap: false, pos: true, map: false, proximity: false, scale: 150, margin: 40, map_mode: MapMode::Close, map_rotate: true, map_numbers: false, plate_frame: false, lap_delay: 7, live_gaps: true, sector_delay: 9 },
         }
     }
 
@@ -9450,6 +9543,21 @@ mod tests {
         assert!(!c.hud.live_gaps);
     }
 
+    /// "Sector delta" (#409) goes to `LAP_DELAY_MAX` seconds like the lap times; an old file without the key keeps the 4 s default.
+    #[test]
+    fn sector_delay_range() {
+        assert_eq!(HudSettings::default().sector_delay, crate::hud_layout::LAP_DELAY_DEFAULT);
+        let mut a = settings();
+        a.hud.sector_delay = 99;
+        let mut b = Settings::default();
+        b.apply(&a.to_text(&IDS, &TRACK_IDS), &IDS, &TRACK_IDS, 30);
+        assert_eq!(b.hud.sector_delay, crate::hud_layout::LAP_DELAY_MAX);
+        let old: String = a.to_text(&IDS, &TRACK_IDS).lines().filter(|l| !l.starts_with("HudSectorDelay")).collect::<Vec<_>>().join("\n");
+        let mut c = Settings::default();
+        c.apply(&old, &IDS, &TRACK_IDS, 30);
+        assert_eq!(c.hud.sector_delay, crate::hud_layout::LAP_DELAY_DEFAULT);
+    }
+
     #[test]
     fn layout_binds_load_and_keep_the_old_custom_lines() {
         let mut s = Settings::default();
@@ -9545,7 +9653,7 @@ mod tests {
         s.apply("ViewDistance 900\n", &IDS, &TRACK_IDS, 30);
         assert!((s.view.distance - View::MAX_DISTANCE).abs() < 1e-6);
         s.view.mode = RenderMode::Classic;
-        assert!((s.view.distance() - CLASSIC_MAX_DISTANCE).abs() < 1e-6);
+        assert!((s.view.distance() - CLASSIC_MAX_DISTANCE.get()).abs() < 1e-6);
     }
 
     #[test]

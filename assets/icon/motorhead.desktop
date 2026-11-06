@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Motorhead
+Comment=Motorhead (1998) reimplementation
+Exec=motorhead
+Icon=motorhead
+Terminal=false
+Categories=Game;
+StartupWMClass=motorhead

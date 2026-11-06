@@ -15,11 +15,12 @@ const CTL_W: f32 = 210.0;
 pub(super) const ROWS_CARD: (f32, f32, f32, f32) = (62.0, 228.0, 700.0, 372.0);
 pub(super) const INFO_CARD: (f32, f32, f32, f32) = (782.0, 228.0, 436.0, 372.0);
 
-/// The help of the three pad tuning sliders (the Controls tab's last rows).
-pub(super) const CTL_TUNE_HELP: [&str; 3] = [
+/// The help of the four pad tuning sliders (the Controls tab's last rows).
+pub(super) const CTL_TUNE_HELP: [&str; 4] = [
     "How far the stick moves before the car steers. Raise it if the car pulls on its own.",
     "How far the triggers move before throttle and brake respond.",
     "Steering per stick travel. Above 100% reaches full lock before the end of the stick.",
+    "Strength of the pad's rumble: rough surfaces, kerbs, wheelspin and hits. 0% turns it off.",
 ];
 
 /// One cap of a binding: a PromptFont glyph (a key cap or button already) or a name on a drawn cap.

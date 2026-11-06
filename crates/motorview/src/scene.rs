@@ -172,9 +172,16 @@ struct HeadlampDef {
     forward: [f32; 3],
     lamps: &'static [[f32; 3]],
 }
-/// Half the width (m) of a lamp's halo segment, its colour (cool white, like the cyan faces) and
-/// the car halo texture it uses
-const PROP_LAMP_HALF: f32 = 0.1;
+// Half the width (m) of a lamp's halo segment, its colour (cool white, like the cyan faces) and
+// the car halo texture it uses
+motor_tune::tunable! {
+    /// Half the width of a lamp's halo segment.
+    /// range: 0.01..1
+    /// unit: m
+    /// applies: reload
+    /// area: Graphics/Lights
+    PROP_LAMP_HALF: f32 = 0.1;
+}
 const PROP_LAMP_RGB: [f32; 3] = [0.85, 1.0, 0.98];
 const PROP_LAMP_TEXTURE: &str = "Cars/Textures/halowhit.iff";
 
@@ -188,10 +195,26 @@ pub struct LampLight {
     pub rgb: [f32; 3],
 }
 
-/// Range of a lamp per metre of height above the road, and its limits (metres).
-const LAMP_RANGE_PER_HEIGHT: f32 = 2.5;
-const LAMP_RANGE_MIN: f32 = 6.0;
-const LAMP_RANGE_MAX: f32 = 25.0;
+motor_tune::tunable! {
+    /// Range of a lamp's light per metre of its height above the road.
+    /// range: 0.5..6
+    /// unit: m/m
+    /// applies: reload
+    /// area: Graphics/lamps
+    LAMP_RANGE_PER_HEIGHT: f32 = 2.5;
+    /// The shortest range a lamp's light reaches, however low the lamp hangs.
+    /// range: 0..20
+    /// unit: m
+    /// applies: reload
+    /// area: Graphics/lamps
+    LAMP_RANGE_MIN: f32 = 6.0;
+    /// The longest range a lamp's light reaches, however high the lamp hangs.
+    /// range: 5..60
+    /// unit: m
+    /// applies: reload
+    /// area: Graphics/lamps
+    LAMP_RANGE_MAX: f32 = 25.0;
+}
 
 /// The lamp lights of a track: each world halo, merged with any other within 1.5 m (the survey,
 /// `examples/lampaudit.rs`, found none to merge on the shipped tracks) [O].
@@ -204,7 +227,7 @@ fn lamp_lights(halos: &[HaloInst], heights: &Heights) -> Vec<LampLight> {
         }
         // view space z is the game's negated
         let up = pos.y - heights.lowest(pos.x, -pos.z, 4.0).unwrap_or(pos.y);
-        let range = if up > 0.5 { (up * LAMP_RANGE_PER_HEIGHT).clamp(LAMP_RANGE_MIN, LAMP_RANGE_MAX) } else { 10.0 };
+        let range = if up > 0.5 { (up * LAMP_RANGE_PER_HEIGHT.get()).clamp(LAMP_RANGE_MIN.get(), LAMP_RANGE_MAX.get().max(LAMP_RANGE_MIN.get())) } else { 10.0 };
         out.push(LampLight { pos, range, rgb: [0, 1, 2].map(|k| h.rgb[k] * h.tint[k]) });
     }
     out
@@ -229,6 +252,17 @@ pub struct Scene {
     pub water_hide: Vec<bool>,
     /// REMASTER the generated bed under the water (procgen/water.rs `Mesh::bed`)
     pub water_bed: Vec<Vertex>,
+    /// REMASTER tree models (procgen/trees.rs, #389): the pack models standing where the original's tree
+    /// cards stood (world-style vertices, view space), and per world triangle whether it is a card they
+    /// replace (empty: no trees)
+    pub trees: Vec<Vertex>,
+    pub tree_hide: Vec<bool>,
+    /// REMASTER the original's tree cards (`trees::find`), every one found, swapped or not: the fill's placed
+    /// models (#390) are lit and coloured like them
+    pub tree_sites: Vec<procgen::trees::Site>,
+    /// REMASTER (#390): the layer of the tree pack's first image in `layers` (the pack's images follow it), for
+    /// the cards' models and the fill's `Shape::Model`; None when the pack does not load or the layers are full
+    pub tree_pack_layer: Option<usize>,
     /// REMASTER grass shells (procgen/grass.rs): the tagged world triangles and per body the
     /// packed parameters
     pub grass: Vec<Vertex>,
@@ -1049,8 +1083,8 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
                 .lamps
                 .iter()
                 .map(|c| HaloInst {
-                    p0: Vec3::from(to_view([c[0] - PROP_LAMP_HALF, c[1], c[2]])),
-                    p1: Vec3::from(to_view([c[0] + PROP_LAMP_HALF, c[1], c[2]])),
+                    p0: Vec3::from(to_view([c[0] - PROP_LAMP_HALF.get(), c[1], c[2]])),
+                    p1: Vec3::from(to_view([c[0] + PROP_LAMP_HALF.get(), c[1], c[2]])),
                     rgb: PROP_LAMP_RGB,
                     layer: layer as f32,
                     flags: 2,
@@ -1140,6 +1174,10 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         water: Vec::new(),
         water_params: Vec::new(),
         water_hide: Vec::new(),
+        trees: Vec::new(),
+        tree_hide: Vec::new(),
+        tree_sites: Vec::new(),
+        tree_pack_layer: None,
         water_bed: Vec::new(),
         grass: Vec::new(),
         grass_params: Vec::new(),
@@ -1203,9 +1241,31 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         (scene.water, scene.water_params, scene.water_hide, scene.water_bed) = (w.verts, w.params, w.hide, w.bed);
     }
     Progress::report(progress, Stage::Remaster, 0.4)?;
+    // REMASTER (#390): the tree pack's textures, on every track, so the fill and the World Editor can place
+    // models anywhere (layers are uploaded once; Classic never samples them)
+    let pack_layers = procgen::trees::pack_layers();
+    if !pack_layers.is_empty() && scene.layers.len() + pack_layers.len() <= MAX_LAYERS {
+        scene.tree_pack_layer = Some(scene.layers.len());
+        scene.layers.extend(pack_layers);
+    }
+    // REMASTER tree models (#389): the cards of the world's trees (before the fill: its models match them)
+    let swap = procgen::trees::find(&scene.tris, &scene.world_objects, &scene.world_tri_texture, &scene.world_textures);
+    scene.tree_sites = swap.sites.clone();
     if !fill.pieces.is_empty() {
         scene.fill = procgen::fill::mesh(&fill, &scene);
         scene.stats.push_str(&format!("; world fill {} pieces, {} tris", fill.pieces.len(), scene.fill.len() / 3));
+    }
+    // REMASTER tree models (#389): the models in place of the cards
+    if let (false, Some(first)) = (swap.sites.is_empty(), scene.tree_pack_layer) {
+        let m = procgen::trees::mesh(&swap.sites, &scene.look, &scene.layers, first);
+        if m.verts.is_empty() {
+            scene.stats.push_str(&format!("; {} tree cards kept (no models)", swap.sites.len()));
+        } else {
+            scene.stats.push_str(&format!("; trees {} as models ({} tris)", swap.sites.len(), m.verts.len() / 3));
+            (scene.trees, scene.tree_hide) = (m.verts, swap.hide);
+        }
+    } else if !swap.sites.is_empty() {
+        scene.stats.push_str(&format!("; {} tree cards kept (no models)", swap.sites.len()));
     }
     // REMASTER grass: the fill's bodies, else the built-in rule (`Grass none` turns it off);
     // after the fill so its ground pieces can join
@@ -1376,7 +1436,7 @@ fn build_car(
     let mut radius = 0.35;
     // the ground at rest, above the model origin: the wheels hang from the physics origin
     // (`MODEL_OFFSET` below the model's), so the tyres stand this far up the model's y
-    let ground_y = motor_sim::car::CarParams::from_config(&c).map(|p| p.rest_ground(motor_sim::world::GRAVITY) - motor_sim::car::MODEL_OFFSET).unwrap_or(0.0);
+    let ground_y = motor_sim::car::CarParams::from_config(&c).map(|p| p.rest_ground(motor_sim::world::GRAVITY.get()) - motor_sim::car::MODEL_OFFSET.get()).unwrap_or(0.0);
     let wheel_keys = ["PhyWheelFL", "PhyWheelFR", "PhyWheelBR", "PhyWheelBL"];
     for (i, key) in wheel_keys.iter().enumerate() {
         let (Some(m), Some(p)) = (wheel_myo(root, &c, i), fv(&c, key).filter(|p| p.len() >= 3)) else {
@@ -1557,14 +1617,20 @@ impl BodyJob {
         let (faces, st, carbon) = (&mut self.faces, &self.st, self.carbon);
         procgen::cuts::mirror_copies(faces, &st.mirror_copies);
         procgen::cuts::push(faces, &st.pushes);
-        // REMASTER (#174 phase 4): before the arches and the curved zones, which leave its
-        // faces alone (they carry their own `smooth_deg`), and with the deck still flat under
-        // the struts
-        procgen::aero::foils(faces, &st.foils);
         if let Some(rgb) = st.mirror_glass {
             faces.iter_mut().filter(|f| f.rgb == rgb).for_each(|f| f.env = procgen::METAL_ENV);
         }
         procgen::body::round_arches(faces, &self.game_hubs, self.radius, st);
+        // REMASTER (#174 phase 4): before the curved zones, which leave its faces alone (they
+        // carry their own `smooth_deg`), and with the deck still flat under the struts. After
+        // the arches (#177 phase 3): [O] the Avalanche's wing sits 8-11 cm over its deck, its
+        // loft's undersides 0.63 m from the rear hubs and facing them, and its 244 faces
+        // outnumbered the arch tunnel's 6 black ones, so the arch took the wing for its tunnel
+        // and stayed angular.
+        procgen::aero::foils(faces, &st.foils);
+        // REMASTER (#388): after the arches (the channel stays inside the tunnels' walls), before
+        // the curved zones, which then round the cut rear bumper like the rest of it
+        procgen::diffuser::diffusers(faces, &st.diffusers);
         procgen::smooth::smooth(faces, &self.game_hubs, self.radius, st);
         // after the arches: the plates' undersides over a wheel would pass for arch ceilings
         procgen::cuts::thicken(faces, &st.thickens);
@@ -1583,7 +1649,14 @@ impl BodyJob {
         }
         let recessed = procgen::vents::recess(faces, &st.vents);
         let faces: &[procgen::body::Face] = faces;
-        let mut out = if st.refine > 0.0 { procgen::body::body(&procgen::smooth::refine(faces, st.refine), st) } else { procgen::body::body(faces, st) };
+        let mut out = if st.refine > 0.0 || !st.warps.is_empty() {
+            // REMASTER (#388): the bulges carry the refine's cut points, so they come after it
+            let mut cage = if st.refine > 0.0 { procgen::smooth::refine(faces, st.refine, st.refine_seams) } else { faces.to_vec() };
+            procgen::cuts::warp(&mut cage, &st.warps);
+            procgen::body::body(&cage, st)
+        } else {
+            procgen::body::body(faces, st)
+        };
         let (lit, strips) = procgen::lamps::lamps(faces, &self.segs, &st.lamps);
         out.extend(lit);
         out.extend(procgen::vents::vents(faces, &st.vents, &recessed));
@@ -1727,15 +1800,18 @@ fn wheel_face(m: &myo::Mesh, layers: &mut Layers, lib: &TexLib, scale: [f32; 3],
         let Some((name, uv)) = m.texture(p) else { continue };
         let (layer, tw, th) = layers.get(lib, name, p.flags & ZERO_TRANSPARENT != 0);
         found.get_or_insert((layer, p.rgba[0]));
+        let mut poly = Vec::new();
         for (&vi, t) in p.v.iter().zip(&uv) {
             let v = m.vertices[vi as usize];
             side += v[0];
-            samples.push(([v[1], v[2]], [t[0] / tw as f32, t[1] / th as f32]));
+            poly.push(([v[1], v[2]], [t[0] / tw as f32, t[1] / th as f32]));
         }
+        samples.push(poly);
     }
     // FL, BL are on the left
     let side = if side != 0.0 { side.signum() } else if matches!(wheel, 0 | 3) { -1.0 } else { 1.0 };
-    let (Some((layer, face_rgba)), Some(fit)) = (found, procgen::fit_face(&samples)) else { return (None, side) };
+    // one map the polygons agree on: some wheels have half their face mapped mirrored (#356)
+    let (Some((layer, face_rgba)), Some(fit)) = (found, procgen::fit_face_consensus(&samples)) else { return (None, side) };
     let colour = rgba_obj(face_rgba, scale);
     // the lip: the texture's mean around the rim's bright outer ring (0.85 of the wheel radius)
     let r = m.vertices.iter().map(|v| v[1]).fold(0.0, f32::max);
@@ -1752,10 +1828,23 @@ fn wheel_face(m: &myo::Mesh, layers: &mut Layers, lib: &TexLib, scale: [f32; 3],
     (Some(procgen::WheelFace { layer: layer as f32, fit, colour, lip }), side)
 }
 
-/// Hologram line strength of the road surface (alpha; the car's edges are 0.20)
-const HOLO_ROAD_LINE: f32 = 0.35;
-/// the road's triangles are cut down to this edge length (m) so the lines show the car's speed
-const HOLO_ROAD_CELL: f32 = 3.0;
+// Hologram line strength of the road surface (alpha; the car's edges are 0.20)
+motor_tune::tunable! {
+    /// Hologram line strength of the road surface (alpha; the car's edges are 0.20).
+    /// range: 0..1
+    /// applies: reload
+    /// area: Graphics/View
+    HOLO_ROAD_LINE: f32 = 0.35;
+}
+// the road's triangles are cut down to this edge length (m) so the lines show the car's speed
+motor_tune::tunable! {
+    /// The hologram road's triangles are cut down to this edge length so the lines show the car's speed.
+    /// range: 0.5..20
+    /// unit: m
+    /// applies: reload
+    /// area: Graphics/View
+    HOLO_ROAD_CELL: f32 = 3.0;
+}
 
 /// REMASTER (front end Main drive, 09-remaster 9.24): the road surface's outline as a line
 /// list: the upward-facing world triangles whose COL surface is `asphalt` (no kerbs, walls,
@@ -1813,7 +1902,7 @@ pub fn road_lines(tris: &[Vertex], world: &motor_sim::world::World) -> Vec<Verte
         while let Some((p, depth)) = todo.pop() {
             let len: [f32; 3] = std::array::from_fn(|k| p[k].distance(p[(k + 1) % 3]));
             let l = (0..3).max_by(|&a, &b| len[a].total_cmp(&len[b])).unwrap();
-            if len[l] <= HOLO_ROAD_CELL || depth >= 14 {
+            if len[l] <= HOLO_ROAD_CELL.get() || depth >= 14 {
                 add(p, n);
             } else {
                 // bisect the longest edge a-b at m, c the opposite corner
@@ -1823,7 +1912,7 @@ pub fn road_lines(tris: &[Vertex], world: &motor_sim::world::World) -> Vec<Verte
             }
         }
     }
-    let colour = [1.0, 1.0, 1.0, HOLO_ROAD_LINE];
+    let colour = [1.0, 1.0, 1.0, HOLO_ROAD_LINE.get()];
     let vertex = |p: Vec3| Vertex { pos: (p * flip).to_array(), uv: [0.0; 2], color: colour, layer: -1.0, normal: [0.0; 3], env: 0.0 };
     let mut out = Vec::with_capacity(edges.len() * 2);
     for e in edges.into_values() {

@@ -185,7 +185,7 @@ fn edge_point(a: Vec3, b: Vec3, i: usize, n: usize) -> Vec3 {
 
 /// The cut and faired triangles of `faces`, and the zone's outline (corner keys, CCW).
 fn curve(faces: &[Face], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
-    let faces = &t_junctions(faces);
+    let faces = &t_junctions(faces, false);
     let polys: Vec<Poly> = faces.iter().map(Poly::new).collect();
     // a fold up to max_deg rounds; steeper ones and edges to other faces stay
     let cos = z.max_deg.to_radians().cos();
@@ -633,9 +633,21 @@ fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, lambda: f64) {
     }
 }
 
+/// How far (m) a corner may lie off an open edge and still be cut into it (`t_junctions` with
+/// `open_only`, the `Refine` `seams` pass). [O] Half the weld cell's reach (`WELD_T`): on the
+/// Serpent the sill's flare is already cut into 2.7 cm steps that sit 1-2 mm off the long
+/// underside edge (the original's corners differ by that much), and cut at 2 mm those corners
+/// pulled the edge's points off its line into 6 non-manifold edges along the rear sill (#387).
+/// At 1 mm they are not cut and the closing of the other cars' seams stays (the ASC II's needs
+/// more than 0.5 mm; measured with the mesh check, #387).
+const SEAM_TOL: f32 = 1e-3;
+
 /// `faces` with each edge cut at the other faces' corners lying on it (the original meets a long
-/// edge with two short ones in places), so that every fold is an edge pair.
-fn t_junctions(faces: &[Face]) -> Vec<Face> {
+/// edge with two short ones in places), so that every fold is an edge pair. With `open_only`
+/// only an edge without its twin (the long side of a T-junction) is cut: a corner lying on a
+/// paired edge belongs to a third face sitting on the seam (a mirror base on the body), and cut
+/// in, it put three or four faces on the pieces (#177: the Python's non-manifold edges 7 -> 57).
+fn t_junctions(faces: &[Face], open_only: bool) -> Vec<Face> {
     let mut corners: Vec<Vec3> = Vec::new();
     let mut seen = HashSet::new();
     for p in faces.iter().flat_map(|f| f.pts.iter()) {
@@ -643,6 +655,8 @@ fn t_junctions(faces: &[Face]) -> Vec<Face> {
             corners.push(Vec3::from(*p));
         }
     }
+    let edges: HashSet<([i32; 3], [i32; 3])> = faces.iter().flat_map(|f| (0..f.pts.len()).map(move |k| (weld_key(f.pts[k]), weld_key(f.pts[(k + 1) % f.pts.len()])))).collect();
+    let tol = if open_only { SEAM_TOL } else { WELD_T };
     faces
         .iter()
         .map(|f| {
@@ -654,14 +668,14 @@ fn t_junctions(faces: &[Face]) -> Vec<Face> {
                 g.colour.push(f.colour[k]);
                 g.uv.push(f.uv[k]);
                 let len = a.distance(b);
-                if len < 1e-6 {
+                if len < 1e-6 || (open_only && edges.contains(&(weld_key(f.pts[(k + 1) % n]), weld_key(f.pts[k])))) {
                     continue;
                 }
                 let d = (b - a) / len;
                 let mut on: Vec<(f32, Vec3)> = corners
                     .iter()
                     .map(|&c| ((c - a).dot(d), c))
-                    .filter(|&(t, c)| t > WELD_T && t < len - WELD_T && (a + d * t).distance(c) < WELD_T)
+                    .filter(|&(t, c)| t > WELD_T && t < len - WELD_T && (a + d * t).distance(c) < tol)
                     .collect();
                 on.sort_by(|x, y| x.0.total_cmp(&y.0));
                 let (ua, ub) = (Vec2::from(f.uv[k]), Vec2::from(f.uv[(k + 1) % n]));
@@ -769,8 +783,18 @@ fn cut_edges(f: &Face, spacing: impl Fn([i32; 3], [i32; 3]) -> Option<f32>) -> O
 /// outline cut keeps its own): ear clipping fanned a long panel's corners across it in slivers
 /// (the Titan's door band, sill and the panel before the rear arch), and Gouraud shading swept
 /// the corners' normals along them. The lamps and vents read the uncut faces: their layouts
-/// count the facets' edges. A design choice.
-pub fn refine(faces: &[Face], step: f32) -> Vec<Face> {
+/// count the facets' edges. A design choice. With `seams` every open edge is first cut at the
+/// corners lying on it (`t_junctions`): [O] the Avalanche's bonnet slot meets the nose with one
+/// edge against three, and cut evenly each way the points welded in some stretches and not in
+/// others, so the bevel tore the nose along the slot in notches (#177).
+pub fn refine(faces: &[Face], step: f32, seams: bool) -> Vec<Face> {
+    let split;
+    let faces = if seams {
+        split = t_junctions(faces, true);
+        &split[..]
+    } else {
+        faces
+    };
     faces
         .iter()
         .map(|f| {
@@ -916,6 +940,26 @@ mod tests {
         Face { pts: pts.to_vec(), normal, colour: vec![[0.5; 4]; pts.len()], uv: vec![[0.0; 2]; pts.len()], layer: -1.0, env: 1.0, rgb: [200; 3], smooth_deg: 0.0, remesh: 0.0 }
     }
 
+    /// #177: one long edge against two short ones (a T-junction, the Avalanche's bonnet slot):
+    /// after `refine` every cut edge has its twin, so the bevel sees one crease all along
+    #[test]
+    fn refine_pairs_the_edges_of_a_t_junction() {
+        let slot = face(&[[0.0, 0.0, 0.0], [0.7, 0.0, 0.0], [0.7, 0.1, -0.05], [0.0, 0.1, -0.05]], [0.0, 0.45, 0.9]);
+        let left = face(&[[0.0, 0.0, 0.0], [0.0, -0.1, 0.3], [0.27, -0.1, 0.3], [0.27, 0.0, 0.0]], [0.0, 0.95, 0.3]);
+        let right = face(&[[0.27, 0.0, 0.0], [0.27, -0.1, 0.3], [0.7, -0.1, 0.3], [0.7, 0.0, 0.0]], [0.0, 0.95, 0.3]);
+        let out = refine(&[slot, left, right], 0.04, true);
+        let mut edges: HashMap<([i32; 3], [i32; 3]), usize> = HashMap::new();
+        for f in &out {
+            for k in 0..f.pts.len() {
+                *edges.entry((weld_key(f.pts[k]), weld_key(f.pts[(k + 1) % f.pts.len()]))).or_default() += 1;
+            }
+        }
+        let on_seam = |k: [i32; 3]| k[1] == 0 && k[2] == 0;
+        for (&(a, b), _) in edges.iter().filter(|((a, b), _)| on_seam(*a) && on_seam(*b)) {
+            assert!(edges.contains_key(&(b, a)), "seam edge {a:?} -> {b:?} has no twin");
+        }
+    }
+
     /// a roof of two quads folded 30° (15° each way): the ridge rounds (its middle sinks), the
     /// outline stays exactly where it was, and every cut edge is shared by two triangles or lies
     /// on the outline
@@ -1044,7 +1088,7 @@ mod tests {
         }
         let tri = |p: [Vec3; 3]| face(&p.map(|q| q.to_array()), [0.0, 1.0, 0.0]);
         let (l, r) = (tri([a, b, Vec3::new(-0.25, 0.805, 1.315)]), tri([b, a, Vec3::new(0.5, 0.8, 0.4)]));
-        let keys = |f: &Face| -> HashSet<[i32; 3]> { refine(std::slice::from_ref(f), 0.025)[0].pts.iter().map(|&p| weld_key(p)).collect() };
+        let keys = |f: &Face| -> HashSet<[i32; 3]> { refine(std::slice::from_ref(f), 0.025, false)[0].pts.iter().map(|&p| weld_key(p)).collect() };
         // every cut point of the shared edge (and its two corners) welds to the other face's
         let n = cuts(weld_key(a.to_array()), weld_key(b.to_array()), 0.025);
         assert_eq!(keys(&l).intersection(&keys(&r)).count(), n + 1);

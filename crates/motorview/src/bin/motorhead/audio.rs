@@ -109,7 +109,7 @@ fn menu_events(root: &Path) -> HashMap<u32, String> {
 
 impl GameAudio {
     pub fn new(root: &Path, audio: Audio, device: Option<String>) -> GameAudio {
-        audio.with(|m| m.master = MASTER);
+        audio.with(|m| m.master = MASTER.get());
         let cd = index_music(root);
         if !cd.is_empty() {
             println!("music: {} CD tracks in Music/", cd.len());

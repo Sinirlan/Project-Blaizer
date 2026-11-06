@@ -88,6 +88,10 @@ struct Globals {
     hell: array<vec4<f32>, 16>,
     // CHEAT tribute to tron, REMASTER Neon grid (#320): x = half the edge width in render pixels
     tron: vec4<f32>,
+    // the flashlight (motorview): xyz the beam axis, w the cosine of the outer half angle
+    flash: vec4<f32>,
+    // rgb the light colour, w the range in metres (0 = off)
+    flash_col: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -293,6 +297,23 @@ struct VsOut {
     // CHEAT tribute to tron (#320): the triangle's corner as a one-hot (vs_main), 0 at the edge opposite each corner
     @location(9) bary: vec3<f32>,
 };
+
+// The flashlight (motorview, `DebugView::flashlight`) [design choice]: a soft round cone from the camera along its view
+// axis, (1 - d/range)^2 falloff, wrapped N.L like the dynamic lights (no normal: half). Only called when `flash_col.w` > 0.
+fn flashlight(p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let d = p - g.cam_pos.xyz;
+    let dist = length(d);
+    if (dist >= g.flash_col.w || dist < 1e-3) {
+        return vec3<f32>(0.0);
+    }
+    let dir = d / dist;
+    let inner = g.flash.w + (1.0 - g.flash.w) * 0.5;
+    let cone = smoothstep(g.flash.w, inner, dot(dir, g.flash.xyz));
+    let f = 1.0 - dist / g.flash_col.w;
+    let nn = dot(n, n);
+    let nl = select(0.5, max(dot(n * inverseSqrt(max(nn, 1e-12)), -dir), 0.0), nn > 1e-6);
+    return g.flash_col.rgb * (cone * f * f * (0.35 + 0.65 * nl));
+}
 
 // Dynamic lights (ours, render.rs PROP_LIGHT_RANGE) [design choice]: (1 - d/range)^2 falloff
 // like the original's point lights (0x4353cc), times a wrapped N.L so the road under a light
@@ -1223,6 +1244,10 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
         // tinted by the paint [I: blend of the second pass]
         c = min(c * (0.4 + 1.1 * e.rgb), vec3<f32>(1.0));
     }
+    // CLASSIC + flashlight (motorview only): added to the lit colour in gamma space, before the fog hides it
+    if (g.flash_col.w > 0.0) {
+        c = min(c + flashlight(i.wpos, i.wnormal) * select(vec3<f32>(1.0), t.rgb, textured) * i.albedo, vec3<f32>(1.0));
+    }
     return vec4<f32>(mix(c, g.fog.rgb, i.fog), i.color.a);
 }
 
@@ -1507,6 +1532,14 @@ fn fs_remaster(i: VsOut) -> @location(0) vec4<f32> {
         }
         if (i.env < 1.5 || sign) {
             c = cap(c + dl * i.albedo);
+        }
+    }
+    // REMASTER + flashlight (motorview only): the torch cone, before the texture multiplies
+    if (g.flash_col.w > 0.0) {
+        let fl = flashlight(i.wpos, select(n0, nn, packed_n));
+        dl += fl;
+        if (i.env < 1.5 || sign) {
+            c = cap(c + fl * i.albedo);
         }
     }
     // the paint models below add the point lights to their dynamic light

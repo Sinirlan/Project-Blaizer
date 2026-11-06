@@ -48,11 +48,14 @@ pub struct HudSettings {
     /// REMASTER: the bottom-left block shows the live gap to the car ahead and behind all race, instead of the
     /// checkpoint list (#302; Time Attack keeps its checkpoint rows)
     pub live_gaps: bool,
+    /// seconds the SECTOR 1 / 2 delta stays up at each checkpoint, 0 = off; also 0 hides the delta on BEST / LAST LAP
+    /// (REMASTER, #409; same range as `lap_delay`)
+    pub sector_delay: u32,
 }
 
 impl Default for HudSettings {
     fn default() -> Self {
-        HudSettings { cluster: true, clocks: [true; 3], lap: true, pos: true, map: true, proximity: true, scale: 100, margin: 0, map_mode: MapMode::Circuit, map_rotate: false, map_numbers: true, plate_frame: true, lap_delay: LAP_DELAY_DEFAULT, live_gaps: false }
+        HudSettings { cluster: true, clocks: [true; 3], lap: true, pos: true, map: true, proximity: true, scale: 100, margin: 0, map_mode: MapMode::Circuit, map_rotate: false, map_numbers: true, plate_frame: true, lap_delay: LAP_DELAY_DEFAULT, live_gaps: false, sector_delay: LAP_DELAY_DEFAULT }
     }
 }
 

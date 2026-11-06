@@ -86,6 +86,7 @@ pub fn apply<'a>(view: &mut View, k: &str, v: &'a str, rest: &mut SplitWhitespac
         "remasterpixelfog" => r.pixel_fog = on.unwrap_or(r.pixel_fog),
         "remastersigns" => r.retro_signs = on.unwrap_or(r.retro_signs),
         "remasterworldfill" => r.world_fill = on.unwrap_or(r.world_fill),
+        "remastertreemodels" => r.tree_models = on.unwrap_or(r.tree_models),
         "remasterwater" => r.water = on.unwrap_or(r.water),
         "remasterwaterreflections" => r.water_ssr = on.unwrap_or(r.water_ssr),
         "remasterlocallight" => r.local_light = on.unwrap_or(r.local_light),
@@ -169,7 +170,7 @@ mod tests {
     use super::*;
 
     fn view() -> View {
-        View { brightness: 1.0, fog: true, show_line: false, shadows: true, halos: true, car_shading: CarShading::Reflection, car_detail: CarDetail::High, distance: 1.0, fov_x: crate::render::FOV_X, sky_image: true, motion_blur: false, lens_flares: true, smoke: true, sparks: true, mode: RenderMode::Classic, remaster: RemasterView::default(), debug: Default::default() }
+        View { brightness: 1.0, fog: true, show_line: false, shadows: true, halos: true, car_shading: CarShading::Reflection, car_detail: CarDetail::High, distance: 1.0, fov_x: crate::render::FOV_X.get(), sky_image: true, motion_blur: false, lens_flares: true, smoke: true, sparks: true, mode: RenderMode::Classic, remaster: RemasterView::default(), debug: Default::default() }
     }
 
     #[test]

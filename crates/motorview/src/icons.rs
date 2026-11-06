@@ -97,3 +97,4 @@ pub const EYE_OFF: &str = "\u{e0bb}";
 pub const FILTER: &str = "\u{e0dc}";
 pub const SHRUB: &str = "\u{e2ee}";
 pub const GEM: &str = "\u{e242}";
+pub const WARN: &str = "\u{e193}";

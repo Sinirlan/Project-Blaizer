@@ -1,5 +1,5 @@
 //! REMASTER rim details (#337 phase 3, 09-remaster 9.23): lug nuts on the hub face, rivets on the
-//! lip, and the centre cap's polygon / dome shape. Small parts laid over the dish like the
+//! lip, the centre cap's polygon / dome shape, and laced wire spokes (#386). Small parts laid over the dish like the
 //! caliper and the star: prisms and domes in the wheel's own axes (x out of the rim face), each
 //! a few dozen triangles.
 
@@ -40,6 +40,26 @@ pub struct Rivets {
 impl Default for Rivets {
     fn default() -> Self {
         Rivets { count: 10, radius: 0.95, size: 0.014 }
+    }
+}
+
+/// Laced wire spokes (#386): `count` thin round spokes from a hub drum (radius `hub`, rim
+/// fractions) into the flange wall, alternately from the drum's outer flange (at the face) and
+/// its inner one (`offset` × half-width deeper), each flange's spokes alternately leading and
+/// trailing by `cross` spoke pitches so they cross; `thickness` is a spoke's diameter (rim
+/// fractions) [design choice: the lacing of a real two-flange wire wheel, straight spokes].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wire {
+    pub count: usize,
+    pub hub: f32,
+    pub offset: f32,
+    pub thickness: f32,
+    pub cross: f32,
+}
+
+impl Default for Wire {
+    fn default() -> Self {
+        Wire { count: 20, hub: 0.2, offset: 0.25, thickness: 0.015, cross: 1.5 }
     }
 }
 
@@ -125,6 +145,60 @@ pub(super) fn rivets(out: &mut Vec<Vertex>, side: f32, rr: f32, surface: &dyn Fn
                 tri(out, side, [p, rr_, s_]);
             }
         }
+    }
+}
+
+/// sides of a wire spoke
+const WIRE_SIDES: usize = 6;
+
+/// The wire spokes and their hub drum. The drum follows the dish 1 mm under it (the cap and star
+/// stay on top) out to `hub`, a chamfer, and a wall down past the inner flange. Spoke `i` runs
+/// from the drum (just inside its wall) to the flange wall at `fl` (rim fractions; `surface(m)`
+/// is the flange's offset there, `back` the floor), its rim end `i` spoke pitches round from
+/// `phase`, its hub end `cross` pitches back (leading) or on (trailing).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn wire(out: &mut Vec<Vertex>, w: &WheelSpec, rr: f32, h: f32, top: &dyn Fn(f32) -> f32, surface: &dyn Fn(f32) -> f32, back: f32, fl: f32, phase: f32, wr: &Wire, c: [f32; 4]) {
+    if wr.count == 0 {
+        return;
+    }
+    let th = wr.thickness * rr;
+    let (hr, fr) = (wr.hub * rr, fl * rr);
+    // the two flanges' spoke ends, the rim ends 2 thicknesses under the flange's foot
+    let o_out = top(hr) - th;
+    let o_in = (o_out - wr.offset * h).max(back + th);
+    let foot = surface(fr);
+    let o_rim = (if foot < -1.0 { top(fr) } else { foot } - 2.0 * th).max(back + th);
+    let ch = (0.3 * th).max(0.001).min(0.3 * hr);
+    let mut drum: Vec<Vec2> = [0.0, 0.5, 1.0].iter().map(|&f| { let m = f * (hr - ch); Vec2::new(top(m) - 0.001, m) }).collect();
+    drum.push(Vec2::new(top(hr) - 0.001 - ch, hr));
+    drum.push(Vec2::new(o_in - th, hr));
+    strip(out, w, &drum, &vec![c; drum.len()], false);
+    let pitch = TAU / wr.count as f32;
+    let at = |a: f32, r: f32, o: f32| Vec3::new(o, r * a.sin(), r * a.cos());
+    for i in 0..wr.count {
+        let lead = if (i / 2) % 2 == 0 { 1.0 } else { -1.0 };
+        let a_rim = phase + i as f32 * pitch;
+        let a_hub = a_rim - lead * wr.cross * pitch;
+        let o_hub = if i % 2 == 0 { o_out } else { o_in };
+        rod(out, w.side, at(a_hub, hr - th, o_hub), at(a_rim, fr + th, o_rim), 0.5 * th, c);
+    }
+}
+
+/// A straight round rod from `a` to `b` of radius `rad`: `WIRE_SIDES` sides, smooth normals,
+/// open ends (buried in the hub and the flange).
+fn rod(out: &mut Vec<Vertex>, side: f32, a: Vec3, b: Vec3, rad: f32, c: [f32; 4]) {
+    let d = (b - a).normalize_or(Vec3::Y);
+    let u = d.cross(Vec3::X).normalize_or(Vec3::Z);
+    let v = d.cross(u);
+    let pt = |p: Vec3, k: usize| {
+        let (s, co) = (TAU * k as f32 / WIRE_SIDES as f32).sin_cos();
+        let n = u * co + v * s;
+        V { p: p + n * rad, n, c }
+    };
+    for k in 0..WIRE_SIDES {
+        let q = [pt(a, k), pt(a, k + 1), pt(b, k + 1), pt(b, k)];
+        tri(out, side, [q[0], q[1], q[2]]);
+        tri(out, side, [q[0], q[2], q[3]]);
     }
 }
 
@@ -214,6 +288,34 @@ mod tests {
         let mut v = Vec::new();
         lugs(&mut v, 1.0, RR, H, &flat_top, 0.0, &Lugs { count: 0, ..Default::default() }, 0.004, C);
         assert!(v.is_empty());
+    }
+
+    /// the spokes are 2 × WIRE_SIDES triangles each, face out, stay between the floor and the
+    /// face and inside the flange wall; their hub ends sit on two flanges `offset` apart
+    #[test]
+    fn wire_builds() {
+        let w = WheelSpec { radius: 0.353, half_width: H, side: -1.0, face: None, rim: None, scale: [1.0; 3], tyre: None };
+        let build = |wr: &Wire| {
+            let mut v = Vec::new();
+            wire(&mut v, &w, RR, H, &flat_top, &|_| 0.08, 0.02, 0.76, 0.3, wr, C);
+            v
+        };
+        let wr = Wire::default();
+        let v = build(&wr);
+        assert_eq!(v.len() - build(&Wire { count: 18, ..wr.clone() }).len(), 2 * 2 * WIRE_SIDES * 3);
+        assert!(faces_out(&v));
+        let th = wr.thickness * RR;
+        for p in &v {
+            let (x, r) = (-p.pos[0], Vec2::new(p.pos[1], p.pos[2]).length());
+            assert!(r <= (0.76 * RR + 1.5 * th) * 1.0001 && (0.02..=0.1).contains(&x), "{x} {r}");
+        }
+        // the hub ends: rod vertices just inside the drum, at two depths offset × H apart
+        let mut depths: Vec<f32> = v.iter().filter(|p| (Vec2::new(p.pos[1], p.pos[2]).length() - (wr.hub * RR - th)).abs() < 0.6 * th).map(|p| -p.pos[0]).collect();
+        depths.sort_by(f32::total_cmp);
+        assert!((depths.last().unwrap() - depths[0] - (wr.offset * H + th)).abs() < 0.25 * th, "{depths:?}");
+        let mut none = Vec::new();
+        wire(&mut none, &w, RR, H, &flat_top, &|_| 0.08, 0.02, 0.76, 0.0, &Wire { count: 0, ..wr }, C);
+        assert!(none.is_empty());
     }
 
     /// a rivet is rings × sides × 2 triangles less the collapsed apex ones, all on the flange

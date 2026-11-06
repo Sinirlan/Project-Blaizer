@@ -409,7 +409,7 @@ pub fn car_panel(sess: &Session, slot: usize) -> Vec<String> {
         format!("vel   {}  {:.0} km/h", v3(c.vel), t.kmh),
         format!("ang   {}", v3(c.ang)),
         format!("gear {} rpm {:.0} drive {:.0} steer {:.2} brake {:.2}", if c.gear == 0 { "R".into() } else { c.gear.to_string() }, c.rpm, t.drive_force, c.steer_smooth, r.brake),
-        format!("sliding {} wheelspin {} clutch {} (limit {:.0}) scraping {} impact {:.1} hull hits {} airborne {:.1}s", c.sliding, c.wheelspin, c.clutch, c.spin_limit, c.scraping, c.impact, c.hull_hits.len(), r.airborne_s),
+        format!("sliding {} wheelspin {} clutch {} (limit {:.0}) scraping {} impact {:.1} hull hits {} airborne {:.1}s flip {:.1}s", c.sliding, c.wheelspin, c.clutch, c.spin_limit, c.scraping, c.impact, c.hull_hits.len(), r.airborne_s, r.flip_s),
     ];
     for (i, name) in WHEEL_NAMES.iter().enumerate() {
         out.push(format!("  {name} ext {:.2} {} {}", c.wheel_ext[i], if c.wheel_contact[i] { "down" } else { "air " }, mat(c.wheel_mat[i])));
@@ -487,7 +487,7 @@ pub fn lights(g: &mut Gizmos, s: &Scene, eye: Vec3, cars: &[(usize, Mat4)], prop
     for &(mesh, m) in props {
         for h in s.prop_halos.get(mesh).into_iter().flatten() {
             if let Some(p) = seg(g, h, m, ORANGE) {
-                g.sphere(p, PROP_LIGHT_RANGE, [0.6, 0.35, 0.1, 1.0], false);
+                g.sphere(p, PROP_LIGHT_RANGE.get(), [0.6, 0.35, 0.1, 1.0], false);
             }
         }
     }
@@ -497,9 +497,9 @@ pub fn lights(g: &mut Gizmos, s: &Scene, eye: Vec3, cars: &[(usize, Mat4)], prop
             let Some(p) = seg(g, h, m, WHITE) else { continue };
             // view space: the front of a car is -z
             if h.p0.z + h.p1.z < 0.0 {
-                g.arrow(p, fwd * HEADLIGHT_RANGE, [0.9, 0.9, 0.6, 1.0], false);
+                g.arrow(p, fwd * HEADLIGHT_RANGE.get(), [0.9, 0.9, 0.6, 1.0], false);
             } else {
-                g.arrow(p, -fwd * TAIL_LIGHT_RANGE, [0.8, 0.15, 0.1, 1.0], false);
+                g.arrow(p, -fwd * TAIL_LIGHT_RANGE.get(), [0.8, 0.15, 0.1, 1.0], false);
             }
         }
     }

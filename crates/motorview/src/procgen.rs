@@ -9,6 +9,7 @@ pub mod aero;
 pub mod body;
 pub mod bodyfile;
 pub mod cuts;
+pub mod diffuser;
 pub mod exhaust;
 pub mod fill;
 pub mod grass;
@@ -17,10 +18,11 @@ pub mod rimdetail;
 pub mod rimfile;
 pub mod rimplate;
 pub mod smooth;
+pub mod trees;
 pub mod vents;
 pub mod water;
 
-pub use rimdetail::{Lugs, Rivets};
+pub use rimdetail::{Lugs, Rivets, Wire};
 pub use rimplate::WindowPlate;
 
 use crate::scene::Vertex;
@@ -255,6 +257,37 @@ pub fn fit_face(samples: &[([f32; 2], [f32; 2])]) -> Option<[[f32; 3]; 2]> {
     Some([(inv * bu).into(), (inv * bv).into()])
 }
 
+/// How far (in uv, 0..1) a polygon's corner may sit from a candidate map and still agree with it:
+/// about 2 texels of the 64-texel alloys.
+const FIT_AGREE: f32 = 0.03;
+
+/// `fit_face` over the polygons that agree on one map (#356). [O] Some original wheels map half
+/// their face polygons mirrored (the Avalanche's rear-left, `avalanche_vb_obj`: 4 of 8 triangles
+/// flipped in u); the original draws each polygon with its own uvs, but one least-squares map
+/// over both halves cancels the u slope and smears the alloy into stripes. Each polygon's own map
+/// is a candidate; the one the most polygons agree with wins (the first on a tie), then the map
+/// is refitted over those polygons. When every polygon agrees, this is `fit_face` over all.
+pub fn fit_face_consensus(polys: &[Vec<([f32; 2], [f32; 2])>]) -> Option<[[f32; 3]; 2]> {
+    let at = |f: &[[f32; 3]; 2], [y, z]: [f32; 2]| [0, 1].map(|k| f[k][0] * y + f[k][1] * z + f[k][2]);
+    let agrees = |f: &[[f32; 3]; 2], p: &[([f32; 2], [f32; 2])]| p.iter().all(|&(yz, uv)| at(f, yz).iter().zip(uv).all(|(a, b)| (a - b).abs() <= FIT_AGREE));
+    let all: Vec<_> = polys.iter().flatten().copied().collect();
+    let best = polys
+        .iter()
+        .filter_map(|p| fit_face(p))
+        .map(|f| polys.iter().map(|p| agrees(&f, p)).collect::<Vec<bool>>())
+        .fold(None::<Vec<bool>>, |b, m| match b {
+            Some(b) if b.iter().filter(|&&x| x).count() >= m.iter().filter(|&&x| x).count() => Some(b),
+            _ => Some(m),
+        });
+    match best {
+        Some(m) if !m.iter().all(|&x| x) && m.iter().any(|&x| x) => {
+            let kept: Vec<_> = polys.iter().zip(&m).filter(|(_, &k)| k).flat_map(|(p, _)| p.iter().copied()).collect();
+            fit_face(&kept).or_else(|| fit_face(&all))
+        }
+        _ => fit_face(&all),
+    }
+}
+
 /// One profile point of the lathe: distance out along the rim side `o` (half-width at the
 /// tyre wall), radius `r`, and what it is.
 #[derive(Clone, Copy, PartialEq)]
@@ -431,6 +464,8 @@ pub struct RimStyle {
     pub lugs: Option<Lugs>,
     /// rivets round the lip (#337); `None`: none
     pub rivets: Option<Rivets>,
+    /// laced wire spokes from a hub drum to the flange (#386); `None`: none
+    pub wire: Option<Wire>,
     /// the centre cap's outline: 0 round, else a polygon with that many sides (3..=12)
     pub cap_sides: usize,
     /// the centre cap's dome height, × half-width (0 = flat)
@@ -484,16 +519,18 @@ impl Section {
 
 /// A group of identical spokes (#337): `multiple` spokes per base pitch (`RimStyle::spokes`),
 /// turned by `phase` (a fraction of the base pitch). Each spoke runs along its points
-/// `[radius, sweep, offset, width, height]`: radius, offset and width are fractions of the rim
-/// radius, sweep turns the centre line round the axle (radians, + with the spoke angle), offset
-/// moves it sideways, height lifts the top off the dish (× half-width). Points are sorted by
+/// `[radius, sweep, offset, width, height, bank]`: radius, offset and width are fractions of the
+/// rim radius, sweep turns the centre line round the axle (radians, + with the spoke angle), offset
+/// moves it sideways, height lifts the top off the dish (× half-width), bank rolls the
+/// cross-section about the top's centre line (radians, + raises the edge on the + angle side: a
+/// twisted blade, #386). Points are sorted by
 /// radius; `smooth` runs a Hermite curve through them in radius (`curve`), else straight
 /// segments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpokeGroup {
     pub multiple: usize,
     pub phase: f32,
-    pub points: Vec<[f32; 5]>,
+    pub points: Vec<[f32; 6]>,
     pub mirror: Mirror,
     pub section: Section,
     /// wall depth, × half-width
@@ -517,6 +554,8 @@ pub struct SpokeAt {
     /// angle between the spoke's path and the radius, from the sweep alone: the cross-section
     /// turns by it so a swept spoke keeps its width
     pub tilt: f32,
+    /// roll of the cross-section about the top's centre line (radians, #386)
+    pub bank: f32,
 }
 
 impl SpokeAt {
@@ -535,7 +574,7 @@ impl SpokeGroup {
     pub fn from_bar(bar: [f32; 5], depth: f32) -> Self {
         let [f0, f1, bw, o0, o1] = bar;
         let (mirror, o0, o1) = if o1 > 0.0 { (Mirror::Twin, o0, o1) } else { (Mirror::None, 0.0, 0.0) };
-        SpokeGroup { multiple: 1, phase: 0.0, points: vec![[f0, 0.0, o0, bw, 0.0], [f1, 0.0, o1, bw, 0.0]], mirror, section: Section::Flat, depth, smooth: false, onto_lip: false }
+        SpokeGroup { multiple: 1, phase: 0.0, points: vec![[f0, 0.0, o0, bw, 0.0, 0.0], [f1, 0.0, o1, bw, 0.0, 0.0]], mirror, section: Section::Flat, depth, smooth: false, onto_lip: false }
     }
 
     /// A v1 spoke curve: (radius, offset, width) points, smooth, optionally twinned.
@@ -543,7 +582,7 @@ impl SpokeGroup {
         SpokeGroup {
             multiple: 1,
             phase: 0.0,
-            points: points.iter().map(|p| [p[0], 0.0, p[1], p[2], 0.0]).collect(),
+            points: points.iter().map(|p| [p[0], 0.0, p[1], p[2], 0.0, 0.0]).collect(),
             mirror: if twin { Mirror::Twin } else { Mirror::None },
             section: Section::Flat,
             depth,
@@ -580,7 +619,8 @@ impl SpokeGroup {
 
     /// The spoke at `t` (0 root .. 1 tip) of the copy `sign` (`copies`); needs two points. The
     /// radius is linear in t, the rest follows the points. The v1 bars and curves come out bit
-    /// for bit: sweep, lift and tilt are exactly 0 when their columns are.
+    /// for bit: sweep, lift, tilt and bank are exactly 0 when their columns are. The mirrored
+    /// copy (`sign` -1) gets the opposite bank, a true mirror image [design choice].
     pub fn at(&self, t: f32, sign: f32) -> SpokeAt {
         let p = &self.points;
         let (r0, r1) = (p[0][0], p[p.len() - 1][0]);
@@ -597,7 +637,8 @@ impl SpokeGroup {
             (0.0, 0.0)
         };
         let lift = if any(4) { self.column(t, 4) } else { 0.0 };
-        SpokeAt { r, sweep, off: sign * self.column(t, 2), width: self.column(t, 3), lift, tilt }
+        let bank = if any(5) { sign * self.column(t, 5) } else { 0.0 };
+        SpokeAt { r, sweep, off: sign * self.column(t, 2), width: self.column(t, 3), lift, tilt, bank }
     }
 }
 
@@ -618,6 +659,7 @@ impl Default for RimStyle {
             windows: Vec::new(),
             lugs: None,
             rivets: None,
+            wire: None,
             cap_sides: 0,
             cap_dome: 0.0,
             flange: 0.76,
@@ -837,6 +879,10 @@ fn rim_3d(out: &mut Vec<Vertex>, w: &WheelSpec, rim: &Rim, face: WheelFace, rr: 
     if let Some(r) = &st.rivets {
         rimdetail::rivets(out, w.side, rr, &|m| flange.at(m), look.phase, r, metal);
     }
+    // laced wire spokes (#386) from their hub drum into the flange wall
+    if let Some(wr) = &st.wire {
+        rimdetail::wire(out, w, rr, h, top, &|m| flange.at(m), back, st.flange, look.phase, wr, metal);
+    }
     out[first..].iter_mut().for_each(|v| v.env = METAL_ENV);
     let first = out.len();
     let col = [0, 1, 2].map(|i| (st.caliper[i] as f32 * w.scale[i] / 255.0).min(1.0));
@@ -1010,8 +1056,8 @@ fn star(out: &mut Vec<Vertex>, side: f32, rr: f32, top: &dyn Fn(f32) -> f32, pha
 /// The `t` values (0..1 along a bar) it needs: sampled 32 times, thinned so the bar's radius,
 /// offset, width, dished top, sweep (as arc length) and lift stay within `tol`. The top counts
 /// three times, because a chord over the dish stands proud of it and the bars sit only 2 mm
-/// under the star. (The sweep and lift columns come last: zero columns leave the choice of the
-/// v1 bars as it was.) `breaks` are radii (rim fractions) where the dish steps: the samples
+/// under the star. (The sweep, lift and bank columns come last: zero columns leave the choice of
+/// the v1 bars as it was; bank counts as the rise of the spoke's edge.) `breaks` are radii (rim fractions) where the dish steps: the samples
 /// get a pair either side of each.
 fn bar_steps(rr: f32, h: f32, top: &dyn Fn(f32) -> f32, at: &dyn Fn(f32) -> SpokeAt, tol: f32, breaks: &[f32]) -> Vec<f32> {
     const DENSE: usize = 32;
@@ -1027,7 +1073,7 @@ fn bar_steps(rr: f32, h: f32, top: &dyn Fn(f32) -> f32, at: &dyn Fn(f32) -> Spok
         ts.sort_by(f32::total_cmp);
         ts.dedup();
     }
-    let pts: Vec<[f32; 6]> = ts.iter().map(|&t| { let s = at(t); [s.r * rr, s.off * rr, s.width * rr, 3.0 * top(s.r * rr), s.sweep * s.r * rr, s.lift * h] }).collect();
+    let pts: Vec<[f32; 7]> = ts.iter().map(|&t| { let s = at(t); [s.r * rr, s.off * rr, s.width * rr, 3.0 * top(s.r * rr), s.sweep * s.r * rr, s.lift * h, s.bank * s.width * rr * 0.5] }).collect();
     simplify(&pts, tol).into_iter().map(|i| ts[i]).collect()
 }
 
@@ -1077,9 +1123,9 @@ fn spoke_section(sec: Section, hw: f32, depth: f32) -> Vec<(f32, f32, f32, f32)>
 }
 
 /// A spoke across the rim face from base angle `a`; `at(t)` (t 0..1 along it) gives its radius,
-/// sweep, offset, width, lift and tilt (`SpokeAt`) at the `ts` given, `depth` deep, its top
+/// sweep, offset, width, lift, tilt and bank (`SpokeAt`) at the `ts` given, `depth` deep, its top
 /// following the dish `top` less `drop` plus the lift, its cross-section `sec` square to its
-/// path. Both ends are buried (in the star and under the lip ring), unless `cap`: the tip is on
+/// path and rolled by the bank about the top's centre. Both ends are buried (in the star and under the lip ring), unless `cap`: the tip is on
 /// the lip and closed with a flat end.
 #[allow(clippy::too_many_arguments)]
 fn bar(out: &mut Vec<Vertex>, side: f32, rr: f32, h: f32, top: &dyn Fn(f32) -> f32, a: f32, sec: Section, at: &dyn Fn(f32) -> SpokeAt, ts: &[f32], depth: f32, drop: f32, cap: bool, c: [f32; 4]) {
@@ -1092,7 +1138,10 @@ fn bar(out: &mut Vec<Vertex>, side: f32, rr: f32, h: f32, top: &dyn Fn(f32) -> f
         let et = if s.tilt == 0.0 { et } else { et * s.tilt.cos() - er * s.tilt.sin() };
         let r = s.r * rr;
         let hw = s.width * rr * 0.5;
+        // the bank rolls the section about its top centre (u 0, v 0); none: the section as it is
+        let (bs, bc) = s.bank.sin_cos();
         spoke_section(sec, hw, depth).into_iter().map(|(u, v, nu, nv)| {
+            let (u, v, nu, nv) = if s.bank == 0.0 { (u, v, nu, nv) } else { (u * bc - v * bs, u * bs + v * bc, nu * bc - nv * bs, nu * bs + nv * bc) };
             let q = er * r + et * (s.off * rr + u);
             let mut o = top(q.length()) - drop;
             if s.lift != 0.0 {
@@ -1213,7 +1262,7 @@ mod tests {
         for mirror in Mirror::ALL {
             for section in Section::ALL {
                 for smooth in [false, true] {
-                    let g = SpokeGroup { multiple: 2, phase: 0.3, points: vec![[0.2, 0.0, 0.0, 0.08, 0.0], [0.6, 0.4, 0.02, 0.06, 0.05], [0.9, 1.1, 0.03, 0.05, -0.05]], mirror, section, depth: 0.1, smooth, onto_lip: false };
+                    let g = SpokeGroup { multiple: 2, phase: 0.3, points: vec![[0.2, 0.0, 0.0, 0.08, 0.0, 0.0], [0.6, 0.4, 0.02, 0.06, 0.05, 0.0], [0.9, 1.1, 0.03, 0.05, -0.05, 0.0]], mirror, section, depth: 0.1, smooth, onto_lip: false };
                     let style = RimStyle { groups: vec![g.clone()], ..Default::default() };
                     let look = RimLook { spokes: 5, phase: 0.2, metal: [0.8; 3], backing: [[0.1; 3]; BACKING_RINGS] };
                     let v = wheel(&WheelSpec { radius: 0.353, half_width: 0.153, side: 1.0, face: Some(face), rim: Some(Rim { style, look }), scale: [1.0; 3], tyre: None });
@@ -1303,7 +1352,7 @@ mod tests {
         style.barrel.dish_curve = Some(vec![[0.0, 0.34, 0.0], [0.45, 0.26, 0.0], [0.8, 0.2, 1.0], [0.8, 0.05, 1.0], [1.0, 0.03, 0.0]]);
         style.flange = 0.7;
         style.groups[0].onto_lip = true;
-        style.groups[0].points = vec![[0.2, 0.0, 0.0, 0.1, 0.0], [0.99, 0.0, 0.0, 0.07, 0.0]];
+        style.groups[0].points = vec![[0.2, 0.0, 0.0, 0.1, 0.0, 0.0], [0.99, 0.0, 0.0, 0.07, 0.0, 0.0]];
         let v = build_with(style.clone());
         assert_good(&v, "stepped lip");
         let rr = 0.353 * 0.7;
@@ -1318,6 +1367,41 @@ mod tests {
         assert!(onto > band_top(&under) + 0.001, "{onto} {}", band_top(&under));
         assert!(v.len() > under.len());
         println!("stepped lip {} triangles", v.len() / 3);
+    }
+
+    /// #386: banked spokes of every section and mirror build facing out in the original box; a
+    /// positive bank raises the spoke's + side, the mirrored copy is banked the other way; a wire
+    /// wheel builds in the box too
+    #[test]
+    fn banked_spokes_and_wire_build() {
+        for mirror in Mirror::ALL {
+            for section in Section::ALL {
+                let mut g = SpokeGroup { multiple: 1, phase: 0.0, points: vec![[0.2, 0.0, 0.0, 0.1, 0.0, 0.0], [0.6, 0.3, 0.0, 0.09, 0.0, 0.3], [0.9, 0.6, 0.0, 0.08, 0.0, 0.6]], mirror, section, depth: 0.12, smooth: false, onto_lip: false };
+                let banked = build_with(RimStyle { groups: vec![g.clone()], ..Default::default() });
+                assert_good(&banked, &format!("{mirror:?} {section:?}"));
+                assert!((g.at(1.0, 1.0).bank - 0.6).abs() < 1e-6 && (g.at(1.0, -1.0).bank + 0.6).abs() < 1e-6);
+                for p in &mut g.points {
+                    p[5] = 0.0;
+                }
+                assert_ne!(bytemuck::cast_slice::<Vertex, u8>(&banked), bytemuck::cast_slice::<Vertex, u8>(&build_with(RimStyle { groups: vec![g], ..Default::default() })));
+            }
+        }
+        // one flat bar banked by 0.5 rad: its + edge (+ angle side) stands higher than its - edge
+        let at = |bank: f32| {
+            let g = SpokeGroup { multiple: 1, phase: 0.0, points: vec![[0.3, 0.0, 0.0, 0.12, 0.0, bank], [0.9, 0.0, 0.0, 0.12, 0.0, bank]], mirror: Mirror::None, section: Section::Flat, depth: 0.12, smooth: false, onto_lip: false };
+            let mut v = Vec::new();
+            bar(&mut v, 1.0, 0.25, 0.15, &|_| 0.05, 0.0, Section::Flat, &|t| g.at(t, 1.0), &[0.0, 1.0], 0.02, 0.0, false, [1.0; 4]);
+            // the top edges at either side: y = across (a = 0: et = +y), x = height
+            let hi = |s: f32| v.iter().filter(|p| p.pos[1] * s > 0.0).map(|p| p.pos[0]).fold(f32::MIN, f32::max);
+            (hi(1.0), hi(-1.0))
+        };
+        let (flat_p, flat_m) = at(0.0);
+        assert!((flat_p - flat_m).abs() < 1e-6);
+        let (p, m) = at(0.5);
+        assert!(p > flat_p + 0.003 && m < flat_m - 0.003, "{p} {m}");
+        let wire = build_with(RimStyle { groups: Vec::new(), wire: Some(Wire::default()), ..Default::default() });
+        assert_good(&wire, "wire");
+        assert!(wire.len() > build_with(RimStyle { groups: Vec::new(), ..Default::default() }).len() + Wire::default().count * 12 * 3);
     }
 
     /// the plain textured-face wheel stays under its budget, and a straight line / an arc simplify
@@ -1377,5 +1461,25 @@ mod tests {
         let s: Vec<_> = [(0.0, 0.0), (0.3, 0.0), (0.0, 0.3), (-0.2, 0.1)].iter().map(|&(y, z)| ([y, z], f(y, z))).collect();
         let fit = fit_face(&s).unwrap();
         assert!((fit[0][0] + 0.9).abs() < 1e-4 && (fit[0][2] - 0.4).abs() < 1e-4 && (fit[1][1] - 0.8).abs() < 1e-4);
+    }
+
+    /// #356: an octagonal fan with half its triangles mapped mirrored in u (the Avalanche's
+    /// rear-left wheel) fits the first half's map, not a smeared average
+    #[test]
+    fn consensus_fit_skips_mirrored_half() {
+        let good = |y: f32, z: f32| [0.5 - 1.4 * z, 0.5 - 1.4 * y];
+        let flip = |y: f32, z: f32| [0.5 + 1.4 * z, 0.5 - 1.4 * y];
+        let rim: Vec<[f32; 2]> = (0..8).map(|k| { let (s, c) = (k as f32 * std::f32::consts::FRAC_PI_4).sin_cos(); [0.35 * s, 0.35 * c] }).collect();
+        let polys: Vec<Vec<_>> = (0..8)
+            .map(|k| {
+                let map = if k < 4 { good } else { flip };
+                [[0.0, 0.0], rim[k], rim[(k + 1) % 8]].iter().map(|&[y, z]| ([y, z], map(y, z))).collect()
+            })
+            .collect();
+        let fit = fit_face_consensus(&polys).unwrap();
+        assert!((fit[0][1] + 1.4).abs() < 1e-3 && (fit[1][0] + 1.4).abs() < 1e-3, "{fit:?}");
+        // all agreeing: the plain fit
+        let same: Vec<Vec<_>> = polys[..4].to_vec();
+        assert_eq!(fit_face_consensus(&same), fit_face(&same.concat()));
     }
 }

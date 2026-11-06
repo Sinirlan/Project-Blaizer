@@ -65,7 +65,7 @@ impl NameCheat {
 /// buzz aldrin / nasa (`sim_step` `0x481548`): gravity 7.905 (`0x40fcf5c3`) instead of 15.81, half of
 /// it, for every car and prop of the race (#315). `GRAVITY` for every other mode.
 pub fn gravity(cheat: Option<NameCheat>) -> f32 {
-    if cheat == Some(NameCheat::MoonGravity) { crate::world::GRAVITY * 0.5 } else { crate::world::GRAVITY }
+    if cheat == Some(NameCheat::MoonGravity) { crate::world::GRAVITY.get() * 0.5 } else { crate::world::GRAVITY.get() }
 }
 
 /// demon / grem (car init `0x40ced0`, #313): (spring length factor, spring rate factor, damper `SUSP`).
@@ -76,7 +76,7 @@ pub fn suspension(cheat: Option<NameCheat>) -> (f32, f32, f32) {
     match cheat {
         Some(NameCheat::BouncyWheels) => (3.0, 0.16, 21666.0),
         Some(NameCheat::BouncyCars) => (1.2, 0.5, -50000.0),
-        _ => (1.0, 1.0, crate::car::SUSP_DAMP),
+        _ => (1.0, 1.0, crate::car::SUSP_DAMP.get()),
     }
 }
 
@@ -392,8 +392,8 @@ mod tests {
     #[test]
     fn moon_gravity_is_half_and_only_for_nasa() {
         assert_eq!(gravity(NameCheat::of("buzz aldrin", "nasa")), 7.905);
-        assert_eq!(gravity(NameCheat::of("demon", "grem")), crate::world::GRAVITY);
-        assert_eq!(gravity(None), crate::world::GRAVITY);
+        assert_eq!(gravity(NameCheat::of("demon", "grem")), crate::world::GRAVITY.get());
+        assert_eq!(gravity(None), crate::world::GRAVITY.get());
     }
 
     #[test]

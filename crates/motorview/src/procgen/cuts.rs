@@ -276,6 +276,76 @@ pub fn push(faces: &mut [Face], pushes: &[Push]) {
     }
 }
 
+/// REMASTER (#388): a smooth bulge of the finished cage. Every point moves by `by` (m) times
+/// three weights, one per axis: `x` of |x| (the points on the other side move mirrored), `y` of
+/// y, `z` of z, each a table of `(coordinate, weight)` interpolated along a smooth curve with
+/// level ends and held at the first and last weight beyond them; a missing table weighs 1. The
+/// tables bound the bulge: one that falls to 0 at both ends leaves the rest of the car where it
+/// was, so the faces stay welded (the same point always moves the same way). Run after the
+/// refine's cuts, because a cage outline of three corners cannot form an arc: it is the cut
+/// points along it that the bulge carries onto the curve. The Serpent's rear corner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Warp {
+    pub by: [f32; 3],
+    pub x: Vec<[f32; 2]>,
+    pub y: Vec<[f32; 2]>,
+    pub z: Vec<[f32; 2]>,
+}
+
+/// The weight of `v` on a `Warp` table: a cubic Hermite curve through the points, level at the
+/// first and last (so the weight leaves its end value without a kink) and monotone between
+/// two points that agree on their direction, the end values beyond.
+fn table_weight(t: &[[f32; 2]], v: f32) -> f32 {
+    let (Some(first), Some(last)) = (t.first(), t.last()) else { return 1.0 };
+    if v <= first[0] {
+        return first[1];
+    }
+    if v >= last[0] {
+        return last[1];
+    }
+    let i = t.windows(2).position(|w| v < w[1][0]).unwrap_or(t.len() - 2);
+    let (a, b) = (t[i], t[i + 1]);
+    let h = (b[0] - a[0]).max(1e-6);
+    // the slope at a node (Fritsch-Carlson, monotone: no overshoot past a table value): the
+    // weighted harmonic mean of the two secants, 0 at a turn and at the ends
+    let slope = |k: usize| {
+        if k == 0 || k == t.len() - 1 {
+            return 0.0;
+        }
+        let (h0, h1) = (t[k][0] - t[k - 1][0], t[k + 1][0] - t[k][0]);
+        let (d0, d1) = ((t[k][1] - t[k - 1][1]) / h0.max(1e-6), (t[k + 1][1] - t[k][1]) / h1.max(1e-6));
+        if d0 * d1 <= 0.0 {
+            return 0.0;
+        }
+        let (w0, w1) = (2.0 * h1 + h0, h1 + 2.0 * h0);
+        (w0 + w1) / (w0 / d0 + w1 / d1)
+    };
+    let (m0, m1) = (slope(i) * h, slope(i + 1) * h);
+    let s = (v - a[0]) / h;
+    let (s2, s3) = (s * s, s * s * s);
+    (2.0 * s3 - 3.0 * s2 + 1.0) * a[1] + (s3 - 2.0 * s2 + s) * m0 + (3.0 * s2 - 2.0 * s3) * b[1] + (s3 - s2) * m1
+}
+
+/// Apply the warps; the moved faces get their plane normals again.
+pub fn warp(faces: &mut [Face], warps: &[Warp]) {
+    for w in warps {
+        for f in faces.iter_mut() {
+            let mut moved = false;
+            for p in f.pts.iter_mut() {
+                let k = table_weight(&w.x, p[0].abs()) * table_weight(&w.y, p[1]) * table_weight(&w.z, p[2]);
+                if k != 0.0 {
+                    let side = if p[0] < 0.0 { -1.0 } else { 1.0 };
+                    *p = [p[0] + w.by[0] * side * k, p[1] + w.by[1] * k, p[2] + w.by[2] * k];
+                    moved = true;
+                }
+            }
+            if moved {
+                f.normal = newell(&f.pts, Vec3::from(f.normal)).to_array();
+            }
+        }
+    }
+}
+
 /// The y of every cage surface above or below (x, z), highest first.
 pub(super) fn hits(faces: &[Face], x: f32, z: f32) -> Vec<f32> {
     let mut ys: Vec<f32> = Vec::new();
@@ -561,5 +631,35 @@ mod tests {
         let low: Vec<[f32; 3]> = faces.iter().filter(|f| f.rgb == [7; 3]).flat_map(|f| f.pts.iter().copied()).filter(|p| p[1] < 0.6).collect();
         assert_eq!(low.len(), 4 * 2);
         assert!(low.iter().all(|p| (p[1] - 0.49).abs() < 1e-5 && p[0] < 0.21), "{low:?}");
+    }
+
+    /// a table's curve passes its points, leaves its ends level and holds their weights beyond
+    #[test]
+    fn warp_table_is_smooth() {
+        let t = [[0.0, 0.0], [1.0, 1.0], [2.0, 1.0], [3.0, 0.0]];
+        for p in t {
+            assert!((table_weight(&t, p[0]) - p[1]).abs() < 1e-6);
+        }
+        assert_eq!((table_weight(&t, -1.0), table_weight(&t, 9.0)), (0.0, 0.0));
+        assert!(table_weight(&t, 0.01) < 0.01, "level start");
+        assert!((table_weight(&t, 1.5) - 1.0).abs() < 1e-6, "flat between equal weights");
+        assert_eq!(table_weight(&[], 3.0), 1.0);
+    }
+
+    /// two faces sharing an edge: the shared points move alike (still welded), a point beyond
+    /// the tables' weights stays, the other side of the car moves mirrored
+    #[test]
+    fn warp_moves_shared_points_alike() {
+        let p = |x: f32, y: f32, z: f32| [x, y, z];
+        let mut faces = vec![face(&[p(0.4, 0.0, 1.0), p(0.9, 0.0, 1.0), p(0.9, 1.0, 1.0), p(0.4, 1.0, 1.0)], [1; 3]), face(&[p(0.9, 0.0, 1.0), p(0.9, 0.0, 2.0), p(0.9, 1.0, 2.0), p(0.9, 1.0, 1.0)], [2; 3]), face(&[p(-0.9, 0.0, 1.0), p(-0.9, 1.0, 1.0), p(-0.4, 1.0, 1.0)], [3; 3])];
+        let w = Warp { by: [0.1, 0.0, -0.2], x: vec![[0.4, 0.0], [0.8, 1.0], [1.0, 1.0]], y: Vec::new(), z: vec![[-0.5, 0.0], [0.5, 1.0]] };
+        warp(&mut faces, &[w]);
+        // the shared point (0.9, 0, 1) of both faces: weight 1 on every axis
+        assert_eq!(faces[0].pts[1], faces[1].pts[0]);
+        assert!((faces[0].pts[1][0] - 1.0).abs() < 1e-5 && (faces[0].pts[1][2] - 0.8).abs() < 1e-5, "{:?}", faces[0].pts[1]);
+        // x 0.4 weighs 0: stays
+        assert_eq!(faces[0].pts[0], [0.4, 0.0, 1.0]);
+        // the left side: the same bulge, out to the left
+        assert!((faces[2].pts[0][0] + 1.0).abs() < 1e-5 && (faces[2].pts[0][2] - 0.8).abs() < 1e-5, "{:?}", faces[2].pts[0]);
     }
 }

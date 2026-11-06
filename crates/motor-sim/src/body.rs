@@ -12,31 +12,58 @@ use crate::world::RayHit;
 /// Segment test against the track collision mesh (`0x416840`): a -> b.
 pub type Cast<'a> = &'a dyn Fn(Vec3, Vec3) -> Option<RayHit>;
 
-/// Gravity scale of 0x480d44 (`0x4d7f5e`).
-const GRAVITY_SCALE: f32 = 0.87;
-/// Below this height the body freezes (`0x4d7f4e`).
-const FLOOR_Y: f32 = -100.0;
-/// Seconds awake before a body that touches the world goes back to sleep (`0x4d7f56`).
-const SLEEP_AFTER: f32 = 6.0;
-/// Per-second damping (lin, ang) in the air and in contact with the world (`pow`, 0x480d44).
-const DAMP_AIR: (f32, f32) = (0.9, 0.9);
-const DAMP_GROUND: (f32, f32) = (0.02, 0.3);
-/// Push-out overshoot of 0x47f5e8 (`0x4d7f16`).
-const PUSH_OUT: f32 = 1.03;
-/// Push of the car's resting pass 0x47eda0 per (1 - t), and the scale of its y part (`0x4d7ef6`, `0x4d7efe`).
-const POST_PUSH: f32 = 50.0;
-const POST_Y: f32 = 0.2;
-/// Body-vs-body impulse factors (`0x4d7f3e` -2, `0x4d7f46` 0.1).
-const BUMP_RESTITUTION: f32 = 2.0;
-const BUMP_SPIN: f32 = 0.1;
-/// Passes of the world collide per substep.
-const COLLIDE_PASSES: usize = 3;
-/// Separation applied to the prop in 0x480400 (`0x4d7f36`).
-const SEPARATION: f32 = 1.2;
-/// Bounding radius of a car for the sphere test of 0x480400 (rb+0x2c). APPROX [I]: the
-/// original's value was not traced; the test is only an early-out, so a generous one is safe.
-/// Per car `CarParams::radius` (scaled by the gulliver cheat).
-pub(crate) const CAR_RADIUS: f32 = 2.6;
+motor_tune::tunable! {
+    /// Gravity scale of a prop body in 0x480d44 (`0x4d7f5e`) [O].
+    /// range: 0..2
+    GRAVITY_SCALE: f32 = 0.87;
+    /// Below this height a prop body freezes (`0x4d7f4e`) [O].
+    /// range: -1000..0
+    /// unit: m
+    FLOOR_Y: f32 = -100.0;
+    /// Seconds awake before a prop body that touches the world goes back to sleep (`0x4d7f56`) [O].
+    /// range: 0..30
+    /// unit: s
+    SLEEP_AFTER: f32 = 6.0;
+    /// Share of a prop body's linear speed that is left after a second in the air (`pow`, 0x480d44) [O].
+    /// range: 0..1
+    DAMP_AIR_LIN: f32 = 0.9;
+    /// Share of a prop body's spin that is left after a second in the air (`pow`, 0x480d44) [O].
+    /// range: 0..1
+    DAMP_AIR_ANG: f32 = 0.9;
+    /// Share of a prop body's linear speed that is left after a second in contact with the world (`pow`, 0x480d44) [O].
+    /// range: 0..1
+    DAMP_GROUND_LIN: f32 = 0.02;
+    /// Share of a prop body's spin that is left after a second in contact with the world (`pow`, 0x480d44) [O].
+    /// range: 0..1
+    DAMP_GROUND_ANG: f32 = 0.3;
+    /// Push-out overshoot of the world collide 0x47f5e8 (`0x4d7f16`) [O].
+    /// range: 1..1.5
+    PUSH_OUT: f32 = 1.03;
+    /// Push of the car's resting pass 0x47eda0 per (1 - t) (`0x4d7ef6`) [O].
+    /// range: 0..200
+    POST_PUSH: f32 = 50.0;
+    /// The scale of the y part of that resting push (`0x4d7efe`) [O].
+    /// range: 0..1
+    POST_Y: f32 = 0.2;
+    /// Body-vs-body impulse factor: -restitution x closing speed (`0x4d7f3e`, -2) [O].
+    /// range: 0..4
+    BUMP_RESTITUTION: f32 = 2.0;
+    /// Body-vs-body impulse factor: the share of the impulse that turns into spin (`0x4d7f46`) [O].
+    /// range: 0..1
+    BUMP_SPIN: f32 = 0.1;
+    /// Passes of the world collide per substep (our choice).
+    /// range: 1..10
+    COLLIDE_PASSES: usize = 3;
+    /// Separation applied to the prop in 0x480400 (`0x4d7f36`) [O].
+    /// range: 0..3
+    SEPARATION: f32 = 1.2;
+    /// Bounding radius of a car for the sphere test of 0x480400 (rb+0x2c). APPROX [I]: the
+    /// original's value was not traced; the test is only an early-out, so a generous one is safe.
+    /// Per car `CarParams::radius` (scaled by the gulliver cheat).
+    /// range: 1..10
+    /// unit: m
+    pub(crate) CAR_RADIUS: f32 = 2.6;
+}
 
 /// A convex collision hull as the COL files of cars and props store it: planes `n·p + d <= 0`
 /// inside, normals outward (04 §4.9.1, `0x416714`).
@@ -85,7 +112,9 @@ impl Hull {
 #[derive(Clone, Debug)]
 pub struct Body {
     pub mass: f32,
-    /// box inertia, mass/12 * (dy^2+dz², dx²+dz², dx²+dy²) (0x4d48d0 = 1/12)
+    /// box inertia, mass/12 * (dy² + dz, dx² + dz, dx² + dy²) (0x455bf3..0x455c7f, 0x4d48d0 = 1/12):
+    /// the depth dz enters unsquared [O: the loader squares the x minimum instead; an original
+    /// slip, kept]
     inertia: Vec3,
     /// centre of mass: the middle of the MYO bounding box (object space)
     com: Vec3,
@@ -119,7 +148,7 @@ impl Body {
     pub fn new(mass: f32, min: Vec3, max: Vec3, radius: f32) -> Body {
         let d = max - min;
         let hull = std::array::from_fn(|k| Vec3::new(if k & 1 == 0 { min.x } else { max.x }, if k & 2 == 0 { min.y } else { max.y }, if k & 4 == 0 { min.z } else { max.z }));
-        let inertia = mass / 12.0 * Vec3::new(d.y * d.y + d.z * d.z, d.x * d.x + d.z * d.z, d.x * d.x + d.y * d.y);
+        let inertia = mass / 12.0 * Vec3::new(d.y * d.y + d.z, d.x * d.x + d.z, d.x * d.x + d.y * d.y);
         Body { mass, inertia, com: (min + max) * 0.5, hull, radius, shape: Hull::from_box(min, max), id: 0 }
     }
 
@@ -161,7 +190,7 @@ impl Body {
             return;
         }
         let mut touched = [None; 8];
-        for _ in 0..COLLIDE_PASSES {
+        for _ in 0..COLLIDE_PASSES.get() {
             if !self.collide(d, pose, prev, h, cast, &mut touched) {
                 break;
             }
@@ -174,19 +203,19 @@ impl Body {
 
     /// 0x480d44
     fn integrate(&self, d: &mut Dyn, pose: &mut Pose, h: f32, gravity: f32) {
-        if pose.pos.y < FLOOR_Y {
+        if pose.pos.y < FLOOR_Y.get() {
             d.timer = 0.0;
             d.awake = false;
             return;
         }
         let n = d.touched.iter().flatten().count();
         d.timer += h;
-        if d.timer > SLEEP_AFTER && n > 0 {
+        if d.timer > SLEEP_AFTER.get() && n > 0 {
             d.timer = 0.0;
             d.awake = false;
         }
-        d.vel += pose.rot.transpose() * Vec3::new(0.0, -gravity * GRAVITY_SCALE * h, 0.0);
-        let (lin, ang) = if n > 0 { DAMP_GROUND } else { DAMP_AIR };
+        d.vel += pose.rot.transpose() * Vec3::new(0.0, -gravity * GRAVITY_SCALE.get() * h, 0.0);
+        let (lin, ang) = if n > 0 { (DAMP_GROUND_LIN.get(), DAMP_GROUND_ANG.get()) } else { (DAMP_AIR_LIN.get(), DAMP_AIR_ANG.get()) };
         d.vel *= lin.powf(h);
         d.ang *= ang.powf(h);
         advance(d, pose, h);
@@ -221,14 +250,12 @@ impl Body {
     }
 
     /// `0x480400`, a car (A) against this prop (B, the second list): wake the prop, push it out
-    /// of the car, and trade the impulse both ways. Returns whether they overlap.
-    /// Deviations [I]: the separation is capped at the two radii; no impulse when the pair is
-    /// already moving apart; inertia is applied in each body's own frame (the original mixes
-    /// the frames). The lever is the contact point from the prop's origin for both bodies, as
-    /// in the original (so cars spin little).
+    /// of the car, and trade the impulse both ways (`trade`). Returns whether they overlap.
+    /// Deviations [I]: the separation is capped at the two radii; inertia is applied in each
+    /// body's own frame (the original mixes the frames).
     pub fn car_contact(&self, d: &mut Dyn, pose: &mut Pose, car: &mut Car) -> bool {
         let (ra, rb) = (car.rot, pose.rot);
-        let (to_a, to_b) = (ra.transpose(), rb.transpose());
+        let to_b = rb.transpose();
         let off = car.pos - pose.pos;
         if off.length() - car.p.radius() - (self.radius + self.com.length()) > 0.0 {
             return false;
@@ -238,32 +265,51 @@ impl Body {
         let rec = deepest(&Side { hull: &car.p.hull, points: &pts, rot: ra }, &Side { hull: &self.shape, points: &self.hull, rot: rb }, off, dir);
         let Some((t, point, normal)) = rec else { return false };
         d.awake = true;
-        let mut sep = rb * dir * (-t.min(car.p.radius() + self.radius) * SEPARATION);
+        let mut sep = rb * dir * (-t.min(car.p.radius() + self.radius) * SEPARATION.get());
         self.cut(d, &mut sep);
         pose.pos += sep;
         let r = rb * point - sep;
         let mut n = rb * normal;
         self.cut(d, &mut n);
-        let va = ra * car.vel + r.cross(ra * car.ang);
-        let vb = rb * d.vel + r.cross(rb * d.ang);
-        let closing = (va - vb).dot(n);
-        // 0x480400 records the hit for the sound whether or not the pair is closing
-        note_bump(car, self.id, -BUMP_RESTITUTION * closing);
-        if closing >= 0.0 {
-            return true;
-        }
-        let rn = r.cross(n);
-        let acc_a = ra * ((to_a * rn) / car.p.inertia());
-        let acc_b = rb * ((to_b * rn) / self.inertia);
-        let (ma, mb) = (car.p.mass, self.mass);
-        let k = 1.0 / ma + 1.0 / mb + (acc_a.cross(r) + acc_b.cross(r)).dot(n);
-        let j = -BUMP_RESTITUTION * closing / if k > 1e-9 { k } else { 1.0 / ma + 1.0 / mb };
-        car.vel += to_a * (n * (j / ma));
-        car.ang += to_a * (acc_a * (j * BUMP_SPIN));
-        d.vel -= to_b * (n * (j / mb));
-        d.ang -= to_b * (acc_b * (j * BUMP_SPIN));
+        let a = Mover { vel: &mut car.vel, ang: &mut car.ang, rot: ra, inertia: car.p.inertia(), mass: car.p.mass };
+        let b = Mover { vel: &mut d.vel, ang: &mut d.ang, rot: rb, inertia: self.inertia, mass: self.mass };
+        let closing = trade(a, b, r, r - off, n);
+        note_bump(car, self.id, -BUMP_RESTITUTION.get() * closing);
         true
     }
+}
+
+/// One body of a `0x480400` pair: its velocities (own frame), axes, inertia and mass.
+struct Mover<'a> {
+    vel: &'a mut Vec3,
+    ang: &'a mut Vec3,
+    rot: Mat3,
+    inertia: Vec3,
+    mass: f32,
+}
+
+/// `0x480400` step 6: the normal impulse between A and B along `n` (world, out of B). `r` is the
+/// contact point from B's origin, `r_a` the same point from A's origin (world axes). A's point
+/// velocity uses `r_a` (`0x42b960` takes the point into A's frame, 0x4806b0), B's uses `r`, and both
+/// angular terms of the impulse share `r` [O]. Returns the closing speed `(vA - vB)·n` before the
+/// impulse (negative = closing).
+/// No closing test [O 0x48087e..0x480b47]: a pair already moving apart along `n` gets its normal
+/// speed turned back too, which drags a car along when a faster one slides off its corner (#382).
+fn trade(a: Mover, b: Mover, r: Vec3, r_a: Vec3, n: Vec3) -> f32 {
+    let va = a.rot * *a.vel + r_a.cross(a.rot * *a.ang);
+    let vb = b.rot * *b.vel + r.cross(b.rot * *b.ang);
+    let closing = (va - vb).dot(n);
+    let rn = r.cross(n);
+    let acc_a = a.rot * ((a.rot.transpose() * rn) / a.inertia);
+    let acc_b = b.rot * ((b.rot.transpose() * rn) / b.inertia);
+    let inv = 1.0 / a.mass + 1.0 / b.mass;
+    let k = inv + (acc_a.cross(r) + acc_b.cross(r)).dot(n);
+    let j = -BUMP_RESTITUTION.get() * closing / if k > 1e-9 { k } else { inv };
+    *a.vel += a.rot.transpose() * (n * (j / a.mass));
+    *a.ang += a.rot.transpose() * (acc_a * (j * BUMP_SPIN.get()));
+    *b.vel -= b.rot.transpose() * (n * (j / b.mass));
+    *b.ang -= b.rot.transpose() * (acc_b * (j * BUMP_SPIN.get()));
+    closing
 }
 
 /// rb+0x08 := 1, rb+0x0c := the other body's id, rb+0x734 := max(.., `impact`) (0x480400 step 6).
@@ -318,12 +364,11 @@ fn deepest(a: &Side, b: &Side, off: Vec3, dir: Vec3) -> Option<(f32, Vec3, Vec3)
 /// `0x480400`, car A against car B (the first list): the same hull test and impulse as against
 /// a prop, but the separation is shared, B.pos += S/2 and A.pos -= S/2. Both cars' inertia is
 /// the stock `INERTIA` (`CarParams::inertia`, scaled by the gulliver cheat); B's cut planes are the track normals its hull touched last substep.
-/// Deviations [I]: unordered pairs (the original visits (A,B) and (B,A); after the first the
-/// overlap is gone), no impulse when the pair is already moving apart, separation capped at
-/// the two radii. Returns whether the hulls overlap.
+/// The caller visits ordered pairs, (A,B) and later (B,A), like the original (`Race::world_step`).
+/// Deviation [I]: the separation is capped at the two radii. Returns whether the hulls overlap.
 pub fn car_pair(a: &mut Car, b: &mut Car) -> bool {
     let (ra, rb) = (a.rot, b.rot);
-    let (to_a, to_b) = (ra.transpose(), rb.transpose());
+    let to_b = rb.transpose();
     let off = a.pos - b.pos;
     let reach = a.p.radius() + b.p.radius();
     if off.length() > reach {
@@ -333,32 +378,19 @@ pub fn car_pair(a: &mut Car, b: &mut Car) -> bool {
     let (pa, pb) = (a.body_points(), b.body_points());
     let rec = deepest(&Side { hull: &a.p.hull, points: &pa, rot: ra }, &Side { hull: &b.p.hull, points: &pb, rot: rb }, off, dir);
     let Some((t, point, normal)) = rec else { return false };
-    let mut sep = rb * dir * (-t.min(reach) * SEPARATION);
+    let mut sep = rb * dir * (-t.min(reach) * SEPARATION.get());
     cut_planes(b.hull_hits.iter().map(|h| h.0), &mut sep);
     b.pos += sep * 0.5;
     a.pos -= sep * 0.5;
     let r = rb * point - sep;
     let mut n = rb * normal;
     cut_planes(b.hull_hits.iter().map(|h| h.0), &mut n);
-    let va = ra * a.vel + r.cross(ra * a.ang);
-    let vb = rb * b.vel + r.cross(rb * b.ang);
-    let closing = (va - vb).dot(n);
+    let ma = Mover { vel: &mut a.vel, ang: &mut a.ang, rot: ra, inertia: a.p.inertia(), mass: a.p.mass };
+    let mb = Mover { vel: &mut b.vel, ang: &mut b.ang, rot: rb, inertia: b.p.inertia(), mass: b.p.mass };
+    let closing = trade(ma, mb, r, r - off, n);
     // both cars hear it, as an id-0 body [I]
-    note_bump(a, 0, -BUMP_RESTITUTION * closing);
-    note_bump(b, 0, -BUMP_RESTITUTION * closing);
-    if closing >= 0.0 {
-        return true;
-    }
-    let rn = r.cross(n);
-    let acc_a = ra * ((to_a * rn) / a.p.inertia());
-    let acc_b = rb * ((to_b * rn) / b.p.inertia());
-    let (ma, mb) = (a.p.mass, b.p.mass);
-    let k = 1.0 / ma + 1.0 / mb + (acc_a.cross(r) + acc_b.cross(r)).dot(n);
-    let j = -BUMP_RESTITUTION * closing / if k > 1e-9 { k } else { 1.0 / ma + 1.0 / mb };
-    a.vel += to_a * (n * (j / ma));
-    a.ang += to_a * (acc_a * (j * BUMP_SPIN));
-    b.vel -= to_b * (n * (j / mb));
-    b.ang -= to_b * (acc_b * (j * BUMP_SPIN));
+    note_bump(a, 0, -BUMP_RESTITUTION.get() * closing);
+    note_bump(b, 0, -BUMP_RESTITUTION.get() * closing);
     true
 }
 
@@ -387,8 +419,26 @@ pub(crate) struct WorldImpact {
     pub metric: f32,
 }
 
-/// Extra inertia of a car in `0x47f5e8` (`0x4d7f06`, `0x4d7f0e`).
-const CAR_INERTIA_ADD: Vec3 = Vec3::new(2000.0, 3000.0, 2000.0);
+// Extra inertia of a car in `0x47f5e8` (`0x4d7f06`, `0x4d7f0e`) [O]: one vector in the original, three numbers here.
+motor_tune::tunable! {
+    /// Extra inertia a car has in the world collide about its x axis, times the car's size.
+    /// range: 0..10000
+    /// unit: kg m²
+    CAR_INERTIA_ADD_X: f32 = 2000.0;
+    /// Extra inertia a car has in the world collide about its y axis, times the car's size.
+    /// range: 0..10000
+    /// unit: kg m²
+    CAR_INERTIA_ADD_Y: f32 = 3000.0;
+    /// Extra inertia a car has in the world collide about its z axis, times the car's size.
+    /// range: 0..10000
+    /// unit: kg m²
+    CAR_INERTIA_ADD_Z: f32 = 2000.0;
+}
+
+/// The extra inertia of a car (`CAR_INERTIA_ADD_X`, `_Y`, `_Z`).
+fn car_inertia_add() -> Vec3 {
+    Vec3::new(CAR_INERTIA_ADD_X.get(), CAR_INERTIA_ADD_Y.get(), CAR_INERTIA_ADD_Z.get())
+}
 
 /// `0x47f5e8(rb, col, h)`: one pass. Every hull point is tested from where it was at the start of
 /// the substep (`prev`) to where it is; the hit with the smallest t (under 1.1) is pushed out and
@@ -415,9 +465,9 @@ pub(crate) fn world_collide(rb: &CollideBody, vel: &mut Vec3, ang: &mut Vec3, po
     let n = pose.rot.transpose() * hit.normal;
     let r = rb.points[k] - rb.com;
     let vp = *vel + ang.cross(r);
-    let inertia = if rb.car { rb.inertia + CAR_INERTIA_ADD * rb.scale } else { rb.inertia };
+    let inertia = if rb.car { rb.inertia + car_inertia_add() * rb.scale } else { rb.inertia };
     let acc = r.cross(n) / inertia;
-    pose.pos += hit.normal * ((b - a).dot(hit.normal) * (hit.t - 1.0) * PUSH_OUT);
+    pose.pos += hit.normal * ((b - a).dot(hit.normal) * (hit.t - 1.0) * PUSH_OUT.get());
     let closing = vp.dot(n);
     let impulse = -closing / (1.0 / rb.mass + acc.cross(r).dot(n));
     if rb.car || closing < 0.0 {
@@ -464,8 +514,8 @@ pub(crate) fn world_post(points: &[Vec3], vel: &mut Vec3, pose: &mut Pose, prev:
         if vel.y > 0.0 {
             vel.y *= k2;
         }
-        let mut out = n * ((1.0 - hit.t) * POST_PUSH);
-        out.y *= POST_Y * k2;
+        let mut out = n * ((1.0 - hit.t) * POST_PUSH.get());
+        out.y *= POST_Y.get() * k2;
         acc += out;
     }
     pose.pos += pose.rot * (acc * h);

@@ -11,9 +11,40 @@
 # sills 13 / 15, the rear panel 145-160, the bonnet and roof stripes, the wing's middle), white
 # 230 230 230 (24: the stripes' edges, the wing), a black line along the flank 172 / 208.
 # Textured parts that stay as in the original until the Full body: Newlog 110 / 114 / 121 (the
-# banner over the windscreen), Grill1 196 (between the tail lamps), the rear wing (43 44,
-# 58-63, 168 203 204), Underred (the underside).
-Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0 centre=0.003
+# banner over the windscreen), Underred (the underside). Grill1 196 (between the tail lamps)
+# and the rear wing (43 44, 58-63, 168 203 204) are rebuilt below (#177 phase 3).
+#
+# [O] At rest the front tyre (r 0.353, hub y 0.389, z 1.18) tops out at 0.742, above the
+# original's flat arch top (0.700): the original fills its arches. The bonnet over the wheel is
+# low: 0.758 at |x| 0.53 (the tunnel's inner wall), the fender crease (0.833 0.781 1.238) falls
+# to 0.680 at z 1.517. A round arch with 3.5 cm of gap and the 2 cm lip peaked at 0.797, through
+# the bonnet (2 cm) and over the crease (#177 phase 2). Like the Titan: the body drawn 2.5 cm up
+# on its wheels and a 2.5 cm gap, so the tunnel stays 1.5 cm under the bonnet and the lip at
+# least 1.5 cm under the crease (tightest at z 1.33).
+Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.025 arch_lip=0.02 drop=-0.025 centre=0.003
+# [O] The rear arch tunnel's rims end on the underside at z -1.953, the outer rim at y 0.253
+# (x 0.808), the inner at y 0.261 (x 0.504, the edge between them slopes 8 mm across): on the
+# circle the two ends lie 0.0216 rad apart, over the 0.02 the rounding allows, so the rear arch
+# stayed the original's angular trapezoid (#177 phase 3). The inner end moved down onto the
+# outer one's height (on the underside, out of sight). The front ends (z -0.961) differ by 4 mm
+# (outer y 0.152, inner 0.148: 0.013 rad, within the limit), which collapsed the tunnel strip's
+# first quad into 2 non-manifold edges at the left arch's foot; the inner end moved up to match.
+Push lo=0.49,0.256,-1.96 hi=0.52,0.266,-1.946 by=0,-0.0079,0
+Push lo=0.52,0.143,-0.97 hi=0.54,0.153,-0.95 by=0,0.0041,0
+# The right front arch's rear foot (z 0.764) has the same 4 mm step (outer y 0.152, inner 0.148),
+# which collapsed the tunnel strip's first quad into a 0.5 mm non-manifold edge there (#393).
+Push lo=0.52,0.143,0.75 hi=0.54,0.153,0.78 by=0,0.0041,0
+# Each headlight housing's rear top corner (0.869 0.517 1.510) lies where the front arch's lip
+# circle crosses the housing's top edge; the cut left a 4.5 mm lamp-housing sliver on four faces
+# (non-manifold, #393). 4 mm lower the cut falls clear (the neighbours 2-3 mm and 5 mm behave
+# differently: the cut is not smooth in the corner, so re-check the mesh after moving it).
+Push lo=0.86,0.51,1.50 hi=0.875,0.52,1.52 by=0,-0.004,0
+# [O] Behind the rear arch's top, the side panel 2 and the black line 169 under it meet the
+# tunnel's rim edge (0.886 0.729 -1.545)-(0.886 0.586 -1.745) at a corner (0.886 0.608 -1.736)
+# 1.3 cm off it (0.92 along), too far to count as a rim T-junction (`RIM_T`, 5 mm): rounded, the
+# rim followed the circle and the two panels' edges cut across it, an open slit along the back
+# of the arch (#177 phase 3). The corner moved onto the rim edge, so it moves with the rim.
+Push lo=0.87,0.603,-1.741 hi=0.89,0.613,-1.731 by=0,-0.0107,0.0077
 
 # [O] the mirror glass is the grey 126 126 126 quad on the back of each housing (48 / 195,
 # |x| 0.73-0.97, y 0.817-0.921, z 0.475-0.557)
@@ -51,6 +82,30 @@ Vent from=0,0,0 lo=0,0.39,-2.14 hi=0.73,0.56,-2.02 rgb=3,3,6 frame=0.01 inset=0.
 # [O] the engine cover behind the rear window is a near-black 13 13 13 panel (56 / 57, |x| < 0.49,
 # y 0.918-0.946, z -1.898..-1.257, facing up): louvres
 Vent from=13,13,13 lo=0,0.9,-1.91 hi=0.5,0.96,-1.24 rgb=3,3,7 frame=0.01 inset=0.025 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.02 tilt=0
+# [O] the Grill1 panel between the tail lamps, 196 (tag 45 43 40, |x| < 0.42, y 0.824-0.918,
+# z -2.001..-1.898, n 0 0.74 -0.67: 48 deg, facing back and up), between the lamps' lenses and
+# under the engine cover. Design choice (#177 phase 3, the user's request "slats like on
+# Serpent"): the Serpent's louvred vent, repainted in the vent faces' black look first so the
+# vent picks it, its slats leaning 45 deg down from upright on the panel.
+Paint from=45,43,40 lo=0,0.82,-2.01 hi=0.42,0.92,-1.89 like=0,0,0
+Vent from=0,0,0 lo=0,0.82,-2.01 hi=0.42,0.92,-1.89 rgb=3,3,8 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=45
 
-# Every edge cut and every face remeshed at 4 cm, like the other base bodies.
-Refine step=0.04
+# [O] the rear wing: a wedge over the deck, not joined to it, white 230 230 230 with an orange
+# 255 112 0 stripe down its middle (|x| < 0.36-0.38, the stripe edge slanting out to the back):
+# top 58 / 59 / 60, back 61 / 62 / 63, underside 168 / 203 / 204, the tips' side walls 43 / 44.
+# Leading edge (0 1.027 -1.598) (0.359 1.027 -1.598), swept forward to the tip (0.704 1.013
+# -1.495); the back 4.3 cm thick, from y 1.058 at z -1.800 down to 1.015 at z -1.853 (the tip
+# (0.741 1.044/1.001 -1.680/-1.733)); 8-11 cm over the deck (the blue 183 at y 0.90-0.92 and
+# the engine cover). x about the car's middle (`centre`). Design choice (#177 phase 3, the
+# user's "the rear wing is hanging in the air"): the Serpent's aerofoil on the same outline
+# (the tip cut flat at x 0.71, its chord there 25 cm), 12 % thick with a downforce camber, its
+# trailing edge 1 cm over its leading edge, at the original's height; the stripe kept (the
+# strips of the loft take the look of the cage face over them); a strut a side at x 0.55, on
+# the blue deck clear of the louvred engine cover.
+Foil from=230,230,230;255,112,0 lo=0,0.99,-1.86 hi=0.75,1.07,-1.49 le=0,1.027,-1.598;0.359,1.027,-1.598;0.71,1.013,-1.493 te=0,1.037,-1.853;0.378,1.037,-1.853;0.71,1.023,-1.743 thickness=0.12 camber=-0.03 step=0.025 struts=0.55,0.5 strut_chord=0.12 strut_width=0.014
+
+# Every edge cut and every face remeshed at 4 cm, like the other base bodies. `seams=1` (#177
+# phase 2): [O] the bonnet slot 34 meets the nose with one edge against three (199 / 219 / 164,
+# corners at x -0.264 and 0.271; the slot's back edge the same against 37 / 39 / 40); cut evenly
+# each way, the seam paired in stretches and tore in notches along the slot's front edge.
+Refine step=0.04 seams=1

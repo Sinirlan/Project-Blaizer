@@ -628,6 +628,11 @@ pub enum RowGap {
     Dashes,
 }
 
+/// The gap colours: ahead of the reference green, behind it red (the checkpoint list, the sector delta).
+const GAP_GREEN: u32 = 0x9ff5c2;
+const GAP_RED: u32 = 0xff8a7a;
+const WHITE_HEX: u32 = 0xffffff;
+
 impl RowGap {
     /// The cell's text: `-0.678`, `+1:05.204`, `-1 LAP`, `+2 LAPS`, `--.---`.
     pub fn text(self) -> String {
@@ -641,9 +646,7 @@ impl RowGap {
     /// The checkpoint list: green ahead of you, red behind. The live gaps (`live`, #302, the user's choice): red for the
     /// car ahead (it is beating you), green for the car behind. Plain on a tie, dim for dashes.
     fn colour(self, live: bool) -> u32 {
-        const GREEN: u32 = 0x9ff5c2;
-        const RED: u32 = 0xff8a7a;
-        let (ahead, behind) = if live { (RED, GREEN) } else { (GREEN, RED) };
+        let (ahead, behind) = if live { (GAP_RED, GAP_GREEN) } else { (GAP_GREEN, GAP_RED) };
         match self {
             RowGap::Ms(x) if x < 0 => ahead,
             RowGap::Ms(x) if x > 0 => behind,
@@ -758,7 +761,11 @@ pub fn splits(b: &mut Batch, d: Glass, s: &Splits) {
 /// A centre message; they stack from the top, none over another.
 pub enum Msg {
     /// BEST LAP (orange) or LAST LAP (white) with the lap time; `pb` adds the PB pill
-    Lap { best: bool, ms: u32, pb: bool },
+    /// `delta` = ms against the best earlier lap of the race (REMASTER sector delta), negative = faster
+    Lap { best: bool, ms: u32, pb: bool, delta: Option<i64> },
+    /// REMASTER sector delta: SECTOR n with only the delta of the time so far this lap against the best earlier lap's
+    /// split at the same checkpoint, negative = faster
+    Sector { n: u32, delta: i64 },
     /// the notice when the last lap starts
     FinalLap,
     /// FINISHED p / n over LAST LAP and RACE TIME
@@ -789,17 +796,21 @@ pub fn messages(b: &mut Batch, d: Glass, msgs: &[Msg]) {
     let mut y = MSG_TOP;
     for m in msgs {
         let h = match m {
-            Msg::Lap { best, ms, pb } => {
+            Msg::Lap { best, ms, pb, delta } => {
                 let (label, col) = if *best { ("BEST LAP", G_ORANGE) } else { ("LAST LAP", 0xffffff) };
-                title(b, d, y, label, col, Some(glass_time(*ms)), *pb);
+                title(b, d, y, label, col, Some(glass_time(*ms)), *delta, *pb);
+                msg_title_h()
+            }
+            Msg::Sector { n, delta } => {
+                title(b, d, y, &format!("SECTOR {n}"), 0xffffff, None, Some(*delta), false);
                 msg_title_h()
             }
             Msg::FinalLap => {
-                title(b, d, y, "FINAL LAP", G_ORANGE, None, false);
+                title(b, d, y, "FINAL LAP", G_ORANGE, None, None, false);
                 msg_title_h()
             }
             Msg::Eliminated => {
-                title(b, d, y, "ELIMINATED", G_ORANGE, None, false);
+                title(b, d, y, "ELIMINATED", G_ORANGE, None, None, false);
                 msg_title_h()
             }
             Msg::Notice(text) => {
@@ -807,7 +818,7 @@ pub fn messages(b: &mut Batch, d: Glass, msgs: &[Msg]) {
                 normal_line(HudFont::Glass, NOTE_PX)
             }
             Msg::Finished { pos, of, last, total } => {
-                title(b, d, y, &format!("FINISHED {pos} / {of}"), G_ORANGE, None, false);
+                title(b, d, y, &format!("FINISHED {pos} / {of}"), G_ORANGE, None, None, false);
                 sub(b, d, y + msg_title_h() + MSG_SUB_GAP, &[("LAST LAP", glass_time(*last)), ("RACE TIME", glass_time(*total))]);
                 msg_title_h() + MSG_SUB_GAP + msg_sub_h()
             }
@@ -816,15 +827,19 @@ pub fn messages(b: &mut Batch, d: Glass, msgs: &[Msg]) {
     }
 }
 
-/// `.cmsg` at design y `y`: the label, then (`.num`, margin 16) the time in white and (`.tag-v`, margin 14) the PB pill.
-fn title(b: &mut Batch, d: Glass, y: f32, label: &str, col: u32, time: Option<String>, pb: bool) {
+/// `.cmsg` at design y `y`: the label, then (`.num`, margin 16) the time in white, (margin 16) the delta in green
+/// (faster) or red (slower) and (`.tag-v`, margin 14) the PB pill.
+#[allow(clippy::too_many_arguments)]
+fn title(b: &mut Batch, d: Glass, y: f32, label: &str, col: u32, time: Option<String>, delta: Option<i64>, pb: bool) {
     let st = d.font(HudFont::Glass, 30.0, 3.0, hex(col, 1.0));
     let em = d.d(30.0);
     let tag = d.font(HudFont::Glass, 10.0, 1.5, hex(G_ORANGE, 1.0));
     let tag_w = b.font_width(HudFont::Glass, "PB", &tag) + d.d(18.0);
     let lw = b.font_width(HudFont::Glass, label, &st);
     let tw = time.as_ref().map_or(0.0, |t| mono_width(t, em));
-    let total = lw + time.as_ref().map_or(0.0, |_| d.d(16.0) + tw) + if pb { d.d(14.0) + tag_w } else { 0.0 };
+    let gap = delta.map(|ms| (glass_gap(ms), if ms < 0 { GAP_GREEN } else if ms > 0 { GAP_RED } else { WHITE_HEX }));
+    let gw = gap.as_ref().map_or(0.0, |(t, _)| d.d(16.0) + mono_width(t, em));
+    let total = lw + time.as_ref().map_or(0.0, |_| d.d(16.0) + tw) + gw + if pb { d.d(14.0) + tag_w } else { 0.0 };
     let x = d.cw * 0.5 - total * 0.5;
     let top = d.cap_top(HudFont::Glass, 30.0, d.t(y), None);
     let glow = if col == G_ORANGE { [1.0, 154.0 / 255.0, 60.0 / 255.0, 0.3] } else { [190.0 / 255.0, 230.0 / 255.0, 1.0, 0.26] };
@@ -843,6 +858,14 @@ fn title(b: &mut Batch, d: Glass, y: f32, label: &str, col: u32, time: Option<St
         mono(b, HudFont::Clock, t, cx, ty + d.d(2.0), &FontStyle { color: [0.0, 0.0, 0.0, 0.4], ..num }, em);
         mono(b, HudFont::Clock, t, cx, ty, &num, em);
         cx += tw;
+    }
+    if let Some((t, c)) = &gap {
+        cx += d.d(16.0);
+        let ty = d.cap_above(HudFont::Clock, 30.0, top + st.size);
+        let num = d.font(HudFont::Clock, 30.0, 0.0, hex(*c, 1.0));
+        mono(b, HudFont::Clock, t, cx, ty + d.d(2.0), &FontStyle { color: [0.0, 0.0, 0.0, 0.4], ..num }, em);
+        mono(b, HudFont::Clock, t, cx, ty, &num, em);
+        cx += mono_width(t, em);
     }
     if pb {
         // `.tag-v`: 18 tall, r 7, 1 px orange .6 rim over `--tag-back`, raised 6

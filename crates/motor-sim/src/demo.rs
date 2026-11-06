@@ -129,6 +129,12 @@ pub fn race_ms(race: &Race) -> f64 {
     }
 }
 
+/// `race_ms` of the drawn view (#374): on the fixed tick the cars are drawn up to one tick behind the race clock, so a
+/// recorded car posed for drawing is looked up that much earlier. `race_ms` on the per-frame path.
+pub fn view_ms(race: &Race) -> f64 {
+    race_ms(race) - race.view_lag() as f64 * 1000.0
+}
+
 /// Writes records while a race runs (Record race): one every `RECORD_MS` of race time.
 pub struct DemoRecorder {
     mde: Mde,

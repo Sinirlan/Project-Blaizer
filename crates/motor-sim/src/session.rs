@@ -17,8 +17,48 @@ pub const COUNTDOWN: f32 = 12.0;
 pub const COUNT_DIGIT: f32 = 2.0;
 /// Seconds of the countdown that are the digits (the rest is the fly-by).
 pub const COUNT_DIGITS_S: f32 = 3.0 * COUNT_DIGIT;
-/// Reset a car that has had <= 1 wheel down (or been upside down) this long (0x40d854, 8 s).
-pub const RESET_AFTER: f32 = 8.0;
+motor_tune::tunable! {
+    /// Reset a car that has had too few wheels down this long (0x40d854, 0x4cf4a3) [O]: fewer than
+    /// 2, or 2 that are not the wheels of one side; the time holds with a side pair and clears with 3 or 4.
+    /// range: 1..60
+    /// unit: s
+    RESET_AFTER: f32 = 8.0;
+    /// Reset a car that has touched the world upside down (c[0xa4], up.y < -0.5) for this long in
+    /// total since it last had 3 wheels down (0x40d854, 0x4cf49b) [O], #368.
+    /// range: 0.5..60
+    /// unit: s
+    FLIP_RESET_AFTER: f32 = 2.0;
+}
+
+/// The timer part of the reset check `0x40d854`, once per frame: `wheel_s` (c[0xc4]) and `flip_s`
+/// (c[0xc0]) after this frame; `reset_due` says whether they reset the car. `wheels` = on ground FL, FR, BR, BL
+/// (P+0x134..0x140), `flip` = c[0xa4] (`Car::flip_contact`). The frame time is capped at 0.5 s.
+// CLASSIC 0x40d854
+pub fn reset_timers(wheel_s: f32, flip_s: f32, wheels: [bool; 4], flip: bool, dt: f32) -> (f32, f32) {
+    let dt = if dt > 0.5 { 0.5 } else { dt };
+    let mut flip_s = flip_s;
+    if flip {
+        flip_s += dt;
+    }
+    if flip_s > FLIP_RESET_AFTER.get() {
+        return (wheel_s, flip_s);
+    }
+    let n = wheels.iter().filter(|&&w| w).count();
+    let side_pair = (wheels[0] && wheels[3]) || (wheels[1] && wheels[2]); // FL+BL, FR+BR (0x40d8d9..0x40d8f7)
+    let mut wheel_s = wheel_s;
+    if n < 2 || (n == 2 && !side_pair) {
+        wheel_s += dt;
+    }
+    if n > 2 {
+        (wheel_s, flip_s) = (0.0, 0.0);
+    }
+    (wheel_s, flip_s)
+}
+
+/// 0x40d854 returns 0 (reset) when either timer is past its limit.
+pub fn reset_due(wheel_s: f32, flip_s: f32) -> bool {
+    flip_s > FLIP_RESET_AFTER.get() || wheel_s > RESET_AFTER.get()
+}
 
 /// A driver from League/Profiles/*.adp (or the human player).
 #[derive(Debug, Clone, Default)]
@@ -43,8 +83,10 @@ pub struct Driver {
 pub struct Racer {
     pub car_id: u32,
     pub driver: Driver,
-    /// seconds with <= 1 wheel down or upside down (0x40d854: reset after 8 s)
+    /// c[0xc4]: seconds with too few wheels down (`reset_timers`, 0x40d854: reset after 8 s)
     pub airborne_s: f32,
+    /// c[0xc0]: seconds upside down against the world (`reset_timers`, 0x40d854: reset after 2 s)
+    pub flip_s: f32,
     /// AI stuck timer (0x40d854 +0xbc/+0xf8): armed by the reverse manoeuvre, cleared above
     /// 15 m/s, reset after 8 s
     stuck: Option<f32>,
@@ -69,6 +111,7 @@ pub struct Racer {
 #[derive(Clone)]
 struct RacerState {
     airborne_s: f32,
+    flip_s: f32,
     stuck: Option<f32>,
     car: Car,
     progress: Progress,
@@ -85,6 +128,8 @@ pub struct Snapshot {
     clock_ms: f64,
     ai_vector: [f32; 11],
     props: crate::props::PropState,
+    acc: f32,
+    prev: Vec<ViewPose>,
 }
 
 /// Which AI parameter row of the .trk a race uses.
@@ -145,17 +190,73 @@ pub struct Race {
     /// the original's driver/team name cheat of this race (`cheats::NameCheat::of`, 08 §8.14); set by
     /// the caller when the race is handed over, rebuilt for every race, never saved, not in snapshots
     pub name_cheat: Option<crate::cheats::NameCheat>,
+    /// diagnosis (aicompare, #381): the other cars collide with the remote cars too. A remote car is posed from outside
+    /// every frame, so it pushes the others and keeps its recorded motion. Off in the game (Ghost mode's cars are ghosts)
+    pub solid_remote: bool,
     /// the spring length and rate factors the cars are at (demon / grem, #313; (1, 1) = as loaded)
     susp: (f32, f32),
+    /// design choice (#374): the fixed physics tick in seconds (`set_fixed_tick`); `None` steps once per rendered
+    /// frame like the original (0x4814ac), whose damper then follows the frame rate
+    tick_s: Option<f32>,
+    /// the same tick as `set_fixed_tick` was given it, in Hz (`fixed_hz`: the replay header keeps it exactly)
+    tick_hz: Option<f32>,
+    /// real time stepped on the fixed tick minus the frames' time, seconds, in (-tick, 0] after a frame: the ticks run
+    /// up to the frame's end and the view is drawn `-acc` before the latest tick
+    acc: f32,
+    /// the cars' view poses at the start of the latest tick (`view_pose`); empty = the current poses
+    prev: Vec<ViewPose>,
+    /// how many ticks the latest `step_as` ran (the variable path: always 1)
+    ticks_last_frame: u32,
 }
 
-/// CHEAT gulliver (ours, 08 §8.14): the cars' size while the cheat is on.
-pub const GULLIVER_SCALE: f32 = 0.2;
-/// CHEAT gulliver: the human's car turns, rolls and pitches like a car of this size
-/// (`CarParams::scaled`; 1.0 = the full-size response, `GULLIVER_SCALE` = a car scaled for real)
-/// [design choice]. AI cars keep 1.0: the game's AI steers for the full-size response, and at
-/// 0.6 its races took 10-35 % longer with resets (motorrace, #140).
-pub const GULLIVER_FEEL: f32 = 0.6;
+/// What the renderer draws of a car, between two physics ticks (`Race::view_pose`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewPose {
+    pub pos: Vec3,
+    pub rot: glam::Mat3,
+    pub wheel_ext: [f32; 4],
+    pub steer_smooth: f32,
+}
+
+impl ViewPose {
+    pub fn of(car: &Car) -> ViewPose {
+        ViewPose { pos: car.pos, rot: car.rot, wheel_ext: car.wheel_ext, steer_smooth: car.steer_smooth }
+    }
+
+    /// `self` at t = 0, `b` at t = 1: positions, wheels and steering lerped, the rotation slerped.
+    pub fn lerp(&self, b: &ViewPose, t: f32) -> ViewPose {
+        let (qa, qb) = (glam::Quat::from_mat3(&self.rot), glam::Quat::from_mat3(&b.rot));
+        ViewPose {
+            pos: self.pos.lerp(b.pos, t),
+            rot: glam::Mat3::from_quat(qa.slerp(qb, t)),
+            wheel_ext: std::array::from_fn(|i| self.wheel_ext[i] + (b.wheel_ext[i] - self.wheel_ext[i]) * t),
+            steer_smooth: self.steer_smooth + (b.steer_smooth - self.steer_smooth) * t,
+        }
+    }
+}
+
+motor_tune::tunable! {
+    /// Design choice (#374): the fixed physics tick of the game, ticks per second. 60 Hz is the game's per-frame
+    /// stepping at 60 fps exactly; the damper keeps its 1/90 s scaling (`SUSP_DAMP_REF_H3`), the original's ~30 fps feel.
+    /// range: 30..240
+    /// unit: Hz
+    /// applies: restart
+    pub PHYSICS_HZ: f32 = 60.0;
+}
+
+motor_tune::tunable! {
+    /// CHEAT gulliver (ours, 08 §8.14): the cars' size while the cheat is on. A race takes it when the cheat is set.
+    /// range: 0.05..1
+    /// applies: restart
+    pub GULLIVER_SCALE: f32 = 0.2;
+    /// CHEAT gulliver: the human's car turns, rolls and pitches like a car of this size
+    /// (`CarParams::scaled`; 1.0 = the full-size response, `GULLIVER_SCALE` = a car scaled for real)
+    /// [design choice]. AI cars keep 1.0: the game's AI steers for the full-size response, and at
+    /// 0.6 its races took 10-35 % longer with resets (motorrace, #140).
+    /// range: 0.05..1
+    /// applies: restart
+    pub GULLIVER_FEEL: f32 = 0.6;
+}
 
 /// The AI parameter vector of a race (04 §4.3): the .trk's AI1..AI3 by difficulty, or AID0..AID3
 /// by division; the defaults from 0x4210xx fill what the file leaves out.
@@ -180,21 +281,43 @@ pub fn ai_vector(trk: &cfg::Config, row: AiRow) -> [f32; 11] {
     v
 }
 
-/// Beginner level [design choice, ours]: the track's Easy row with the corner speed law and the
-/// corner target speed scaled down (`a[8]`, `a[9]`) and the car's speed / acceleration levels
-/// blended towards weak ones (`a[0..4]`, the blend of 0x40ccc0); the rubber band and the grip and
-/// brake terms stay as on Easy. The AI cars are about `BEGINNER_*` slower per lap than Easy
-/// (motorrace, 04 §4.3).
-const BEGINNER_CORNER_GRIP: f32 = 0.55;
-const BEGINNER_CORNER_BASE: f32 = 0.75;
-const BEGINNER_SPEED_LEVEL: (f32, f32) = (3.0, 0.7);
-const BEGINNER_ACC_LEVEL: (f32, f32) = (3.0, 0.7);
+// Beginner level [design choice, ours]: the track's Easy row with the corner speed law and the
+// corner target speed scaled down (`a[8]`, `a[9]`) and the car's speed / acceleration levels
+// blended towards weak ones (`a[0..4]`, the blend of 0x40ccc0); the rubber band and the grip and
+// brake terms stay as on Easy. The AI cars are about `BEGINNER_*` slower per lap than Easy
+// (motorrace, 04 §4.3). A race takes these when it is built.
+motor_tune::tunable! {
+    /// Beginner level [design choice]: the factor on the corner speed law (`a[8]`).
+    /// range: 0.2..1
+    /// applies: restart
+    BEGINNER_CORNER_GRIP: f32 = 0.55;
+    /// Beginner level [design choice]: the factor on the corner target speed (`a[9]`).
+    /// range: 0.2..1
+    /// applies: restart
+    BEGINNER_CORNER_BASE: f32 = 0.75;
+    /// Beginner level [design choice]: the speed level the cars are blended towards (`a[0]`).
+    /// range: 0..10
+    /// applies: restart
+    BEGINNER_SPEED_LEVEL: f32 = 3.0;
+    /// Beginner level [design choice]: how far the speed level is blended towards `BEGINNER_SPEED_LEVEL` (`a[1]`).
+    /// range: 0..1
+    /// applies: restart
+    BEGINNER_SPEED_BLEND: f32 = 0.7;
+    /// Beginner level [design choice]: the acceleration level the cars are blended towards (`a[2]`).
+    /// range: 0..10
+    /// applies: restart
+    BEGINNER_ACC_LEVEL: f32 = 3.0;
+    /// Beginner level [design choice]: how far the acceleration level is blended towards `BEGINNER_ACC_LEVEL` (`a[3]`).
+    /// range: 0..1
+    /// applies: restart
+    BEGINNER_ACC_BLEND: f32 = 0.7;
+}
 
 fn beginner_row(v: &mut [f32; 11]) {
-    (v[0], v[1]) = BEGINNER_SPEED_LEVEL;
-    (v[2], v[3]) = BEGINNER_ACC_LEVEL;
-    v[8] *= BEGINNER_CORNER_GRIP;
-    v[9] *= BEGINNER_CORNER_BASE;
+    (v[0], v[1]) = (BEGINNER_SPEED_LEVEL.get(), BEGINNER_SPEED_BLEND.get());
+    (v[2], v[3]) = (BEGINNER_ACC_LEVEL.get(), BEGINNER_ACC_BLEND.get());
+    v[8] *= BEGINNER_CORNER_GRIP.get();
+    v[9] *= BEGINNER_CORNER_BASE.get();
 }
 
 fn first_value(c: &cfg::Config, k: &str) -> Result<String, String> {
@@ -207,9 +330,9 @@ impl Race {
         let racers = self
             .racers
             .iter()
-            .map(|r| RacerState { airborne_s: r.airborne_s, stuck: r.stuck, car: r.car.clone(), progress: r.progress.clone(), ai: r.ai.state(), telemetry: r.telemetry, brake: r.brake })
+            .map(|r| RacerState { airborne_s: r.airborne_s, flip_s: r.flip_s, stuck: r.stuck, car: r.car.clone(), progress: r.progress.clone(), ai: r.ai.state(), telemetry: r.telemetry, brake: r.brake })
             .collect();
-        Snapshot { racers, countdown: self.countdown, clock_ms: self.clock_ms, ai_vector: self.ai_vector, props: self.props.state() }
+        Snapshot { racers, countdown: self.countdown, clock_ms: self.clock_ms, ai_vector: self.ai_vector, props: self.props.state(), acc: self.acc, prev: self.prev.clone() }
     }
 
     /// Go back to a snapshot of this race. The cars keep the race's current size (`car_scale`).
@@ -217,7 +340,7 @@ impl Race {
         let g = self.world.gravity;
         let (scale, feel) = self.car_scale;
         for (r, d) in self.racers.iter_mut().zip(&s.racers) {
-            (r.airborne_s, r.stuck, r.car, r.progress, r.telemetry, r.brake) = (d.airborne_s, d.stuck, d.car.clone(), d.progress.clone(), d.telemetry, d.brake);
+            (r.airborne_s, r.flip_s, r.stuck, r.car, r.progress, r.telemetry, r.brake) = (d.airborne_s, d.flip_s, d.stuck, d.car.clone(), d.progress.clone(), d.telemetry, d.brake);
             r.ai.set_state(&d.ai);
             let feel = if r.human { feel } else { 1.0 };
             if !r.remote && (r.car.p.scale, r.car.p.feel) != (scale, feel) {
@@ -226,6 +349,7 @@ impl Race {
         }
         (self.countdown, self.clock_ms, self.ai_vector) = (s.countdown, s.clock_ms, s.ai_vector);
         self.props.set_state(&s.props);
+        (self.acc, self.prev) = (s.acc, s.prev.clone());
     }
 
     /// `cars[i]` goes to grid slot `i`; `player` is the slot driven by the caller (or none).
@@ -259,8 +383,9 @@ impl Race {
             if let Some(h) = cfg.get("CollisionName").and_then(|e| e.values.first()).and_then(|n| fs::read(root, n).ok()).and_then(|b| motor_data::col::parse(&b).ok()) {
                 params.hull = Hull::from_col(&h);
             }
-            let width = cfg.get("Width").and_then(|e| e.f32(0)).unwrap_or(1.9);
-            let length = cfg.get("Length").and_then(|e| e.f32(0)).unwrap_or(4.0);
+            // CLASSIC 0x409033 / 0x409039: the traffic size A+0x44 / A+0x48 comes from the table at 0x4a7db0, 2.1 x 4.4
+            // for every slot, not from the car file's Width / Length [O, #379]
+            let (width, length) = (crate::ai::TRAFFIC_WIDTH.get(), crate::ai::TRAFFIC_LENGTH.get());
             let driver = if human {
                 Driver { name: "Player".into(), nick: "You".into(), picture: "Game/player.tga".into(), colour: [60, 100, 255], car_colours: None, temper: Temper::default(), ninja_marker: false }
             } else if let Some(d) = drivers {
@@ -273,7 +398,7 @@ impl Race {
             let mut car = Car::new(params, Vec3::ZERO, Vec3::Z);
             car.ai_driver = !human;
             let progress = Progress::new(&line, laps, Vec3::ZERO);
-            racers.push(Racer { car_id: id, driver, airborne_s: 0.0, stuck: None, car, progress, ai, human, base_gear_top, base_acc, telemetry: Telemetry::default(), brake: 0.0, remote: false });
+            racers.push(Racer { car_id: id, driver, airborne_s: 0.0, flip_s: 0.0, stuck: None, car, progress, ai, human, base_gear_top, base_acc, telemetry: Telemetry::default(), brake: 0.0, remote: false });
         }
         let props = Props::load(root, &trk)?;
         // `GoalCamera x y z lx ly lz`: eye and look-at point (TrackDef +0x1440) [O]
@@ -296,7 +421,7 @@ impl Race {
             cfg::parse_lwmo(&t.data).ok()
         };
         let start_camera = crate::startcam::StartCamera::new(start_spline("StartSpline1"), start_spline("StartSpline2"));
-        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, susp: (1.0, 1.0) };
+        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, solid_remote: false, susp: (1.0, 1.0), tick_s: None, tick_hz: None, acc: 0.0, prev: Vec::new(), ticks_last_frame: 0 };
         race.restart();
         Ok(race)
     }
@@ -324,6 +449,8 @@ impl Race {
         self.countdown = COUNTDOWN;
         self.clock_ms = 0.0;
         self.props.reset();
+        (self.acc, self.ticks_last_frame) = (0.0, 0);
+        self.prev.clear();
     }
 
     pub fn started(&self) -> bool {
@@ -376,6 +503,100 @@ impl Race {
     /// motorview drives any followed car by hand; design choice). The AI keeps tracking that car
     /// but its input is dropped, and the human's car coasts. `None` = the human car, as `step`.
     pub fn step_as(&mut self, dt: f32, player: Input, hand: Option<usize>) {
+        let Some(h) = self.tick_s else {
+            self.step_once(dt, player, hand, true);
+            self.ticks_last_frame = 1;
+            return;
+        };
+        // design choice (#374): the fixed tick from a time accumulator. A tick is `h` of sim time; under the
+        // ramlosa / h2o cheat the sim runs slower than the clock, so a tick then takes more real time. The ticks run up
+        // to the frame's end (`acc` ends in (-tick, 0]): the view is drawn between the last two ticks at most one tick
+        // behind, and a frame that ends on a tick (60 fps at 60 Hz) draws that tick exactly, as the per-frame path does.
+        self.acc += dt;
+        let mut n = 0;
+        // the tolerance absorbs rounding (two frames of 1/120 s make one tick of 1/60 s)
+        while self.acc > h * 1e-4 {
+            let real = self.tick_real(h);
+            if n == car::MAX_STEPS.get() as u32 {
+                // a frame too long to catch up (a hitch, a debugger): drop the backlog, keep the phase
+                self.acc = self.acc.rem_euclid(real) - real;
+                break;
+            }
+            self.capture_prev();
+            self.step_once(real, player, hand, n == 0);
+            self.acc -= real;
+            n += 1;
+        }
+        self.ticks_last_frame = n;
+    }
+
+    /// The fixed tick (#374): `Some(hz)` steps the physics at `hz` ticks per second whatever the frame rate and
+    /// interpolates the view poses (`view_pose`); `None` (the default) steps once per frame, the original's way.
+    pub fn set_fixed_tick(&mut self, hz: Option<f32>) {
+        self.tick_hz = hz.filter(|&hz| hz > 0.0);
+        self.tick_s = self.tick_hz.map(|hz| 1.0 / hz);
+        self.acc = 0.0;
+        self.prev.clear();
+    }
+
+    /// The fixed tick's rate as it was set, `None` on the per-frame path (the replay header's `tick_hz`).
+    pub fn fixed_hz(&self) -> Option<f32> {
+        self.tick_hz
+    }
+
+    /// The fixed tick's length in sim seconds, `None` on the per-frame path.
+    pub fn fixed_tick(&self) -> Option<f32> {
+        self.tick_s
+    }
+
+    /// How many physics ticks the latest `step_as` ran: 0 on a frame between two ticks (the cars' contact flags
+    /// are then still the last tick's: fire one-shot effects only when this is > 0). Always 1 per frame without
+    /// the fixed tick.
+    pub fn ticks_last_frame(&self) -> u32 {
+        self.ticks_last_frame
+    }
+
+    /// How far the view is between the previous tick (0) and the latest (1): 1 without the fixed tick and on a frame
+    /// that ends on a tick.
+    pub fn alpha(&self) -> f32 {
+        self.tick_s.map_or(1.0, |h| (1.0 + self.acc / self.tick_real(h)).clamp(0.0, 1.0))
+    }
+
+    /// How far the view is behind the latest tick, real seconds (0 on the per-frame path and on a frame that ends on a
+    /// tick). Recorded poses (ghosts, a demo's car) are looked up this much before the race clock, so they move with
+    /// the interpolated cars.
+    pub fn view_lag(&self) -> f32 {
+        if self.tick_s.is_some() { (-self.acc).max(0.0) } else { 0.0 }
+    }
+
+    /// The pose to draw car `slot` at: between its previous and its latest tick by `alpha`, so the motion is
+    /// smooth at any frame rate (one tick behind the physics). Remote cars (posed from outside every frame) and
+    /// the per-frame path give the latest pose.
+    pub fn view_pose(&self, slot: usize) -> ViewPose {
+        let r = &self.racers[slot];
+        let now = ViewPose::of(&r.car);
+        let alpha = self.alpha();
+        match self.prev.get(slot) {
+            // alpha 1: the latest tick exactly (no rounding of the lerp: 60 fps draws as the per-frame path)
+            Some(prev) if self.tick_s.is_some() && !r.remote && alpha < 1.0 => prev.lerp(&now, alpha),
+            _ => now,
+        }
+    }
+
+    /// The real time one fixed tick of `h` sim seconds takes now (`step_once` scales it back to `h`).
+    fn tick_real(&self, h: f32) -> f32 {
+        if self.started() { h / crate::cheats::time_scale(self.name_cheat) } else { h }
+    }
+
+    fn capture_prev(&mut self) {
+        self.prev.clear();
+        self.prev.extend(self.racers.iter().map(|r| ViewPose::of(&r.car)));
+    }
+
+    /// One step of `dt` real seconds: a rendered frame on the per-frame path, one tick on the fixed one. Every step
+    /// clears the cars' per-frame contact flags for its physics; on a frame's later ticks (`first` false) the
+    /// earlier ticks' flags are merged back afterwards, so the frame's readers see all of them.
+    fn step_once(&mut self, dt: f32, player: Input, hand: Option<usize>, first: bool) {
         let racing = self.started();
         if !racing {
             self.countdown -= dt;
@@ -392,6 +613,7 @@ impl Race {
         // inputs first: the frame's base input per car. The AI cars' inputs are replaced by the
         // AI step before every physics substep below.
         let mut inputs = Vec::with_capacity(self.racers.len());
+        let mut held = Vec::with_capacity(self.racers.len());
         for (slot, r) in self.racers.iter_mut().enumerate() {
             let done = r.progress.done();
             // the car the caller's input drives (a car with the AI under it too, when `hand` names it)
@@ -428,7 +650,10 @@ impl Race {
             // a remote car's per-frame contacts come only from `demo::drive_remote` (the spark slots, apply
             // 0x40c5f4), which runs after the step: clearing them here would wipe them before the effects read them
             if !r.remote {
+                held.push((!first).then(|| r.car.contact_flags()));
                 r.car.begin_frame();
+            } else {
+                held.push(None);
             }
             inputs.push(input);
         }
@@ -460,9 +685,15 @@ impl Race {
                     }
                     others.clear();
                     others.extend(traffic.iter().flatten().filter(|t| t.slot != slot).copied());
-                    let ai_input = r.ai.drive(&r.car, h, &others);
-                    if (!r.human || self.autopilot) && hand != Some(slot) {
-                        inputs[slot] = ai_input;
+                    if r.human && !self.autopilot {
+                        // CLASSIC 0x407ab2: a human car only gets the prepass tracking (node, speed, alignment,
+                        // offset); its lane and lateral velocity stay as initialised [O, #404]
+                        r.ai.track(&r.car);
+                    } else {
+                        let ai_input = r.ai.drive(&r.car, h, &others);
+                        if hand != Some(slot) {
+                            inputs[slot] = ai_input;
+                        }
                     }
                     if r.progress.eliminated_ms.is_none() {
                         traffic[slot] = Some(r.ai.traffic());
@@ -481,14 +712,15 @@ impl Race {
             }
             self.props.finish_substep(h, &self.world);
         }
+        for (r, held) in self.racers.iter_mut().zip(&held) {
+            if let Some(f) = held {
+                r.car.merge_contact_flags(f);
+            }
+        }
         for (slot, (r, input)) in self.racers.iter_mut().zip(&inputs).enumerate() {
             r.brake = input.brake;
             let done = r.progress.done();
-            if !r.remote {
-                r.car.end_frame(sim_dt);
-            }
-            let lost = !r.remote && (r.telemetry.contacts <= 1 || r.car.rot.y_axis.y < 0.0);
-            r.airborne_s = if lost { r.airborne_s + sim_dt } else { 0.0 };
+            (r.airborne_s, r.flip_s) = if r.remote { (0.0, 0.0) } else { reset_timers(r.airborne_s, r.flip_s, r.car.wheel_contact, r.car.flip_contact, sim_dt) };
             if !r.human && racing && !done && hand != Some(slot) {
                 if r.car.vel.z.abs() > 15.0 {
                     r.stuck = None;
@@ -497,8 +729,8 @@ impl Race {
                 }
                 if let Some(t) = &mut r.stuck {
                     *t += sim_dt;
-                    if *t > RESET_AFTER {
-                        r.airborne_s = RESET_AFTER + 1.0; // reuse the reset path below
+                    if *t > RESET_AFTER.get() {
+                        r.airborne_s = RESET_AFTER.get() + 1.0; // reuse the reset path below
                     }
                 }
             }
@@ -510,7 +742,8 @@ impl Race {
             self.eliminate();
         }
         for slot in 0..self.racers.len() {
-            if self.racers[slot].airborne_s > RESET_AFTER && self.racers[slot].progress.eliminated_ms.is_none() {
+            let r = &self.racers[slot];
+            if reset_due(r.airborne_s, r.flip_s) && r.progress.eliminated_ms.is_none() {
                 self.respawn(slot);
             }
         }
@@ -553,7 +786,7 @@ impl Race {
                 }
                 again = self.racers[i].car.world_collide(&self.world, h);
                 for j in 0..n {
-                    if j == i || self.racers[j].remote || self.racers[i].progress.eliminated_ms.is_some() || self.racers[j].progress.eliminated_ms.is_some() {
+                    if j == i || (self.racers[j].remote && !self.solid_remote) || self.racers[i].progress.eliminated_ms.is_some() || self.racers[j].progress.eliminated_ms.is_some() {
                         continue;
                     }
                     let (a, b) = two_mut(&mut self.racers, i, j);
@@ -677,21 +910,30 @@ impl Race {
         // road should be. The centreline runs 1-2.5 m above the road on every track
         // (lineheight example); the first face from above can be the top of a collision box
         // over the road (NeoCity near (-439, -93): a face at +4 m, between walls).
-        let y = road_near(&self.world, nd.x, nd.z, y_line + 5.0, y_line - LINE_ABOVE_ROAD)
+        let y = road_near(&self.world, nd.x, nd.z, y_line + 5.0, y_line - LINE_ABOVE_ROAD.get())
             .or_else(|| self.world.ground(nd.x, nd.z, y_line + 50.0))
             .unwrap_or(y_line);
         r.car.place(Vec3::new(nd.x, y - ride, nd.z), Vec3::from(nd.dir));
-        r.airborne_s = 0.0;
+        (r.airborne_s, r.flip_s) = (0.0, 0.0); // 0x40da34
         r.stuck = None;
         r.ai.reset(&r.car);
         r.ai.ease_in();
         r.progress.teleported(&self.line, Vec3::new(nd.x, y, nd.z), self.clock_ms as u32);
+        // a teleport, not motion: no interpolation from where the car was
+        if let Some(p) = self.prev.get_mut(slot) {
+            *p = ViewPose::of(&self.racers[slot].car);
+        }
     }
 
 }
 
-/// How far the centreline typically runs above the road surface, m (median over the tracks).
-const LINE_ABOVE_ROAD: f32 = 2.0;
+motor_tune::tunable! {
+    /// How far the centreline typically runs above the road surface (median over the tracks) [O].
+    /// range: 0..6
+    /// unit: m
+    /// applies: restart
+    LINE_ABOVE_ROAD: f32 = 2.0;
+}
 
 /// Of the faces flat enough to drive on in the column at (x, z) below `y_top` (30 m deep), the
 /// height of the one nearest `y_want`.
@@ -700,7 +942,7 @@ fn road_near(world: &World, x: f32, z: f32, y_top: f32, y_want: f32) -> Option<f
     let mut best: Option<f32> = None;
     for _ in 0..32 {
         let Some(h) = world.raycast(Vec3::new(x, top, z), Vec3::new(x, y_top - 30.0, z)) else { break };
-        if h.normal.y >= crate::car::WHEEL_MIN_NY && best.is_none_or(|b| (h.point.y - y_want).abs() < (b - y_want).abs()) {
+        if h.normal.y >= crate::car::WHEEL_MIN_NY.get() && best.is_none_or(|b| (h.point.y - y_want).abs() < (b - y_want).abs()) {
             best = Some(h.point.y);
         }
         top = h.point.y - 0.01;
@@ -901,6 +1143,29 @@ mod rewind_tests {
         assert_eq!(first, run(&mut race));
     }
 
+    /// #404: the human's traffic record keeps its lane as initialised while it races, the AIs' lanes move (needs the install).
+    #[test]
+    fn human_lane_stays_as_initialised() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.exists() {
+            return;
+        }
+        let mut race = Race::load(&root, 1, &[1, 2, 3], Some(0), Some(3)).unwrap();
+        let dt = 1.0 / 60.0;
+        let drive = Input { throttle: 1.0, ..Default::default() };
+        let start_node = race.racers[0].ai.node();
+        let mut ai_lane_moved = false;
+        for _ in 0..3000 {
+            race.step(dt, drive);
+            ai_lane_moved |= race.racers.iter().skip(1).any(|r| r.ai.traffic().lane != 0.0);
+        }
+        let human = &race.racers[0];
+        assert!(human.human);
+        assert_eq!(human.ai.traffic().lane, 0.0);
+        assert!(human.ai.node() != start_node, "the human was tracked along the line");
+        assert!(ai_lane_moved, "an AI car changed lane in the same run");
+    }
+
     /// buzz aldrin / nasa (#315): a car dropped 20 m falls about half as far in the same time
     /// with the cheat (needs the install). Free fall is `g t^2 / 2`, so the cheat's drop is half.
     #[test]
@@ -1026,9 +1291,11 @@ mod rewind_tests {
         for _ in 0..1920 {
             let before: Vec<_> = race.racers.iter().map(|r| (r.car.pos, r.car.world_vel())).collect();
             race.step(dt, Input::default());
-            for ((p0, v0), r) in before.into_iter().zip(&race.racers) {
+            for (i, ((p0, v0), r)) in before.into_iter().zip(&race.racers).enumerate() {
                 let (moved, v) = ((r.car.pos - p0) / dt, (v0 + r.car.world_vel()) * 0.5);
-                if v.length() > 10.0 && r.car.hull_hits.is_empty() {
+                // a hull hit or a touch with another car moves the car apart from its velocity
+                let alone = race.racers.iter().enumerate().all(|(j, o)| j == i || (o.car.pos - r.car.pos).length() > 6.0);
+                if v.length() > 10.0 && r.car.hull_hits.is_empty() && alone {
                     assert!(moved.normalize().dot(v.normalize()) > 0.99, "moved {moved} at world velocity {v}");
                     turned |= moved.normalize().dot(r.car.vel.normalize()) < 0.5;
                 }
@@ -1162,7 +1429,7 @@ mod beginner_tests {
         assert_eq!(easy[8], 2.3);
         assert_eq!(medium[8], 2.7);
         assert!(b[8] < easy[8] && b[9] < easy[9]);
-        assert_eq!((b[8], b[9]), (2.3 * BEGINNER_CORNER_GRIP, 14.0 * BEGINNER_CORNER_BASE));
+        assert_eq!((b[8], b[9]), (2.3 * BEGINNER_CORNER_GRIP.get(), 14.0 * BEGINNER_CORNER_BASE.get()));
         // grip, brake and the rubber band stay as on Easy
         assert_eq!((b[4], b[5], b[6], b[7], b[10]), (easy[4], easy[5], easy[6], easy[7], easy[10]));
         assert_eq!((b[0], b[1], b[2], b[3]), (3.0, 0.7, 3.0, 0.7));
@@ -1215,5 +1482,138 @@ mod made_up_time_tests {
         assert_eq!(t.len(), 2);
         assert!((102_550..=107_449).contains(&t[0].unwrap()));
         assert_eq!(t[1], None);
+    }
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::*;
+
+    fn race(player: Option<usize>) -> Option<Race> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        root.exists().then(|| Race::load(&root, 1, &[1, 4, 7], player, Some(3)).unwrap())
+    }
+
+    type CarState = (Vec3, Vec3, glam::Mat3, [f32; 4], u32, Option<usize>);
+
+    fn state(race: &Race) -> Vec<CarState> {
+        race.racers.iter().map(|r| (r.car.pos, r.car.vel, r.car.rot, r.car.wheel_ext, r.progress.lap, r.car.chassis_mat)).collect()
+    }
+
+    /// #374: the 60 Hz tick stepped by 1/60 s frames is the per-frame path at 60 fps, bit for bit (needs the install).
+    #[test]
+    fn tick_60_at_60_fps_is_the_per_frame_path() {
+        let (Some(mut frame), Some(mut tick)) = (race(Some(0)), race(Some(0))) else { return };
+        tick.set_fixed_tick(Some(60.0));
+        let drive = Input { throttle: 1.0, steer: 0.1, ..Default::default() };
+        for _ in 0..1500 {
+            frame.step(1.0 / 60.0, drive);
+            tick.step(1.0 / 60.0, drive);
+            assert_eq!(tick.ticks_last_frame(), 1);
+            assert_eq!(state(&frame), state(&tick));
+            let flags = |r: &Race| r.racers.iter().map(|r| r.car.contact_flags()).collect::<Vec<_>>();
+            assert_eq!(flags(&frame), flags(&tick));
+        }
+        assert_eq!(frame.clock_ms, tick.clock_ms);
+    }
+
+    /// #374: on the fixed tick the race is the same after the same number of ticks at any frame rate (needs the install).
+    #[test]
+    fn tick_is_independent_of_the_frame_rate() {
+        let drive = Input { throttle: 1.0, steer: -0.05, ..Default::default() };
+        let run = |dt: f32| {
+            let mut race = race(Some(0))?;
+            race.set_fixed_tick(Some(60.0));
+            let mut ticks = 0;
+            while ticks < 1500 {
+                race.step(dt, drive);
+                ticks += race.ticks_last_frame();
+            }
+            assert_eq!(ticks, 1500, "frames of {dt} s overshot");
+            Some((state(&race), race.clock_ms))
+        };
+        let Some(at60) = run(1.0 / 60.0) else { return };
+        for dt in [1.0 / 30.0, 1.0 / 120.0, 1.0 / 144.0] {
+            assert_eq!(run(dt).unwrap(), at60, "frames of {dt} s");
+        }
+    }
+
+    /// #374: between two ticks the view pose is between the cars' tick poses; a snapshot taken between ticks
+    /// replays identically (needs the install).
+    #[test]
+    fn view_pose_interpolates_and_snapshots_keep_the_phase() {
+        let Some(mut race) = race(None) else { return };
+        race.set_fixed_tick(Some(60.0));
+        for _ in 0..800 {
+            race.step(1.0 / 60.0, Input::default());
+        }
+        // half a tick: the tick runs to cover it, the view is drawn halfway from the previous one
+        race.step(0.5 / 60.0, Input::default());
+        assert_eq!(race.ticks_last_frame(), 1);
+        assert!((race.view_lag() - 0.5 / 60.0).abs() < 1e-5);
+        assert!((race.alpha() - 0.5).abs() < 1e-3);
+        let (prev, now) = (race.prev[1], ViewPose::of(&race.racers[1].car));
+        assert!(prev.pos.distance(now.pos) > 0.1, "the car moves");
+        let mid = race.view_pose(1);
+        assert!((mid.pos - (prev.pos + now.pos) * 0.5).length() < 1e-3);
+        let snap = race.snapshot();
+        let run = |race: &mut Race| {
+            for _ in 0..300 {
+                race.step(1.0 / 144.0, Input::default());
+            }
+            (state(race), race.view_pose(2))
+        };
+        let first = run(&mut race);
+        race.restore(&snap);
+        assert_eq!(first, run(&mut race));
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::{reset_due, reset_timers};
+
+    const ALL: [bool; 4] = [true; 4];
+    const NONE: [bool; 4] = [false; 4];
+
+    /// 0x40d854: upside down against the world, reset after 2 s; the wheel timer runs alongside.
+    #[test]
+    fn flip_timer_resets_after_two_seconds() {
+        let (mut w, mut f) = (0.0, 0.0);
+        for _ in 0..8 {
+            (w, f) = reset_timers(w, f, NONE, true, 0.25);
+        }
+        assert!(!reset_due(w, f), "2.0 s is not yet above the limit: {f}");
+        (w, f) = reset_timers(w, f, NONE, true, 0.25);
+        assert!(reset_due(w, f));
+        // the flip timer holds when the flag drops; only 3 wheels down clear it
+        let (w2, f2) = reset_timers(0.0, 1.5, NONE, false, 0.1);
+        assert_eq!((w2, f2), (0.1, 1.5));
+        assert_eq!(reset_timers(5.0, 1.5, [true, true, true, false], false, 0.1), (0.0, 0.0));
+    }
+
+    /// Two wheels: a side pair (FL+BL, FR+BR) holds the wheel timer, every other pair counts.
+    #[test]
+    fn wheel_pairs() {
+        let pair = |a: usize, b: usize| {
+            let mut w = NONE;
+            (w[a], w[b]) = (true, true);
+            reset_timers(1.0, 0.0, w, false, 0.25).0
+        };
+        assert_eq!(pair(0, 3), 1.0); // FL + BL
+        assert_eq!(pair(1, 2), 1.0); // FR + BR
+        assert_eq!(pair(0, 1), 1.25); // front
+        assert_eq!(pair(2, 3), 1.25); // rear
+        assert_eq!(pair(0, 2), 1.25); // diagonal
+        assert_eq!(pair(1, 3), 1.25);
+        assert_eq!(reset_timers(1.0, 0.0, [true, false, false, false], false, 0.25).0, 1.25);
+        assert_eq!(reset_timers(1.0, 0.0, ALL, false, 0.25).0, 0.0);
+        assert!(reset_due(8.01, 0.0) && !reset_due(8.0, 0.0));
+    }
+
+    /// The frame time counts at most 0.5 s.
+    #[test]
+    fn frame_time_capped() {
+        assert_eq!(reset_timers(0.0, 0.0, NONE, true, 2.0), (0.5, 0.5));
     }
 }

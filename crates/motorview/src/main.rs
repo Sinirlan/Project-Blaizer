@@ -1,6 +1,6 @@
 //! motorview — viewer and driving test for Motorhead tracks and cars (user-supplied install).
 //!
-//!   motorview <installed_game> [--track N] [--car NN] [--free]
+//!   motorview <installed_game> [--track N (default 2)] [--car NN] [--free]
 //!   motorview <installed_game> --shot out.png [--view chase|side|near|hood|quarter|top] [--sim-seconds S] [--size WxH]
 //!   motorview <installed_game> --cine FILE.cine --render out.mp4 [--from S --to S] [--fps N] [--size WxH] [--codec h264|hevc|nvenc|png] [--no-audio]
 //!   motorview <installed_game> --cine FILE.cine --shot out.png --at-time S   (cine.rs: planned camera sequences, re-notes/20-cine.md)
@@ -12,11 +12,11 @@
 //! Free camera grabs the mouse (mouse look); Esc releases it, left click grabs it again.
 //! The race is paused in free camera; P runs it.
 //! Both: 1-8 track, C next car, L racing line, V camera, B look back, F fog, H shadows, M car shading, G halos, [ ] brightness,
-//! F9 Classic/Remaster graphics, K Enhanced car paint, J dynamic lights,
+//! F9 Classic/Remaster graphics, K Enhanced car paint, J dynamic lights, Ctrl+F flashlight (a torch cone at the camera, Classic and Remaster),
 //! U MSAA and O colour grade (Remaster),
 //! F3 debug overlay (FPS, camera, crosshair target), F4 wire style (lines, solid, check; Shift+F4 back), Esc exit (asks first).
 //! Menu bar along the top (\ hides it): every option by topic, with its key.
-//! Left click copies the crosshair target (object position, label, surface) to the clipboard.
+//! The F3 card has a copy button: its values as Markdown to the clipboard.
 //! Debug (see `BINDS`): P pause, . single step, - / = time scale, N focus car, I inspect target,
 //! F6 sim panel, F7 car gizmos, F8 track gizmos, F2 collision faces, F12 screenshot.
 //! Render debug: F10 shading view (normals, UV checker, texture, lighting, depth), F1 pass
@@ -28,25 +28,26 @@
 
 use glam::Vec3;
 use motor_sim::replay::{Header, Recording};
-use motor_sim::{AiRow, Difficulty, Input, Rules, SteerKeys};
+use motor_sim::{AiRow, Difficulty, Input, Pedals, Rules, SteerKeys};
 use motorview::debug::{self, ColCache, Gizmos, Layers, TrackCache};
 use motorview::drive::{self, CamMode, FrameParts, PoseCam, Session};
 use motorview::ghost::{self, Follow, Sync as GhostSync, ViewerGhost};
 use motorview::inspect::{self, Browser, Catalog, Passes, Tab};
 use motorview::pick::{Hit, Picker, Target};
 use motorview::wire::WireStyle;
-use motorview::render::{CarDetail, CarShading, Camera, DebugShade, DebugView, Frame, Gpu, GrassLevel, RemasterView, RenderAa, RenderMode, View};
+use motorview::render::{CarDetail, CarShading, Camera, DebugShade, DebugView, Frame, Gpu, GrassLevel, RemasterView, RenderAa, RenderMode, SceneFrost, View};
 use motorview::scene::TEX;
 use motorview::timeline::Timeline;
 use motorview::ui::{Assets, Rect};
-use overlay::{Line, OverlayText};
+use overlay::{Line, OverlayText, Row, Telem, Val};
 use motorview::palette;
 use motorview::cine_edit::{self, CineEdit, Preview, Req};
 use motorview::world_edit::{self, Cmd, Kind, WorldEdit};
 use motorview::fill_gizmo;
+use motorview::glass_ui;
 use motorview::gui::Gui;
 use motorview::tune::{self, Page, Targets, Tune};
-use ribbon::{RTab, Ribbon, RibbonState};
+use ribbon::{Pick, RTab, Ribbon, RibbonState};
 use motorview::{device, instance, png, scene};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -63,7 +64,7 @@ mod ribbon;
 mod status;
 
 const USAGE: &str = "usage: motorview [installed_game] [--track N] [--car NN] [--free [--drive-free]] [--difficulty easy|medium|hard|beginner] \
-                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--confirm-exit] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts] [--limited-distance|--unlimited-distance] [--car-sheet sheet.png] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|track|render|remaster|debug|world|ghost|cine|help]] [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
+                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--sim-toast running|paused] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--confirm-exit] [--solid-ui] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts] [--limited-distance|--unlimited-distance] [--flashlight] [--car-sheet sheet.png] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|render|remaster|debug|world|ghost|cine|help] [--ribbon-flyout GROUP] [--ribbon-pick car|track]] [--tune-search TEXT] [--wgsl NAME=VALUE]... [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--trees on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
                      [--cine FILE.cine [--render out.mp4 [--from S] [--to S] [--fps N] [--codec h264|hevc|nvenc|png] [--no-audio] | --shot out.png --at-time S | --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N]]] [--size WxH] [--classic|--remaster ...]] \
                      [--fill-auto [--seed S] [--force]] [--probes-stats [--track N|all]] [--world-edit [--world-gizmo move|rotate[:N]] [--world-tool KIND]]";
 
@@ -91,6 +92,8 @@ struct Args {
     cars_dir: Option<PathBuf>,
     cam: CamMode,
     sim_seconds: f32,
+    /// shot: draw the sim-state toast at age 0 (`--sim-toast running|paused`)
+    sim_toast: Option<bool>,
     /// `--seek S`: after `--sim-seconds`, jump back to timeline second S (#60)
     seek: Option<f32>,
     /// `--replay FILE`: a recorded run (`.mhr`) opened instead of a fresh race (#60 phase 2)
@@ -106,6 +109,10 @@ struct Args {
     /// DEBUG: a solid colour in place of the sky (`--backdrop R,G,B`)
     backdrop: Option<[u8; 3]>,
     confirm_exit: bool,
+    /// shot: the exit requester as with unsaved World Editor edits
+    confirm_unsaved: bool,
+    /// Solid panels: opaque glass, no scene frost (`--solid-ui`, #395)
+    solid_ui: bool,
     /// shot: debug gizmo layers, sim panel, followed car, print the sim panels
     layers: Layers,
     panel: bool,
@@ -121,12 +128,22 @@ struct Args {
     shade: DebugShade,
     hide: Passes,
     limited: bool,
+    /// `--flashlight`: the torch cone at the camera is on
+    flashlight: bool,
     inspect: bool,
     browse: Option<(Tab, usize)>,
     /// shot: the Properties pane open on this page (`--tune [PAGE]`)
     tune: Option<Page>,
     /// shot: the ribbon on this tab (`--menu [TAB]`)
     menu: Option<RTab>,
+    /// shot: the Properties dock's search text (`--tune-search mass`)
+    tune_search: Option<String>,
+    /// shot: `--wgsl NAME=VALUE` shader values set after a first frame, then the shaders rebuilt (#398)
+    wgsl: Vec<(String, String)>,
+    /// shot: the flyout of this shelf group open (`--ribbon-flyout HDR`, with `--menu TAB`)
+    ribbon_flyout: Option<String>,
+    /// shot: the car or track dropdown of the top bar open (`--ribbon-pick car|track`, with `--menu`)
+    ribbon_pick: Option<Pick>,
     /// `--world-edit` (`--fill-edit`): the World Editor open in the shot (forces Remaster, 400 % distance)
     world_edit: bool,
     /// `--fill-gizmo move|rotate[:N]`: the transform gizmo on piece N (default 0) in the shot
@@ -175,7 +192,7 @@ struct Args {
 
 impl Args {
     fn view(&self) -> View {
-        View { car_shading: self.car_shading, car_detail: self.car_detail, mode: self.mode, remaster: self.remaster, debug: DebugView { shade: self.shade, unlimited: !self.limited, backdrop: self.backdrop, ..DebugView::default() }, ..self.base }
+        View { car_shading: self.car_shading, car_detail: self.car_detail, mode: self.mode, remaster: self.remaster, debug: DebugView { shade: self.shade, unlimited: !self.limited, flashlight: self.flashlight, backdrop: self.backdrop, ..DebugView::default() }, ..self.base }
     }
 }
 
@@ -183,15 +200,19 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1).peekable();
     // the game's graphics options (settings.cfg, everything but the window) are the baseline, so what is
     // tuned here looks the same in the game; the flags below override them, `--no-settings` skips the file
-    let mut base = View { brightness: 1.0, fog: true, show_line: false, shadows: true, halos: true, car_shading: CarShading::Reflection, car_detail: CarDetail::High, distance: 1.0, fov_x: motorview::render::FOV_X, sky_image: true, motion_blur: false, lens_flares: true, smoke: true, sparks: true, mode: RenderMode::Classic, remaster: RemasterView::default(), debug: DebugView::default() };
+    let mut base = View { brightness: 1.0, fog: true, show_line: false, shadows: true, halos: true, car_shading: CarShading::Reflection, car_detail: CarDetail::High, distance: 1.0, fov_x: motorview::render::FOV_X.get(), sky_image: true, motion_blur: false, lens_flares: true, smoke: true, sparks: true, mode: RenderMode::Classic, remaster: RemasterView::default(), debug: DebugView::default() };
     let loaded = if std::env::args().any(|x| x == "--no-settings") { None } else { motorview::view_settings::load(&mut base) };
     if let Some(l) = &loaded {
         println!("settings: {}", l.path.display());
     }
+    // #398: the Constants page's live values; headless shots keep the source's values (golden, byte identity)
+    if !std::env::args().any(|x| x == "--no-settings" || x == "--shot") {
+        motorview::consts::load_overrides();
+    }
     let mut a = Args {
         root: PathBuf::new(),
         fog_tune: None,
-        track: 1,
+        track: 2,
         car: 1,
         free: false,
         drive_free: false,
@@ -205,6 +226,7 @@ fn parse_args() -> Result<Args, String> {
         cars_dir: None,
         cam: CamMode::Chase,
         sim_seconds: 0.0,
+        sim_toast: None,
         seek: None,
         replay: None,
         size: (1280, 720),
@@ -220,6 +242,8 @@ fn parse_args() -> Result<Args, String> {
         remaster: base.remaster,
         base,
         confirm_exit: false,
+        confirm_unsaved: false,
+        solid_ui: false,
         layers: Layers::default(),
         panel: false,
         focus: None,
@@ -233,10 +257,15 @@ fn parse_args() -> Result<Args, String> {
         hide: Passes { skids: loaded.as_ref().is_none_or(|l| l.skid_marks), ..Passes::default() },
         // the game clips at its view distance (the fog's clip guard sits there); without settings the viewer is unlimited
         limited: loaded.is_some(),
+        flashlight: false,
         inspect: false,
         browse: None,
         tune: None,
+        tune_search: None,
+        wgsl: Vec::new(),
         menu: None,
+        ribbon_flyout: None,
+        ribbon_pick: None,
         ghost: None,
         ghost_sync: GhostSync::Lap,
         ghost_shot: None,
@@ -293,7 +322,12 @@ fn parse_args() -> Result<Args, String> {
                 let v = val("--car-detail")?;
                 a.car_detail = CarDetail::parse(&v).ok_or(format!("unknown car detail {v}"))?;
             }
-            "--confirm-exit" => a.confirm_exit = true,
+            "--confirm-exit" => {
+                a.confirm_exit = true;
+                // `--confirm-exit unsaved`: the three-way requester of a World Editor with unsaved edits
+                a.confirm_unsaved = it.next_if(|v| v == "unsaved").is_some();
+            }
+            "--solid-ui" => a.solid_ui = true,
             "--debug" => a.layers = Layers::parse(&val("--debug")?)?,
             "--panel" => a.panel = true,
             "--debug-view" => {
@@ -301,6 +335,7 @@ fn parse_args() -> Result<Args, String> {
                 a.shade = DebugShade::parse(&v).ok_or(format!("unknown debug view {v}"))?;
             }
             "--hide" => a.hide = Passes::hide(&val("--hide")?)?,
+            "--flashlight" => a.flashlight = true,
             "--limited-distance" => a.limited = true,
             "--unlimited-distance" => a.limited = false,
             "--no-settings" => {}
@@ -312,6 +347,14 @@ fn parse_args() -> Result<Args, String> {
             "--menu" => {
                 let tab = it.next_if(|v| !v.starts_with("--")).map(|v| RTab::parse(&v).ok_or(format!("unknown ribbon tab {v}"))).transpose()?;
                 a.menu = Some(tab.unwrap_or(RTab::View));
+            }
+            "--ribbon-flyout" => a.ribbon_flyout = Some(val("--ribbon-flyout")?),
+            "--ribbon-pick" => a.ribbon_pick = Some(Pick::parse(&val("--ribbon-pick")?).ok_or("--ribbon-pick: car or track")?),
+            "--tune-search" => a.tune_search = Some(val("--tune-search")?),
+            "--wgsl" => {
+                let v = val("--wgsl")?;
+                let (n, x) = v.split_once('=').ok_or("bad --wgsl (NAME=VALUE)")?;
+                a.wgsl.push((n.trim().to_string(), x.trim().to_string()));
             }
             "--world-edit" | "--fill-edit" => a.world_edit = true,
             "--ghost" => a.ghost = Some(val("--ghost")?.into()),
@@ -391,6 +434,11 @@ fn parse_args() -> Result<Args, String> {
                 let (lo, hi) = RemasterView::FOG_STRENGTH;
                 a.remaster.fog_strength = val("--fog-strength")?.parse::<u32>().map_err(|e| e.to_string())?.clamp(lo, hi);
             }
+            "--trees" => a.remaster.tree_models = match val("--trees")?.to_ascii_lowercase().as_str() {
+                "on" => true,
+                "off" => false,
+                _ => return Err("bad --trees (on|off)".into()),
+            },
             "--water" => a.remaster.water = match val("--water")?.to_ascii_lowercase().as_str() {
                 "on" => true,
                 "off" => false,
@@ -467,6 +515,7 @@ fn parse_args() -> Result<Args, String> {
                 let p = (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2])).ok_or(format!("{x} X,Y,Z"))?;
                 if x == "--eye" { a.eye = Some(p) } else { a.at = Some(p) }
             }
+            "--sim-toast" => a.sim_toast = Some(match val("--sim-toast")?.as_str() { "paused" => true, "running" => false, _ => return Err("--sim-toast: paused or running".into()) }),
             "--sim-seconds" => a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?,
             "--replay" => a.replay = Some(val("--replay")?.into()),
             "--seek" => a.seek = Some(val("--seek")?.parse().map_err(|_| "bad --seek")?),
@@ -518,6 +567,8 @@ fn load(root: &Path, track: u32, car: u32, player: bool, difficulty: Difficulty,
             x.set_wheels(&s);
             // the viewer keeps its own cameras: no start fly-by
             x.fly_by = false;
+            // design choice (#374): the game's fixed physics tick (a paused single step, `STEP_DT`, is one tick at 60 Hz)
+            x.race.set_fixed_tick(Some(motor_sim::session::PHYSICS_HZ.get()));
             x.setup = Some(run_setup(root, track, &cars, &x, difficulty));
             Some(x)
         }
@@ -547,6 +598,7 @@ fn run_setup(root: &Path, track: u32, cars: &[u32], sess: &Session, difficulty: 
         nick: me.map_or_else(String::new, |r| r.driver.nick.clone()),
         car_name: me.map_or_else(String::new, |r| r.car.p.name.clone()),
         drivers: Vec::new(),
+        tick_hz: sess.race.fixed_hz(),
         race_ms: None,
         best_lap_ms: None,
     }
@@ -671,11 +723,6 @@ impl DebugState {
         (!self.paused).then(|| dt * self.time_scale())
     }
 
-    fn status(&self) -> String {
-        let state = if self.paused { "paused (P run, . step)" } else { "running" };
-        format!("sim: {state}  x{}", self.time_scale())
-    }
-
     /// F1 render panel lines.
     fn render_lines(&self, view: &View) -> Vec<String> {
         if !self.render_panel {
@@ -770,36 +817,54 @@ fn wire_lines(style: WireStyle, gpu: &Gpu, focus: Option<usize>, generated: bool
 
 /// The debug overlay's lines: frame rate, camera, and what the crosshair points at
 /// (positions in game coordinates, as `--eye`/`--at` take them).
-fn info_lines(fps: Option<f32>, track: u32, cam: &Camera, picker: &Picker, hit: Option<Hit>, sess: Option<&Session>) -> Vec<String> {
+/// The F3 telemetry card's data (its rows are the old overlay's lines, `Telem::lines`).
+/// The render mode's name for the status bar.
+fn mode_name(m: RenderMode) -> &'static str {
+    match m {
+        RenderMode::Classic => "Classic",
+        RenderMode::Remaster => "Remaster",
+    }
+}
+
+fn telemetry(fps: Option<f32>, track: u32, cam: &Camera, picker: &Picker, hit: Option<Hit>, sess: Option<&Session>) -> Telem {
     let xyz = |v: Vec3| {
         let g = game(v);
         format!("{:.2}, {:.2}, {:.2}", g.x, g.y, g.z)
     };
-    let mut out = vec![format!("{}   track {track}", fps.map_or("FPS -".into(), |f| format!("FPS {f:.0}"))), format!("camera: {}", xyz(cam.pos))];
+    let arr = |v: Vec3| {
+        let g = game(v);
+        [g.x, g.y, g.z]
+    };
+    let mut t = Telem { fps, track, rows: vec![Row { cap: "camera", val: Val::Xyz(arr(cam.pos), None), line: format!("camera: {}", xyz(cam.pos)) }] };
     // the scene objects' clock: `--sim-seconds` takes the seconds to shoot the same moment
     if let Some(s) = sess {
-        let (t, frame) = s.race.props.clock();
-        out.push(format!("time: {t:.3} s  prop frame {frame:.1}"));
+        let (clock, frame) = s.race.props.clock();
+        t.rows.push(Row { cap: "time", val: Val::Time(clock as f64, frame), line: format!("time: {clock:.3} s  prop frame {frame:.1}") });
     }
     let Some(h) = hit else {
-        out.push("target: -".into());
-        return out;
+        t.rows.push(Row { cap: "target", val: Val::Text("-".into()), line: "target: -".into() });
+        return t;
     };
-    out.push(format!("target: {}  ({:.1} m)", xyz(h.point), h.t));
-    out.push(format!("object: {}", xyz(h.origin)));
+    t.rows.push(Row { cap: "target", val: Val::Xyz(arr(h.point), Some(format!("{:.1} m", h.t))), line: format!("target: {}  ({:.1} m)", xyz(h.point), h.t) });
+    t.rows.push(Row { cap: "object", val: Val::Xyz(arr(h.origin), None), line: format!("object: {}", xyz(h.origin)) });
     let mut label = picker.label(h.target);
     if let (Target::Car { slot, .. }, Some(s)) = (h.target, sess) {
         if let Some(r) = s.race.racers.get(slot) {
             label += &format!(", driver {}", r.driver.name);
         }
     }
-    out.push(format!("label: {label}"));
+    t.rows.push(Row { cap: "label", val: Val::Text(label.clone()), line: format!("label: {label}") });
     if let Some((c, s)) = sess.and_then(|s| col_hit(s, cam, hit).map(|c| (c, s))) {
         let w = &s.race.world;
-        out.push(format!("surface: {}", w.materials.get(w.material_of(c.material)).map_or("?", |m| m.name.as_str())));
-        out.push(format!("col face {} normal {:.2}, {:.2}, {:.2}", c.face, c.normal[0], c.normal[1], c.normal[2]));
+        let surface = w.materials.get(w.material_of(c.material)).map_or("?", |m| m.name.as_str());
+        t.rows.push(Row { cap: "surface", val: Val::Text(surface.to_string()), line: format!("surface: {surface}") });
+        t.rows.push(Row { cap: "face", val: Val::Text(format!("{} · normal {:.2}, {:.2}, {:.2}", c.face, c.normal[0], c.normal[1], c.normal[2])), line: format!("col face {} normal {:.2}, {:.2}, {:.2}", c.face, c.normal[0], c.normal[1], c.normal[2]) });
     }
-    out
+    t
+}
+
+fn info_lines(fps: Option<f32>, track: u32, cam: &Camera, picker: &Picker, hit: Option<Hit>, sess: Option<&Session>) -> Vec<String> {
+    telemetry(fps, track, cam, picker, hit, sess).lines()
 }
 
 /// Where a key binding applies.
@@ -855,6 +920,7 @@ enum Act {
     Mode,
     Paint,
     Lights,
+    Flashlight,
     Msaa,
     Grade,
     Respawn,
@@ -870,6 +936,8 @@ enum Act {
     /// car = index + 1 (menu only)
     Car,
     MenuBar,
+    /// View > Show > Solid: opaque panels, no scene frost (#395)
+    SolidUi,
     /// ghost view window open / closed, next camera, camera `PoseCam::MODES[i]`, clear the ghost
     GhostWindow,
     GhostCam,
@@ -914,7 +982,7 @@ impl Bind {
         match self.act {
             Act::Escape => "release mouse / exit",
             Act::FreeCam => "free camera",
-            Act::Overlay => "overlay",
+            Act::Overlay => "telemetry",
             Act::Cross => "target cross",
             Act::Wireframe => "wire style",
             Act::WireframeBack => "wire style back",
@@ -951,6 +1019,7 @@ impl Bind {
             Act::Mode => "Classic / Remaster",
             Act::Paint => "Enhanced paint",
             Act::Lights => "dynamic lights",
+            Act::Flashlight => "flashlight",
             Act::Msaa => "MSAA",
             Act::Grade => "colour grade",
             Act::Respawn => "respawn",
@@ -962,7 +1031,8 @@ impl Bind {
             Act::NextCar => "next car",
             Act::Track => "track",
             Act::Car => "car",
-            Act::MenuBar => "ribbon",
+            Act::MenuBar => "toolbar",
+            Act::SolidUi => "solid panels",
             Act::GhostWindow => "ghost view window",
             Act::GhostCam => "ghost view: next camera",
             Act::GhostCamSet => "ghost view: camera",
@@ -1063,6 +1133,7 @@ const BINDS: &[Bind] = &[
     bind(&[K::F9], "F9", Ctx::Any, Act::Mode),
     bind(&[K::KeyK], "K", Ctx::Any, Act::Paint),
     bind(&[K::KeyJ], "J", Ctx::Any, Act::Lights),
+    bind_mod(CTRL, &[K::KeyF], "Ctrl+F", Ctx::Any, Act::Flashlight),
     bind(&[K::KeyU], "U", Ctx::Any, Act::Msaa),
     bind(&[K::KeyO], "O", Ctx::Any, Act::Grade),
     bind(&[K::BracketLeft], "[", Ctx::Any, Act::Darker),
@@ -1113,8 +1184,8 @@ fn key_name(act: Act) -> &'static str {
 
 /// Held keys (not in `BINDS`), for the Help menu.
 const HELD_FREE: &[(&str, &str)] =
-    &[("WASD", "move"), ("Q / E", "down / up"), ("Shift", "fast"), ("Shift+wheel", "speed"), ("mouse, arrows", "look"), (", /", "rewind / forward (held)"), ("left click", "copy target")];
-const HELD_RACE: &[(&str, &str)] = &[("Up/W Down/S", "throttle / brake"), ("Left/A Right/D", "steer"), ("B", "look back"), (", /", "rewind / forward (held)"), ("left click", "copy target")];
+    &[("WASD", "move"), ("Q / E", "down / up"), ("Shift", "fast"), ("Shift+wheel", "speed"), ("mouse, arrows", "look"), (", /", "rewind / forward (held)")];
+const HELD_RACE: &[(&str, &str)] = &[("Up/W Down/S", "throttle / brake"), ("Left/A Right/D", "steer"), ("B", "look back"), (", /", "rewind / forward (held)")];
 
 /// The ghost window's view of the scene: every racer drawn except the one the camera sits in,
 /// and the ghost unless the camera is inside it.
@@ -1322,6 +1393,9 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     // --menu / --tune: the menu bar and the F11 window over the shot (laid out before the
     // frame borrows the session)
     let mut tune = a.tune.or(a.world_edit.then_some(Page::World)).map_or_else(Tune::default, Tune::shown);
+    if let Some(t) = &a.tune_search {
+        tune.set_search(t);
+    }
     tune.loaded(sess.as_ref());
     let mut world = WorldEdit::default();
     if a.world_edit {
@@ -1331,7 +1405,9 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             world.mode = mode;
             world.sel = (!world.file.pieces.is_empty()).then(|| n.min(world.file.pieces.len() - 1));
         }
-        world.skirt_base = motorview::procgen::fill::mesh_pieces(&world.file, &s).skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
+        let meshed = motorview::procgen::fill::mesh_pieces(&world.file, &s);
+        world.skirt_base = meshed.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
+        world.hill_crest = meshed.hills;
         let centre = sess.as_ref().map(|ss| TrackCache::new(&ss.race).centre).unwrap_or_default();
         world.run(Cmd::Holes, &s, &centre);
         if let Some(k) = a.world_tool {
@@ -1360,7 +1436,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         ed.gizmos(&mut g, cam.pos * world_edit::FLIP, view.fov_x, sess.as_ref().map(|s| &s.race));
     }
     let mut text = OverlayText {
-        info: if a.overlay { info_lines(None, track, &cam, &picker, hit, sess.as_ref()).into_iter().map(Line::from).collect() } else { Vec::new() },
+        telem: a.overlay.then(|| telemetry(None, track, &cam, &picker, hit, sess.as_ref())),
         panel: dbg.panel(sess.as_ref()),
         labels: g.labels,
         ..Default::default()
@@ -1390,7 +1466,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         text.right.push(lines);
         layer = layer.or(l);
     }
-    let mut gui = (a.tune.is_some() || a.menu.is_some() || a.world_edit || a.confirm_exit || !text.is_empty()).then(|| Gui::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, None));
+    let mut gui = (a.tune.is_some() || a.sim_toast.is_some() || a.menu.is_some() || a.world_edit || a.confirm_exit || !text.is_empty()).then(|| Gui::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, None));
     let mut tview = a.view();
     let mut bar_h = 0.0;
     let mut pane_w = 0.0;
@@ -1399,26 +1475,34 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     let mut shot_wire = a.wireframe;
     let painted = gui.as_mut().map(|g| {
         g.run_headless(a.size, |ui| {
+            glass_ui::begin(ui.ctx(), a.solid_ui);
             if a.tune.is_some() || a.menu.is_some() || a.world_edit {
             let mut st = RibbonState::default();
             if let Some(tab) = a.menu {
                 st.tab = tab;
-                let mut m = Ribbon { st: &mut st, tune: &mut tune, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
+                st.pick = a.ribbon_pick;
+                if let Some(name) = &a.ribbon_flyout {
+                    if !st.open_flyout(name) {
+                        eprintln!("--ribbon-flyout: no group {name} on the {} tab", tab.name());
+                    }
+                }
+                let mut m = Ribbon { st: &mut st, tune: &mut tune, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, solid_ui: a.solid_ui, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
                 bar_h = m.bar(ui) * ui.ctx().pixels_per_point();
             }
             let textures = &s.world_textures_sorted;
-            if a.world_edit {
-                bar_h += palette::options(ui, &mut world, textures) * ui.ctx().pixels_per_point();
-            }
-            let sb = status::StatusBar { hint: world.hint(a.world_edit, false, false, false), note: &world.note, fps: 0.0, sim: dbg.status(), job: None };
+            let ppp = ui.ctx().pixels_per_point();
+            // the World palette and options strip float under the toolbar
+            let card_top = bar_h / ppp + 2.0;
+            let sb = status::StatusBar { hint: world.hint(a.world_edit, false, false), note: &world.note, tag: (a.world_edit && world.unsaved()).then(|| "unsaved".to_string()), fps: 0.0, paused: dbg.paused, speed: dbg.time_scale(), mode: mode_name(tview.mode), job: None };
             status_h = sb.show(ui) * ui.ctx().pixels_per_point();
             if a.world_edit {
-                left_w = palette::palette(ui, &mut world) * ui.ctx().pixels_per_point();
+                left_w = palette::palette(ui, &mut world, card_top, status_h / ppp) * ppp;
             }
             let mut ghost_files = Some(Vec::new());
             let mut path = String::new();
             let mut none = None;
             let names = cine_edit::names(sess.as_ref());
+            let world_sub = format!("track {track} fill · {}", if world.unsaved() { "unsaved" } else { "saved" });
             let mut page = |p: Page, ui: &mut egui::Ui| match p {
                 Page::World => world.panel_body(ui, textures),
                 Page::Ghost => ghost_page(ui, &mut path, "", &mut ghost_files, ghost.as_ref(), &mut none),
@@ -1431,12 +1515,19 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             };
             let focus = sess.as_ref().map(|ss| ss.focus);
             let paint = focus.and_then(|f| s.car_colours.get(f)).map(|&own| (paint.filter(|p| Some(p.0) == focus).map_or(own, |p| p.1.colours), own));
-            let w = tune.pane(ui, sess.as_mut(), Targets { view: &mut tview, track_fog: Some((track, s.look.fog)), track_sky: s.hdri.as_ref().map(|h| (track, h.dome())), paint, local_status, probe_gizmos: None }, &mut page);
+            let w = tune.pane(ui, sess.as_mut(), Targets { view: &mut tview, track_fog: Some((track, s.look.fog)), track_sky: s.hdri.as_ref().map(|h| (track, h.dome())), paint, local_status, probe_gizmos: None, world_sub }, &mut page);
             pane_w = w * ui.ctx().pixels_per_point();
+            if a.world_edit {
+                palette::options(ui, &mut world, textures, card_top, left_w / ppp, a.size.0 as f32 / ppp - left_w / ppp - pane_w / ppp - 12.0);
+            }
+            if let Some(paused) = a.sim_toast {
+                status::sim_toast(ui.ctx(), paused, 0.5, (left_w / ppp, a.size.0 as f32 / ppp - pane_w / ppp), bar_h / ppp + 10.0);
+            }
             }
             overlay::paint(ui.ctx(), a.size, &cam, view.fov_x, &text, a.overlay, (bar_h, pane_w, status_h, left_w));
             if a.confirm_exit {
-                overlay::exit_dialog(ui.ctx());
+                let file = (a.confirm_unsaved || (a.world_edit && world.unsaved())).then(|| format!("track {track}'s fill"));
+                overlay::exit_dialog(ui.ctx(), file.as_deref());
             }
         })
     });
@@ -1445,6 +1536,17 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     f.debug_lines = &g.lines;
     f.debug_xray = &g.xray;
     f.debug_xray_tris = &g.xray_tris;
+    // the egui pass ran first, so this frame frosts the scene behind its glass panels (#395)
+    f.frost = gui.as_ref().and_then(|g| glass_ui::frost(&g.ctx));
+    // --wgsl: draw a frame (everything built on first use exists), set the shader values, rebuild, then the shot
+    if !a.wgsl.is_empty() {
+        let _ = gpu.capture(a.size.0, a.size.1, &cam, &view, &f);
+        for (n, v) in &a.wgsl {
+            let e = motorview::consts::CATALOG.iter().find(|e| e.kind == motor_tune::catalog::Kind::Wgsl && e.name == n).ok_or_else(|| format!("--wgsl: no shader constant {n}"))?;
+            motor_tune::wgsl::set(e.file, e.name, Some(v));
+        }
+        gpu.rebuild_shaders()?;
+    }
     let px = if painted.is_some() || layer.is_some() {
         let mut assets = Assets::font_only(&a.root);
         if let (Some(l), Some(slot)) = (layer, assets.atlas.reserve("preview", TEX, TEX)) {
@@ -1518,7 +1620,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             Follow::Ghost => ghost.as_ref().and_then(|g| g.pose(ss)).map(|p| (p.pos, p.rot)).ok_or("the ghost has no pose at this time (try --sim-seconds)")?,
             Follow::Car(i) => ss.race.racers.get(i).map(|r| (r.car.pos, r.car.rot)).ok_or("no such grid slot for --ghost-follow")?,
         };
-        let gcam = PoseCam::new(a.ghost_cam).camera(&ss.race, &ss.tune, at.0, at.1, 1.0 / 60.0);
+        let gcam = PoseCam::new(a.ghost_cam).camera(&ss.race, &ss.base_tune(), at.0, at.1, 1.0 / 60.0);
         let gview = dbg.passes.view(&a.view());
         let mut gparts = dbg.passes.parts(Some(ss), &gcam, &gview);
         ghost_scene(&mut gparts, ss, ghost.as_ref(), a.ghost_cam, a.ghost_follow);
@@ -1566,6 +1668,8 @@ struct App {
     view: View,
     keys: HashSet<KeyCode>,
     steer_keys: SteerKeys,
+    /// CLASSIC (#376): the game's pedals for the arrow-key driving
+    pedals: Pedals,
     looking: bool,
     /// right-drag look holds the cursor: where it was when the button went down (restored on release)
     look_at: Option<(f32, f32)>,
@@ -1586,6 +1690,10 @@ struct App {
     confirm_exit: bool,
     /// the exit dialog's Exit button was clicked
     exit_now: bool,
+    /// Solid panels (View > Show, `--solid-ui`): opaque glass, no scene frost
+    solid_ui: bool,
+    /// the scene frost behind the last egui pass's glass panels (#395), used by the next frame's scene
+    glass: Option<SceneFrost>,
     /// this frame's overlay text and crosshair, painted by the egui pass
     ov: Option<(OverlayText, bool)>,
     /// (frames per second, frames counted, counting since)
@@ -1603,6 +1711,9 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     /// short message under the overlay info (text, since)
     note: Option<(String, Instant)>,
+    /// the sim's paused flag as last seen, and when it changed (the top-middle toast)
+    sim_state: bool,
+    sim_toast: Option<Instant>,
     /// the loaded track (inspector, browser, light gizmos, texture preview)
     scene: Option<scene::Scene>,
     /// atlas slot of the texture preview and the layer in it
@@ -1630,8 +1741,7 @@ struct App {
     ghost_files: Option<Vec<ghost::Entry>>,
     ghost_load: Option<PathBuf>,
     gui: Option<Gui>,
-    /// ribbon shown (\), its height and the Properties pane's width in pixels (last frame; 0 when hidden)
-    menu_bar: bool,
+    /// the top bar and shelf's height (the shelf hides with `\`) in pixels (last frame)
     bar_h: f32,
     /// the Properties dock (right) and the status bar (bottom), in pixels
     pane_w: f32,
@@ -1713,15 +1823,16 @@ impl App {
     }
 
     /// Sim > Car, C: `switch` to another car on the same track with the camera kept: the free
-    /// camera and the pause as they are, the race camera's mode, tuning and followed slot too.
+    /// camera and the pause as they are, the race camera's mode, chase follow setting and followed slot too
+    /// (the camera values are the live tunables, so they stay anyway).
     /// The race restarts, the new car on the grid.
     fn switch_car(&mut self, car: u32) {
         let keep = (self.cam, self.free, self.dbg.paused);
-        let old = self.sess.as_ref().map(|ss| (ss.cam, ss.tune, ss.focus));
+        let old = self.sess.as_ref().map(|ss| (ss.cam, ss.follow, ss.focus));
         self.switch(self.track, car);
         (self.cam, self.free, self.dbg.paused) = keep;
-        if let (Some((cam, tune, focus)), Some(ss)) = (old, self.sess.as_mut()) {
-            (ss.cam, ss.tune) = (cam, tune);
+        if let (Some((cam, follow, focus)), Some(ss)) = (old, self.sess.as_mut()) {
+            (ss.cam, ss.follow) = (cam, follow);
             if focus < ss.race.racers.len() {
                 ss.focus = focus;
             }
@@ -1743,7 +1854,14 @@ impl App {
                             eprintln!("{}: {w}", p.display());
                         }
                         self.cine.msg = if warns.is_empty() { format!("opened {}", p.display()) } else { format!("{} warnings: {}", warns.len(), warns.join("; ")) };
-                        self.cine.set(seq, Some(p));
+                        // a file of the install's old folder is saved (and rendered) in the sequences folder
+                        let home = cine_edit::home(&self.args.root, &p);
+                        let moved = home != p && !home.exists();
+                        self.cine.set(seq, Some(home));
+                        if moved {
+                            self.cine.dirty = true;
+                            self.cine.msg += " (old folder: Ctrl+S saves a copy to the Cine folder)";
+                        }
                         load = true;
                     }
                     Err(e) => {
@@ -2042,6 +2160,7 @@ impl App {
                 p.set_fill(&fill.verts, &fill.pieces);
             }
             self.world.skirt_base = fill.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
+            self.world.hill_crest = fill.hills;
             if self.last_water != self.world.file.water {
                 g.set_water(s, &motorview::procgen::water::build(&self.world.file.water, s));
                 self.last_water = self.world.file.water.clone();
@@ -2255,19 +2374,13 @@ impl App {
         Some(lines[i..].to_vec())
     }
 
-    /// Copy what the crosshair points at (object position, label, surface) to the clipboard.
-    fn copy_target(&mut self) {
-        let Some(lines) = self.target_lines() else {
-            self.note("nothing targeted");
-            return;
-        };
-        let text = lines.join("\n");
-        println!("{text}");
+    /// Copy `text` to the clipboard (the F3 card's copy button).
+    fn copy_text(&mut self, text: String) {
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().map_err(|e| eprintln!("clipboard: {e}")).ok();
         }
         let ok = self.clipboard.as_mut().is_some_and(|c| c.set_text(text).map_err(|e| eprintln!("clipboard: {e}")).is_ok());
-        self.note(if ok { "copied to clipboard" } else { "clipboard unavailable (printed to stdout)" });
+        self.note(if ok { "copied to clipboard" } else { "clipboard unavailable" });
     }
 
     /// I: a targeted car becomes the followed car (with the sim panel on); anything else is
@@ -2312,7 +2425,7 @@ impl App {
     /// The ghost view window: a second surface on the same device and format.
     fn open_ghost_window(&mut self, el: &ActiveEventLoop) {
         let (Some(inst), Some(adapter), Some(gpu), Some(main)) = (&self.inst, &self.adapter, &self.gpu, &self.config) else { return };
-        let window = match el.create_window(Window::default_attributes().with_title("motorview — ghost").with_inner_size(winit::dpi::LogicalSize::new(960, 540))) {
+        let window = match el.create_window(app_icon(Window::default_attributes()).with_title("motorview — ghost").with_inner_size(winit::dpi::LogicalSize::new(960, 540))) {
             Ok(w) => Arc::new(w),
             Err(e) => return eprintln!("ghost window: {e}"),
         };
@@ -2386,7 +2499,7 @@ impl App {
         };
         let cam = match at {
             Some((pos, rot)) => {
-                let c = gw.cam.camera(&sess.race, &sess.tune, pos, rot, dt);
+                let c = gw.cam.camera(&sess.race, &sess.base_tune(), pos, rot, dt);
                 gw.held = Some(c);
                 c
             }
@@ -2423,7 +2536,9 @@ impl App {
         let held = |arrow: KeyCode, letter: KeyCode| !ctrl && (self.keys.contains(&arrow) || wasd && self.keys.contains(&letter));
         let (left, right) = (held(KeyCode::ArrowLeft, KeyCode::KeyA), held(KeyCode::ArrowRight, KeyCode::KeyD));
         let (throttle, brake) = (held(KeyCode::ArrowUp, KeyCode::KeyW), held(KeyCode::ArrowDown, KeyCode::KeyS));
-        Input { throttle: throttle as u8 as f32, brake: brake as u8 as f32, steer: self.steer_keys.update(left, right, dt), ..Default::default() }
+        let racing = self.sess.as_ref().is_none_or(|s| s.race.started());
+        let (throttle, brake) = self.pedals.update(throttle as u8 as f32, brake as u8 as f32, racing, dt);
+        Input { throttle, brake, steer: self.steer_keys.update(left, right, dt), ..Default::default() }
     }
 
     fn update(&mut self, dt: f32) {
@@ -2561,6 +2676,8 @@ impl App {
         f.debug_lines = &g.lines;
         f.debug_xray = &g.xray;
         f.debug_xray_tris = &g.xray_tris;
+        // the scene blurred behind the glass panels, never in an F12 shot (#395)
+        f.frost = self.glass.filter(|_| !self.clean);
         gpu.draw(enc, target, depth, size, &self.cam, &view, &f);
         if let (true, Some(ss)) = (self.mirror, sess.filter(|s| !s.look_back)) {
             // the mirror is a second scene pass: the shared uniforms take their values at submit
@@ -2600,13 +2717,11 @@ impl App {
         text.right.extend(self.dbg.pinned.clone());
         text.right.push(self.dbg.render_lines(&self.view));
         if let (Some(p), true) = (&self.picker, self.overlay) {
-            text.info = info_lines(Some(self.fps.0), self.track, &self.cam, p, hit, sess).into_iter().map(Line::from).collect();
+            let mut t = telemetry(Some(self.fps.0), self.track, &self.cam, p, hit, sess);
             if self.free {
-                text.info.insert(2, format!("camera speed: x{:.2} ({:.1} m/s)", self.speed, 15.0 * self.speed).into());
+                t.rows.insert(1, Row { cap: "speed", val: Val::Text(format!("x{:.2} · {:.1} m/s", self.speed, 15.0 * self.speed)), line: String::new() });
             }
-        }
-        if !self.clean && (self.overlay || self.dbg.paused || self.dbg.time_scale() != 1.0) {
-            text.info.push(self.dbg.status().into());
+            text.telem = Some(t);
         }
         if self.view.debug.shade != DebugShade::Off {
             text.info.push(format!("shading view: {} (F10)", self.view.debug.shade.name()).into());
@@ -2614,6 +2729,10 @@ impl App {
         // `gpu` is the parameter: `self.gpu` is taken out while a frame renders
         if self.wireframe.on() {
             text.info.extend(wire_lines(self.wireframe, gpu, self.sess.as_ref().map(|s| s.focus), self.view.generated_cars()));
+        }
+        // before the note: the copy button copies the card, not its own "copied" message
+        if let Some(t) = &text.telem {
+            text.copy_md = t.markdown(&text.info);
         }
         if let Some((n, _)) = self.note.as_ref().filter(|(_, t)| !self.clean && t.elapsed().as_secs_f32() < 2.0) {
             text.info.push(n.clone().into());
@@ -2650,8 +2769,33 @@ impl App {
         self.ghost_frame();
     }
 
+    /// The World Editor's fill file name while it holds edits that are not saved (the exit requester's three-way ask).
+    fn unsaved_fill(&self) -> Option<String> {
+        (self.world.open && self.world.unsaved()).then(|| format!("track {}'s fill", self.track))
+    }
+
+    /// The exit requester was answered: Save writes the fill first and exits only when that worked.
+    fn exit_choice(&mut self, c: overlay::Exit) {
+        match c {
+            overlay::Exit::Save => {
+                if let Some(s) = &self.scene {
+                    self.world.run(Cmd::Save, s, &[]);
+                }
+                if self.world.unsaved() {
+                    // the save failed: stay, the editor's note says why
+                    self.confirm_exit = false;
+                } else {
+                    self.exit_now = true;
+                }
+            }
+            overlay::Exit::Discard => self.exit_now = true,
+            overlay::Exit::Cancel => self.confirm_exit = false,
+        }
+    }
+
     /// The egui pass: the ribbon and the Properties pane.
     fn egui(&mut self, ui: &mut egui::Ui) {
+        glass_ui::begin(ui.ctx(), self.solid_ui);
         self.bar_h = 0.0;
         self.status_h = 0.0;
         self.pane_w = 0.0;
@@ -2661,15 +2805,18 @@ impl App {
         }
         if let Some((text, crosshair)) = &self.ov {
             let size = self.config.as_ref().map_or((1, 1), |c| (c.width, c.height));
-            overlay::paint(ui.ctx(), size, &self.cam, self.view.fov_x, text, *crosshair, (self.bar_h, self.pane_w, self.status_h, self.left_w));
-        }
-        if self.confirm_exit {
-            match overlay::exit_dialog(ui.ctx()) {
-                Some(true) => self.exit_now = true,
-                Some(false) => self.confirm_exit = false,
-                None => {}
+            if overlay::paint(ui.ctx(), size, &self.cam, self.view.fov_x, text, *crosshair, (self.bar_h, self.pane_w, self.status_h, self.left_w)) {
+                let md = text.copy_md.clone();
+                self.copy_text(md);
             }
         }
+        if self.confirm_exit {
+            let file = self.unsaved_fill();
+            if let Some(c) = overlay::exit_dialog(ui.ctx(), file.as_deref()) {
+                self.exit_choice(c);
+            }
+        }
+        self.glass = glass_ui::frost(ui.ctx());
     }
 
     /// The ribbon, status bar, Properties pane and World Editor panels.
@@ -2679,7 +2826,7 @@ impl App {
             self.look_at(c * world_edit::FLIP, r);
         }
         let ppp = ui.ctx().pixels_per_point();
-        if self.menu_bar {
+        {
             let mut m = Ribbon {
                 st: &mut self.ribbon,
                 tune: &mut self.tune,
@@ -2690,6 +2837,7 @@ impl App {
                 drive_free: self.drive_free,
                 overlay: self.overlay,
                 cross: self.cross,
+                solid_ui: self.solid_ui,
                 wireframe: &mut self.wireframe,
                 mirror: self.mirror,
                 track: self.track,
@@ -2708,20 +2856,21 @@ impl App {
             self.pending.extend(m.acts);
         }
         let textures: &[String] = self.scene.as_ref().map_or(&[], |s| &s.world_textures_sorted);
-        if self.world.open {
-            self.bar_h += palette::options(ui, &mut self.world, textures) * ppp;
-        }
+        // the World palette and options strip float under the toolbar
+        let card_top = self.bar_h / ppp + 2.0;
         let note = self.note.as_ref().filter(|(_, t)| t.elapsed().as_secs_f32() < 4.0).map_or("", |(n, _)| n.as_str());
         let note = if note.is_empty() { self.world.note.as_str() } else { note };
-        let hint = if self.cine_mouse() { cine_edit::HINT.to_string() } else { self.world.hint(self.world.open, self.free, self.sess.is_some(), self.mods & SHIFT != 0) };
-        let sb = status::StatusBar { hint, note, fps: self.fps.0, sim: self.dbg.status(), job: self.cine.job_status() };
+        let hint = if self.cine_mouse() { glass_ui::hint(cine_edit::HINT) } else { self.world.hint(self.world.open, self.free, self.sess.is_some()) };
+        let tag = (self.world.open && self.world.unsaved()).then(|| "unsaved".to_string());
+        let sb = status::StatusBar { hint, note, tag, fps: self.fps.0, paused: self.dbg.paused, speed: self.dbg.time_scale(), mode: mode_name(self.view.mode), job: self.cine.job_status() };
         self.status_h = sb.show(ui) * ppp;
-        self.left_w = if self.world.open { palette::palette(ui, &mut self.world) * ppp } else { 0.0 };
+        self.left_w = if self.world.open { palette::palette(ui, &mut self.world, card_top, self.status_h / ppp) * ppp } else { 0.0 };
         let track_fog = self.scene.as_ref().map(|s| (self.track, s.look.fog));
         let track_sky = self.scene.as_ref().and_then(|s| s.hdri.as_ref()).map(|h| (self.track, h.dome()));
         if self.tune.page == Some(Page::Ghost) {
             self.ghost_files.get_or_insert_with(ghost::list);
         }
+        let world_sub = format!("track {} fill · {}", self.track, if self.world.unsaved() { "unsaved" } else { "saved" });
         let world = &mut self.world;
         let (cine, root, names) = (&mut self.cine, &self.args.root, cine_edit::names(self.sess.as_ref()));
         let mut page = |p: Page, ui: &mut egui::Ui| match p {
@@ -2734,7 +2883,22 @@ impl App {
             let own = *self.scene.as_ref()?.car_colours.get(ss.focus)?;
             Some((self.paints.get(&ss.focus).copied().unwrap_or(own), own))
         });
-        self.pane_w = self.tune.pane(ui, self.sess.as_mut(), Targets { view: &mut self.view, track_fog, track_sky, paint, local_status: self.local_status, probe_gizmos: Some(&mut self.dbg.layers.probes) }, &mut page) * ppp;
+        self.pane_w = self.tune.pane(ui, self.sess.as_mut(), Targets { view: &mut self.view, track_fog, track_sky, paint, local_status: self.local_status, probe_gizmos: Some(&mut self.dbg.layers.probes), world_sub }, &mut page) * ppp;
+        // the sim was paused or resumed (by any writer of `dbg.paused`): a toast at the top middle of the viewport
+        if self.dbg.paused != self.sim_state {
+            self.sim_state = self.dbg.paused;
+            self.sim_toast = Some(Instant::now());
+        }
+        if let Some(t) = self.sim_toast {
+            let right = ui.ctx().content_rect().width() - self.pane_w / ppp;
+            if !status::sim_toast(ui.ctx(), self.dbg.paused, t.elapsed().as_secs_f32(), (self.left_w / ppp, right), self.bar_h / ppp + 10.0) {
+                self.sim_toast = None;
+            }
+        }
+        if self.world.open {
+            let room = ui.ctx().content_rect().width() - self.left_w / ppp - self.pane_w / ppp - 12.0;
+            palette::options(ui, &mut self.world, textures, card_top, self.left_w / ppp, room);
+        }
         // a picker drag reloads the scene once, when the button is let go
         if self.tune.paint_req.is_some() && !ui.ctx().input(|i| i.pointer.any_down()) {
             if let Some((slot, c)) = self.tune.paint_req.take() {
@@ -2746,6 +2910,20 @@ impl App {
                 }
                 // after the frame: the frame holds the GPU the new scene is uploaded to
                 self.repaint_due = true;
+            }
+        }
+        // the Constants page's Reload: values read when the track loads (after the frame, like a paint edit)
+        if std::mem::take(&mut self.tune.consts.reload_req) {
+            self.repaint_due = true;
+        }
+        // the Constants page's Rebuild shaders: the shader values set there apply
+        if std::mem::take(&mut self.tune.consts.shader_req) {
+            if let Some(g) = self.gpu.as_mut() {
+                let r = g.rebuild_shaders();
+                if let Err(e) = &r {
+                    eprintln!("shaders not rebuilt: {e}");
+                }
+                self.tune.consts.rebuilt(r);
             }
         }
         if let Some((n, f)) = self.tune.fog_saved.take() {
@@ -2761,9 +2939,9 @@ impl App {
         }
     }
 
-    /// The ribbon or the Properties pane is up (egui gets the window input).
+    /// The top bar is always up (egui gets the window input).
     fn egui_shown(&self) -> bool {
-        self.menu_bar || self.tune.page.is_some() || self.confirm_exit
+        true
     }
 
     /// egui has something to draw: panels, the exit dialog or the overlay text.
@@ -2786,6 +2964,9 @@ impl App {
         self.render(gpu, &mut enc, &view, depth, size);
         // only take the egui host while it shows something (a tuple would take it every frame)
         let shown = self.egui_paints();
+        if !shown {
+            self.glass = None;
+        }
         if let Some((w, mut gui)) = self.window.clone().filter(|_| shown).zip(self.gui.take_if(|_| shown)) {
             if let Some(p) = gui.run(&w, |ui| self.egui(ui)) {
                 gui.paint(&gpu.device, &gpu.queue, &mut enc, &view, size, p);
@@ -2848,6 +3029,10 @@ impl App {
     fn act(&mut self, act: Act, i: usize) {
         match act {
             Act::Escape if self.grabbed => self.grab(false),
+            // a dropdown or combo list is open: egui closes it on this Esc
+            Act::Escape if self.gui.as_ref().is_some_and(|g| g.popup_open()) => {}
+            // a flyout of the shelf is up: Esc closes it first
+            Act::Escape if self.ribbon.fly.take().is_some() => {}
             Act::Escape if self.world.open && self.world.cancel() => self.note("piece cancelled"),
             Act::Escape => self.confirm_exit = true,
             Act::FreeCam => {
@@ -2915,7 +3100,7 @@ impl App {
             }
             Act::Screenshot => self.screenshot = true,
             Act::ReloadCars => self.reload_cars(true),
-            Act::CineAddCam | Act::CineAddKey | Act::CinePreview | Act::CineCut if !self.cine.active() => self.note("Cine: open or start a sequence first (ribbon Cine tab)"),
+            Act::CineAddCam | Act::CineAddKey | Act::CinePreview | Act::CineCut if !self.cine.active() => self.note("Cine: open or start a sequence first (toolbar Cine tab)"),
             Act::CineAddCam => self.cine.reqs.push(Req::AddStatic),
             Act::CineAddKey => self.cine.reqs.push(Req::AddKey),
             Act::CineCut => self.cine.reqs.push(Req::Cut),
@@ -2947,6 +3132,10 @@ impl App {
             Act::Mode => self.view.mode = self.view.mode.toggle(),
             Act::Paint => self.view.remaster.enhanced_paint ^= true,
             Act::Lights => self.view.remaster.dynamic_lights ^= true,
+            Act::Flashlight => {
+                self.view.debug.flashlight ^= true;
+                self.note(if self.view.debug.flashlight { "flashlight on" } else { "flashlight off" });
+            }
             Act::Msaa => {
                 let l = RemasterView::MSAA_LEVELS;
                 let i = l.iter().position(|&n| n == self.view.remaster.msaa()).unwrap_or(0);
@@ -2990,7 +3179,7 @@ impl App {
             Act::GhostFollow => {
                 let follow = if i == 0 { Follow::Ghost } else { Follow::Car(i - 1) };
                 if follow == Follow::Ghost && self.ghost.is_none() {
-                    self.note("load a ghost first (ribbon Ghost tab)");
+                    self.note("load a ghost first (toolbar Ghost tab)");
                 } else {
                     self.ghost_follow = follow;
                     if let Some(gw) = self.ghost_win.as_mut() {
@@ -3039,13 +3228,9 @@ impl App {
             Act::World(c) if self.world.open => self.world.cmds.push(c),
             Act::WorldNew if self.world.open => self.world.cmds.push(Cmd::Start(Kind::ALL[i.min(5)])),
             Act::World(_) | Act::WorldNew => {}
-            Act::MenuBar => {
-                self.menu_bar ^= true;
-                if !self.menu_bar {
-                    self.bar_h = 0.0;
-                }
-                self.ribbon.minimised = false;
-            }
+            Act::SolidUi => self.solid_ui ^= true,
+            // the shelf under the top bar (the bar itself stays)
+            Act::MenuBar => self.ribbon.minimised ^= true,
         }
     }
 }
@@ -3056,7 +3241,7 @@ impl ApplicationHandler for App {
             return;
         }
         let window = Arc::new(
-            el.create_window(Window::default_attributes().with_title("motorview").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)))
+            el.create_window(app_icon(Window::default_attributes()).with_title("motorview").with_inner_size(winit::dpi::LogicalSize::new(1280, 720)))
                 .expect("create window"),
         );
         let inst = instance();
@@ -3113,7 +3298,11 @@ impl ApplicationHandler for App {
         }
         // the menu bar and tuning window take clicks, wheel and typing over them; key releases
         // always pass, and so does the mouse while the free camera holds it
-        if let (true, Some(g), Some(w)) = (self.egui_shown(), self.gui.as_mut(), self.window.as_ref()) {
+        // egui-winit reports every Tab press as consumed (egui moves its widget focus); with no text field
+        // being edited it goes to the key table (free camera) instead and egui never sees it
+        let tab_to_keys = matches!(&ev, WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && event.physical_key == PhysicalKey::Code(KeyCode::Tab))
+            && !self.gui.as_ref().is_some_and(|g| g.wants_keys());
+        if let (true, false, Some(g), Some(w)) = (self.egui_shown(), tab_to_keys, self.gui.as_mut(), self.window.as_ref()) {
             let used = g.on_event(w, &ev);
             let take = match &ev {
                 WindowEvent::KeyboardInput { event, .. } => event.state == ElementState::Pressed && (used || g.wants_keys()),
@@ -3166,8 +3355,6 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } if !self.confirm_exit => {
                 if self.free && !self.grabbed {
                     self.grab(true);
-                } else if self.free || self.overlay {
-                    self.copy_target();
                 }
             }
             WindowEvent::ModifiersChanged(m) => {
@@ -3207,10 +3394,15 @@ impl ApplicationHandler for App {
                 }
                 self.keys.insert(code);
                 if self.confirm_exit {
+                    let unsaved = self.unsaved_fill().is_some();
                     match code {
-                        KeyCode::KeyY | KeyCode::Enter | KeyCode::NumpadEnter => el.exit(),
-                        KeyCode::KeyN | KeyCode::Escape => self.confirm_exit = false,
+                        KeyCode::KeyY | KeyCode::Enter | KeyCode::NumpadEnter => self.exit_choice(if unsaved { overlay::Exit::Save } else { overlay::Exit::Discard }),
+                        KeyCode::KeyD if unsaved => self.exit_choice(overlay::Exit::Discard),
+                        KeyCode::KeyN | KeyCode::Escape => self.exit_choice(overlay::Exit::Cancel),
                         _ => {}
+                    }
+                    if self.exit_now {
+                        el.exit();
                     }
                     return;
                 }
@@ -3272,8 +3464,8 @@ fn ground_below(pk: &Picker, p: Vec3, skip: &[bool]) -> Option<f32> {
 fn cine(a: &Args) -> Result<(), String> {
     use motorview::cine_render::{self, Out, RenderOpts};
     let arg = a.cine.as_deref().ok_or("--cine FILE")?;
-    // a bare name is looked for in the install's remaster/cine folder
-    let path = if arg.exists() { arg.to_path_buf() } else { a.root.join("remaster/cine").join(arg) };
+    // a bare name is looked for in the Cine folder of the config, then in the install's old remaster/cine
+    let path = cine_edit::resolve(&a.root, arg);
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (seq, warnings) = motorview::cine::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     for w in &warnings {
@@ -3293,6 +3485,11 @@ fn cine(a: &Args) -> Result<(), String> {
         _ => return Err("--cine FILE needs --render OUT, or --shot OUT --at-time S".into()),
     };
     cine_render::render(&a.root, &opts, &seq, out)
+}
+
+/// motorview's window icon and app id (assets/icon/tools/motorview, #407).
+fn app_icon(attrs: winit::window::WindowAttributes) -> winit::window::WindowAttributes {
+    motorview::app_icon::apply_with(attrs, "motorhead-motorview", include_bytes!("../../../assets/icon/tools/motorview/motorview-256.png"))
 }
 
 fn main() {
@@ -3386,12 +3583,14 @@ fn main() {
     // the race is paused in free camera (P runs it)
     dbg.paused = args.free;
     let swap_mesh = args.swap_mesh;
+    let paused0 = dbg.paused;
     let mut app = App {
         track: args.track,
         car: args.car,
         cars: drive::lineup(args.car),
         free: args.free,
         drive_free: args.drive_free,
+        solid_ui: args.solid_ui,
         args,
         window: None,
         surface: None,
@@ -3404,6 +3603,7 @@ fn main() {
         view,
         keys: HashSet::new(),
         steer_keys: SteerKeys::default(),
+        pedals: Pedals::default(),
         looking: false,
         look_at: None,
         last: Instant::now(),
@@ -3426,6 +3626,8 @@ fn main() {
         clean: false,
         clipboard: None,
         note: None,
+        sim_state: paused0,
+        sim_toast: None,
         scene: None,
         preview_slot: None,
         preview: None,
@@ -3448,7 +3650,7 @@ fn main() {
         left_w: 0.0,
         status_h: 0.0,
         gui: None,
-        menu_bar: true,
+        glass: None,
         bar_h: 0.0,
         pending: Vec::new(),
         mods: 0,

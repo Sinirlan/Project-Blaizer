@@ -6,67 +6,184 @@
 
 use crate::scene::FxLayers;
 use glam::Vec3;
+use motor_sim::session::ViewPose;
 use motor_sim::{Car, World};
 use std::collections::VecDeque;
 
 /// Particles per ring (0x4453a4 wraps at 16).
 const RING: usize = 16;
-/// Animation rate of every effect (0x445338(30.0) at 0x445db1..0x445e66) [O].
-const ANIM_FPS: f32 = 30.0;
-/// Spawns per second. The original spawns once per rendered frame (0x445f84 from 0x45c704) and
-/// renders at a variable rate with no frame cap (02-architecture "Frame dt"); we spawn at a fixed
-/// 30 Hz, about its frame rate on period hardware, so the trail length doesn't depend on ours
-/// [design choice].
-const SPAWN_HZ: f32 = 30.0;
-/// Smoke grows by size * 0.5 * dt per update (0x4d38bd) and rises 1 unit/s (0x4455cb) [O].
-const SMOKE_GROWTH: f32 = 0.5;
-const SMOKE_RISE: f32 = 1.0;
-/// Spark strength = contact speed * 0.03 (0x4d7f66), capped at 1; sparks need >= 0.5
-/// (0x4d3b2d) [O]. The contact value (rb+0x74c) is taken as the hull point's speed [I].
-const SPARK_MIN: f32 = 0.5;
-/// Spark particles live two updates (anim flag 1, 0x44555a) [O]; at our spawn rate.
-const SPARK_LIFE: f32 = 2.0 / SPAWN_HZ;
+// Animation rate of every effect (0x445338(30.0) at 0x445db1..0x445e66) [O].
+motor_tune::tunable! {
+    /// Animation rate of every effect (0x445338, 0x445db1..0x445e66) [O].
+    /// range: 1..120
+    /// unit: Hz
+    /// area: Graphics/Effects
+    ANIM_FPS: f32 = 30.0;
+}
+// Spawns per second. The original spawns once per rendered frame (0x445f84 from 0x45c704) and
+// renders at a variable rate with no frame cap (02-architecture "Frame dt"); we spawn at a fixed
+// 30 Hz, about its frame rate on period hardware, so the trail length doesn't depend on ours
+// [design choice].
+motor_tune::tunable! {
+    /// Classic particle spawns per second: the original spawns once per rendered frame (0x445f84); we spawn at a fixed rate [design choice].
+    /// range: 5..240
+    /// unit: Hz
+    /// area: Graphics/Effects
+    SPAWN_HZ: f32 = 30.0;
+}
+// Smoke grows by size * 0.5 * dt per update (0x4d38bd) and rises 1 unit/s (0x4455cb) [O].
+motor_tune::tunable! {
+    /// Classic smoke grows by size x this x dt per update (0x4d38bd) [O].
+    /// range: 0..4
+    /// area: Graphics/Effects
+    SMOKE_GROWTH: f32 = 0.5;
+    /// Classic smoke rises this fast (0x4455cb) [O].
+    /// range: -4..8
+    /// unit: m/s
+    /// area: Graphics/Effects
+    SMOKE_RISE: f32 = 1.0;
+}
+// Spark strength = contact speed * 0.03 (0x4d7f66), capped at 1; sparks need >= 0.5
+// (0x4d3b2d) [O]. The contact value (rb+0x74c) is taken as the hull point's speed [I].
+motor_tune::tunable! {
+    /// Spark strength (contact speed x 0.03, capped at 1) needed to spawn sparks (0x4d3b2d) [O].
+    /// range: 0..1
+    /// area: Graphics/Effects
+    SPARK_MIN: f32 = 0.5;
+}
 // CLASSIC particle drawer (D3D, 0x43b398) [O]: every particle is record type 0x43 (flag 0x40 =
 // fade), drawn into list 0x4ebe38 with textured ONE/ONE blending, no fog, no z write, colour key
 // off (0x442b75..0x442bd7). With r = life left / life (1 for sparks, which never count it down):
 // size factor s = (1.5 - 0.5 r)^2 (0x4d3525, 0x4d34f5) and brightness k = 3 * (40 - 17.78 s)
 // (0x4d350d, 0x4d352d, 0x4d3505), x 0.75 for the smoke anim (0x4d3515); the vertex colour is
 // k * rgb as a byte. The (1 - z/far/far) term at 0x43b4ad is 0.99 or more and left out.
-const FADE_BASE: f32 = 1.5;
-const FADE_SLOPE: f32 = 0.5;
-const GLOW_BASE: f32 = 40.0;
-const GLOW_SLOPE: f32 = 17.78;
-const GLOW_GAIN: f32 = 3.0;
-const SMOKE_GLOW: f32 = 0.75;
-/// Sparks (anim flag 1 without 4) are drawn at 0.75 of the size (0x43b53d).
-const SPARK_SIZE: f32 = 0.75;
-/// The quad is pulled this many metres towards the camera: 1 m, sparks 2 m (0x4d3535, 0x4d353d).
-const PULL: f32 = 1.0;
-const PULL_SPARK: f32 = 2.0;
+motor_tune::tunable! {
+    /// Classic particle size factor s = (FADE_BASE - FADE_SLOPE r)^2, r = life left / life (0x4d3525).
+    /// range: 0.5..4
+    /// area: Graphics/Effects
+    FADE_BASE: f32 = 1.5;
+    /// Classic particle size factor slope (0x4d34f5).
+    /// range: 0..2
+    /// area: Graphics/Effects
+    FADE_SLOPE: f32 = 0.5;
+    /// Classic particle brightness k = GLOW_GAIN (GLOW_BASE - GLOW_SLOPE s) (0x4d350d).
+    /// range: 0..200
+    /// area: Graphics/Effects
+    GLOW_BASE: f32 = 40.0;
+    /// Classic particle brightness slope (0x4d352d).
+    /// range: 0..100
+    /// area: Graphics/Effects
+    GLOW_SLOPE: f32 = 17.78;
+    /// Classic particle brightness gain (0x4d3505).
+    /// range: 0..12
+    /// area: Graphics/Effects
+    GLOW_GAIN: f32 = 3.0;
+    /// Classic smoke brightness factor (0x4d3515).
+    /// range: 0..4
+    /// area: Graphics/Effects
+    SMOKE_GLOW: f32 = 0.75;
+}
+// Sparks (anim flag 1 without 4) are drawn at 0.75 of the size (0x43b53d).
+motor_tune::tunable! {
+    /// Classic sparks are drawn at this share of the size (0x43b53d).
+    /// range: 0.1..4
+    /// area: Graphics/Effects
+    SPARK_SIZE: f32 = 0.75;
+}
+// The quad is pulled this many metres towards the camera: 1 m, sparks 2 m (0x4d3535, 0x4d353d).
+motor_tune::tunable! {
+    /// The Classic particle quad is pulled this many metres towards the camera (0x4d3535).
+    /// range: 0..8
+    /// unit: m
+    /// area: Graphics/Effects
+    PULL: f32 = 1.0;
+    /// The same for sparks (0x4d353d).
+    /// range: 0..8
+    /// unit: m
+    /// area: Graphics/Effects
+    PULL_SPARK: f32 = 2.0;
+}
 
 // REMASTER particles (09-remaster 9.16) [all design choices]
 /// Ring size, spawn rate and smoke life: more, longer-lived puffs than the original's 16.
 const RING_MODERN: usize = 96;
-const SPAWN_HZ_MODERN: f32 = 60.0;
-/// Smoke growth per second (half-extent fraction), rise and drag of the drift velocity.
-const MODERN_GROWTH: f32 = 0.9;
-const MODERN_RISE: f32 = 0.7;
-const MODERN_DRAG: f32 = 1.6;
-/// Share of the car's velocity a puff starts with.
-const MODERN_INHERIT: f32 = 0.3;
-/// Sparks per contact (at least, and at full strength), their gravity (the car's 15.81),
-/// ring size, streak length per m/s and its cap. Friction leaves them behind the car: they keep
-/// a quarter of its velocity and leave in a cone pointing backwards.
-const SPARKS_MIN: usize = 10;
-const SPARKS_MAX: usize = 26;
-const SPARK_GRAVITY: f32 = 15.81;
+motor_tune::tunable! {
+    /// Remaster smoke spawn rate: more, longer-lived puffs than the original [design choice].
+    /// range: 5..240
+    /// unit: Hz
+    /// area: Graphics/Effects
+    SPAWN_HZ_MODERN: f32 = 60.0;
+}
+// Smoke growth per second (half-extent fraction), rise and drag of the drift velocity.
+motor_tune::tunable! {
+    /// Remaster smoke growth per second (half-extent fraction).
+    /// range: 0..4
+    /// area: Graphics/Effects
+    MODERN_GROWTH: f32 = 0.9;
+    /// Remaster smoke rise.
+    /// range: -4..8
+    /// unit: m/s
+    /// area: Graphics/Effects
+    MODERN_RISE: f32 = 0.7;
+    /// Remaster smoke drag of the drift velocity.
+    /// range: 0..10
+    /// unit: 1/s
+    /// area: Graphics/Effects
+    MODERN_DRAG: f32 = 1.6;
+}
+// Share of the car's velocity a puff starts with.
+motor_tune::tunable! {
+    /// Remaster: share of the car's velocity a puff starts with.
+    /// range: 0..1
+    /// area: Graphics/Effects
+    MODERN_INHERIT: f32 = 0.3;
+}
+// Sparks per contact (at least, and at full strength), their gravity (the car's 15.81),
+// ring size, streak length per m/s and its cap. Friction leaves them behind the car: they keep
+// a quarter of its velocity and leave in a cone pointing backwards.
+motor_tune::tunable! {
+    /// Remaster: sparks per contact at least (weakest contact).
+    /// range: 0..60
+    /// area: Graphics/Effects
+    SPARKS_MIN: usize = 10;
+    /// Remaster: sparks per contact at full strength.
+    /// range: 1..120
+    /// area: Graphics/Effects
+    SPARKS_MAX: usize = 26;
+    /// Remaster spark gravity (the car's 15.81).
+    /// range: 0..60
+    /// unit: m/s2
+    /// area: Graphics/Effects
+    SPARK_GRAVITY: f32 = 15.81;
+}
 const RING_SPARKS: usize = 256;
-const SPARK_INHERIT: f32 = 0.25;
-const SPARK_STREAK: f32 = 0.004;
-const SPARK_STREAK_MAX: f32 = 0.12;
-/// Share of the speed and of the height a spark keeps after bouncing off the ground.
-const SPARK_BOUNCE: f32 = 0.3;
-const SPARK_SLIDE: f32 = 0.6;
+motor_tune::tunable! {
+    /// Remaster: friction leaves sparks behind the car: they keep this share of its velocity.
+    /// range: 0..1
+    /// area: Graphics/Effects
+    SPARK_INHERIT: f32 = 0.25;
+    /// Remaster spark streak length per m/s.
+    /// range: 0..0.05
+    /// unit: s
+    /// area: Graphics/Effects
+    SPARK_STREAK: f32 = 0.004;
+    /// Remaster spark streak length cap.
+    /// range: 0..1
+    /// unit: m
+    /// area: Graphics/Effects
+    SPARK_STREAK_MAX: f32 = 0.12;
+}
+// Share of the speed and of the height a spark keeps after bouncing off the ground.
+motor_tune::tunable! {
+    /// Remaster: share of the speed and of the height a spark keeps after bouncing off the ground.
+    /// range: 0..1
+    /// area: Graphics/Effects
+    SPARK_BOUNCE: f32 = 0.3;
+    /// Remaster: share of the sideways speed a spark keeps after a bounce.
+    /// range: 0..1
+    /// area: Graphics/Effects
+    SPARK_SLIDE: f32 = 0.6;
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -160,10 +277,10 @@ impl Effects {
         self.rings.iter_mut().flatten().for_each(VecDeque::clear);
     }
 
-    /// Age everything (0x445518), then spawn for each car (0x445f84). `rear` gives each
-    /// car's rear wheel ground points (game space); `skip` is the car whose effects are not
+    /// Age everything (0x445518), then spawn for each car (0x445f84) at its drawn pose (#374: `Race::view_pose`).
+    /// `rear` gives each car's rear wheel ground points at that pose (game space); `skip` is the car whose effects are not
     /// spawned (the player's in the in-car view, 0x45c6de).
-    pub fn step(&mut self, dt: f32, world: &World, cars: &[(&Car, [Vec3; 2])], skip: Option<usize>) {
+    pub fn step(&mut self, dt: f32, world: &World, cars: &[(&Car, ViewPose, [Vec3; 2])], skip: Option<usize>) {
         for p in self.rings.iter_mut().flatten().flatten() {
             p.age += dt;
             if p.modern {
@@ -171,38 +288,38 @@ impl Effects {
                 p.pos += p.vel * dt;
                 p.rot += p.spin * dt;
                 if p.kind == Kind::Spark {
-                    p.vel.y -= SPARK_GRAVITY * dt;
+                    p.vel.y -= SPARK_GRAVITY.get() * dt;
                     // bounces on the ground it was thrown over
                     if p.pos.y < p.ground && p.vel.y < 0.0 {
                         p.pos.y = p.ground;
-                        p.vel.y = -p.vel.y * SPARK_BOUNCE;
-                        p.vel.x *= SPARK_SLIDE;
-                        p.vel.z *= SPARK_SLIDE;
+                        p.vel.y = -p.vel.y * SPARK_BOUNCE.get();
+                        p.vel.x *= SPARK_SLIDE.get();
+                        p.vel.z *= SPARK_SLIDE.get();
                     }
                 } else {
-                    p.vel *= (-MODERN_DRAG * dt).exp();
-                    p.size = p.size.map(|s| s + s * MODERN_GROWTH * dt);
+                    p.vel *= (-MODERN_DRAG.get() * dt).exp();
+                    p.size = p.size.map(|s| s + s * MODERN_GROWTH.get() * dt);
                 }
             } else if p.kind == Kind::Smoke {
-                p.pos.y += SMOKE_RISE * dt;
-                p.size = p.size.map(|s| s + s * SMOKE_GROWTH * dt);
+                p.pos.y += SMOKE_RISE.get() * dt;
+                p.size = p.size.map(|s| s + s * SMOKE_GROWTH.get() * dt);
             }
         }
         for ring in self.rings.iter_mut().flatten() {
             ring.retain(|p| p.age < p.life);
         }
-        let step = 1.0 / if self.remaster { SPAWN_HZ_MODERN } else { SPAWN_HZ };
+        let step = 1.0 / (if self.remaster { SPAWN_HZ_MODERN.get() } else { SPAWN_HZ.get() }).max(0.1);
         self.spawn_clock += dt;
         if self.spawn_clock < step {
             return;
         }
         self.spawn_clock = (self.spawn_clock - step).min(step);
-        for (i, (car, rear)) in cars.iter().enumerate().filter(|&(i, _)| Some(i) != skip) {
+        for (i, (car, pose, rear)) in cars.iter().enumerate().filter(|&(i, _)| Some(i) != skip) {
             if self.smoke {
-                self.spawn_tyres(i, car, rear);
+                self.spawn_tyres(i, car, pose, rear);
             }
             if self.sparks && !self.layers.sparks.is_empty() {
-                self.spawn_sparks(i, car, world, self.layers.sparks.len(), rear[0].y.min(rear[1].y));
+                self.spawn_sparks(i, car, pose, world, self.layers.sparks.len(), rear[0].y.min(rear[1].y));
             }
         }
     }
@@ -211,7 +328,7 @@ impl Effects {
     /// ContactAnimID, 03-physics step 7), spawned as 0x445fd9.. does. The original reads only the
     /// type (P[0x170+4r]); the strength (P[0x180+4r]) is packed into the net record only (0x40bc38),
     /// so only REMASTER smoke uses it.
-    fn spawn_tyres(&mut self, i: usize, car: &Car, rear: &[Vec3; 2]) {
+    fn spawn_tyres(&mut self, i: usize, car: &Car, pose: &ViewPose, rear: &[Vec3; 2]) {
         let seed = &mut self.seed;
         // (rand - 16384) / 16384: -1..1
         let mut r = |s: f32| (rand(seed) - 16384.0) * 6.103_515_6e-5 * s;
@@ -233,7 +350,7 @@ impl Effects {
             // APPROX: from the ground point lifted by the puff's size; the original starts at
             // the wheel record's position (P+0x35c + 0x3c * wheel)
             let local = Vec3::new(r(spread[0]), r(spread[1]) + dy + 0.3, r(spread[2]) + dz);
-            let pos = ground + car.rot * local;
+            let pos = ground + pose.rot * local;
             let size = [r(size_k) + 0.3, r(size_k) + 0.3];
             let life = r(life_k) + 1.0;
             self.spawned[kind as usize] += 1;
@@ -244,7 +361,7 @@ impl Effects {
                 // REMASTER: a puff that leaves with part of the car's speed, drifts up and
                 // sideways, spins, and lives 1.4..2.2 s; dirt and grass are tinted dust
                 p.modern = true;
-                p.vel = car.world_vel() * MODERN_INHERIT + Vec3::new(r(0.4), MODERN_RISE + r(0.2), r(0.4));
+                p.vel = car.world_vel() * MODERN_INHERIT.get() + Vec3::new(r(0.4), MODERN_RISE.get() + r(0.2), r(0.4));
                 p.rot = r(std::f32::consts::PI);
                 p.spin = r(0.8);
                 p.strength = strength;
@@ -265,10 +382,10 @@ impl Effects {
 
     /// Sparks (0x4464fa..0x4465f3) at the frame's two world-hit slots (0x4813c7) whose material
     /// has SparkAnimID 1, size = strength * 0.75 (0x4d3b05), life 0.2 s cut to two updates.
-    fn spawn_sparks(&mut self, i: usize, car: &Car, world: &World, frames: usize, ground: f32) {
+    fn spawn_sparks(&mut self, i: usize, car: &Car, pose: &ViewPose, world: &World, frames: usize, ground: f32) {
         for h in car.world_hits.iter().flatten() {
             let strength = h.strength();
-            if h.spark_anim(&world.materials) != 1 || strength < SPARK_MIN {
+            if h.spark_anim(&world.materials) != 1 || strength < SPARK_MIN.get() {
                 continue;
             }
             let point = car.hull_point(h.point);
@@ -280,10 +397,10 @@ impl Effects {
             self.spark_frame = (self.spark_frame + 1) % frames;
             let p = Particle {
                 kind: Kind::Spark,
-                pos: car.pos + car.rot * local,
+                pos: pose.pos + pose.rot * local,
                 size: [s, s],
                 rgb: [6.0; 3],
-                life: SPARK_LIFE,
+                life: 2.0 / SPAWN_HZ.get().max(0.1), // Classic sparks live two updates (anim flag 1, 0x44555a) [O], at our spawn rate
                 age: 0.0,
                 frame: self.spark_frame,
                 // draw mode 1 (x <= 0) runs the quad to the left with the texture mirrored, mode 3
@@ -298,7 +415,7 @@ impl Effects {
             };
             self.spawned[2] += 1;
             if self.remaster {
-                self.spawn_spark_shower(i, car, point, strength, frames, ground);
+                self.spawn_spark_shower(i, car, pose, point, strength, frames, ground);
                 continue;
             }
             push(&mut self.rings[i][2], p, RING);
@@ -308,16 +425,17 @@ impl Effects {
     /// REMASTER: a contact throws a shower of fine hot streaks backwards: a quarter of the
     /// car's velocity plus a random push in a cone about the car's -z, falling under gravity
     /// and bouncing on the ground [design choice].
-    fn spawn_spark_shower(&mut self, i: usize, car: &Car, point: Vec3, strength: f32, frames: usize, ground: f32) {
-        let origin = car.pos + car.rot * Vec3::new(point.x, point.y - 0.3, point.z);
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_spark_shower(&mut self, i: usize, car: &Car, pose: &ViewPose, point: Vec3, strength: f32, frames: usize, ground: f32) {
+        let origin = pose.pos + pose.rot * Vec3::new(point.x, point.y - 0.3, point.z);
         let side = if point.x > 0.0 { 1.0 } else { -1.0 };
-        let n = SPARKS_MIN + ((SPARKS_MAX - SPARKS_MIN) as f32 * strength) as usize;
+        let n = SPARKS_MIN.get() + (SPARKS_MAX.get().saturating_sub(SPARKS_MIN.get()) as f32 * strength) as usize;
         for _ in 0..n {
             let mut r = |s: f32| (rand(&mut self.seed) - 16384.0) * 6.103_515_6e-5 * s;
             let dir = Vec3::new(side * 0.3 * r(1.0).abs() + r(0.35), 0.2 + 0.6 * r(1.0).abs(), -1.0).normalize();
             let speed = (4.0 + 10.0 * strength) * (1.0 + r(0.4));
-            let vel = car.world_vel() * SPARK_INHERIT + car.rot * dir * speed;
-            let pos = origin + car.rot * Vec3::new(0.0, 0.0, r(0.15));
+            let vel = car.world_vel() * SPARK_INHERIT.get() + pose.rot * dir * speed;
+            let pos = origin + pose.rot * Vec3::new(0.0, 0.0, r(0.15));
             let w = 0.006 + 0.006 * strength;
             let life = 0.15 + r(0.125).abs() * 2.0;
             self.spark_frame = (self.spark_frame + 1) % frames;
@@ -357,7 +475,7 @@ impl Effects {
             // frame = elapsed * 30, held on the last one (0x445613)
             let frame = match p.kind {
                 Kind::Spark => p.frame,
-                _ => (p.age * ANIM_FPS) as usize,
+                _ => (p.age * ANIM_FPS.get()) as usize,
             };
             let flip = Vec3::new(1.0, 1.0, -1.0);
             let t = p.age / p.life;
@@ -367,21 +485,21 @@ impl Effects {
                 // CLASSIC 0x43b398: every particle adds (ONE/ONE), grows to 2.25 times its size
                 // and fades out as it ages
                 let left = if p.kind == Kind::Spark { 1.0 } else { (1.0 - t).clamp(0.0, 1.0) };
-                let grow = (FADE_BASE - FADE_SLOPE * left).powi(2);
-                let glow = (GLOW_GAIN * (GLOW_BASE - GLOW_SLOPE * grow)).max(0.0) / 255.0;
-                let glow = if p.kind == Kind::Smoke { glow * SMOKE_GLOW } else { glow };
-                let k = if p.kind == Kind::Spark { SPARK_SIZE } else { 1.0 };
+                let grow = (FADE_BASE.get() - FADE_SLOPE.get() * left).powi(2);
+                let glow = (GLOW_GAIN.get() * (GLOW_BASE.get() - GLOW_SLOPE.get() * grow)).max(0.0) / 255.0;
+                let glow = if p.kind == Kind::Smoke { glow * SMOKE_GLOW.get() } else { glow };
+                let k = if p.kind == Kind::Spark { SPARK_SIZE.get() } else { 1.0 };
                 sprite.additive = true;
                 sprite.half = [p.size[0] * grow * k, p.size[1] * grow * k];
                 sprite.color = [(p.rgb[0] * glow).min(1.0), (p.rgb[1] * glow).min(1.0), (p.rgb[2] * glow).min(1.0), 1.0];
-                sprite.pull = if p.kind == Kind::Spark { PULL_SPARK } else { PULL };
+                sprite.pull = if p.kind == Kind::Spark { PULL_SPARK.get() } else { PULL.get() };
                 if p.kind == Kind::Spark {
                     sprite.side = if p.mirror { -1.0 } else { 1.0 };
                 }
             } else if p.modern && p.kind == Kind::Spark {
                 // REMASTER: a streak along its velocity, fading out
                 sprite.streak = Some(p.vel * flip);
-                sprite.half = [(p.vel.length() * SPARK_STREAK).clamp(p.size[0], SPARK_STREAK_MAX), p.size[1]];
+                sprite.half = [(p.vel.length() * SPARK_STREAK.get()).max(p.size[0]).min(SPARK_STREAK_MAX.get()), p.size[1]];
                 sprite.color[3] = (1.0 - t).clamp(0.0, 1.0);
                 // cools from white-yellow to orange
                 sprite.color[1] = 0.85 - 0.4 * t;

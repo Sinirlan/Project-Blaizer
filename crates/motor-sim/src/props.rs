@@ -18,8 +18,13 @@ use crate::body::{Body, Dyn, Hull};
 use crate::car::Car;
 use crate::world::World;
 
-/// Mass from PolygonSize (0x4556f0: x 100.0).
-const MASS_PER_POLYGON_SIZE: f32 = 100.0;
+motor_tune::tunable! {
+    /// Mass of a prop from its PolygonSize (0x4556f0: x 100.0) [O]. A prop takes it when the track loads.
+    /// range: 1..1000
+    /// unit: kg
+    /// applies: restart
+    MASS_PER_POLYGON_SIZE: f32 = 100.0;
+}
 /// Bodies at least this heavy get flag 1 (0x455ca3); no physics routine reads it, so they are
 /// only slow to move (04 §4.9.1).
 const HEAVY_MASS: f32 = 10_000.0;
@@ -130,10 +135,9 @@ pub struct Prop {
     pub kind: Kind,
     /// None for a single-key object (static pose)
     motion: Option<Motion>,
-    /// the motion animates only the scale (channels 6-8: a flashing light, e.g. `je_conf`),
-    /// so a body keeps its physics and takes just the flash from it [design choice: how the
-    /// original treats animated bodies is in 04 §4.9.1]
-    flash_only: bool,
+    /// a car hit this animated body: its motion is gone until the restart and it is a free body
+    /// (0x45b464 clears obj+0xc4 and the scale; restart 0x455e0b puts the motion back) [O]
+    lost: bool,
     repeat: bool,
     rest: Pose,
     pub pose: Pose,
@@ -171,19 +175,26 @@ pub struct Props {
 #[derive(Clone, Debug)]
 pub struct PropState {
     time: f32,
-    props: Vec<(Pose, Dyn)>,
+    props: Vec<(Pose, Dyn, bool)>,
 }
 
 impl Props {
     pub fn state(&self) -> PropState {
-        PropState { time: self.time, props: self.props.iter().map(|p| (p.pose, p.dynamics)).collect() }
+        PropState { time: self.time, props: self.props.iter().map(|p| (p.pose, p.dynamics, p.lost)).collect() }
     }
 
     pub fn set_state(&mut self, s: &PropState) {
         self.time = s.time;
-        for (p, &(pose, dynamics)) in self.props.iter_mut().zip(&s.props) {
-            (p.pose, p.dynamics) = (pose, dynamics);
+        for (p, &(pose, dynamics, lost)) in self.props.iter_mut().zip(&s.props) {
+            (p.pose, p.dynamics, p.lost) = (pose, dynamics, lost);
         }
+    }
+}
+
+impl Prop {
+    /// Body-frame velocity and angular velocity of a body (rad/s; zero for scenery and sleepers).
+    pub fn velocity(&self) -> (Vec3, Vec3) {
+        (self.dynamics.vel, self.dynamics.ang)
     }
 }
 
@@ -216,7 +227,7 @@ impl Props {
             } else {
                 // PolygonSize 0: a sphere of water from the bounding radius (0x455d3a)
                 let r = out.meshes[mesh].radius;
-                let mass = o.polygon_size.filter(|&s| s != 0.0).map_or(4.0 / 3.0 * std::f32::consts::PI * r * r * r * 1000.0, |s| s * MASS_PER_POLYGON_SIZE);
+                let mass = o.polygon_size.filter(|&s| s != 0.0).map_or(4.0 / 3.0 * std::f32::consts::PI * r * r * r * 1000.0, |s| s * MASS_PER_POLYGON_SIZE.get());
                 let m = &out.meshes[mesh];
                 let shape = fs::read(root, &format!("{base}/Objects/{}.col", o.name)).ok().and_then(|b| motor_data::col::parse(&b).ok()).map(|c| Hull::from_col(&c));
                 let b = Body::new(mass, m.min, m.max, r).with_id(o.col_sound);
@@ -224,8 +235,7 @@ impl Props {
                 Kind::Body { mass }
             };
             let motion = (motion.keys.len() > 1).then_some(motion);
-            let flash_only = motion.as_ref().is_some_and(|m| m.keys.iter().all(|k| k.values.get(..6) == motion_keys_first(m)));
-            out.props.push(Prop { mesh, kind, motion, flash_only, repeat: o.end_behavior & 2 != 0, rest, pose: rest, env_sound: o.env_sound, body, dynamics: Dyn::default(), prev: rest });
+            out.props.push(Prop { mesh, kind, motion, lost: false, repeat: o.end_behavior & 2 != 0, rest, pose: rest, env_sound: o.env_sound, body, dynamics: Dyn::default(), prev: rest });
         }
         Ok(out)
     }
@@ -253,7 +263,7 @@ impl Props {
                 let last = m.keys.last().map_or(0.0, |k| k.frame);
                 let at = if p.repeat && last > 0.0 { frame % last } else { frame.min(last) };
                 let k = m.keys.iter().rposition(|k| k.frame <= at).unwrap_or(0);
-                out.push(format!("motion: {} keys, frame {at:.1} / {last:.0} at {} fps{}{}", m.keys.len(), self.fps, if p.repeat { ", repeat" } else { "" }, if p.flash_only { ", flash only" } else { "" }));
+                out.push(format!("motion: {} keys, frame {at:.1} / {last:.0} at {} fps{}{}", m.keys.len(), self.fps, if p.repeat { ", repeat" } else { "" }, if p.lost { ", lost on a hit" } else { "" }));
                 for (j, key) in m.keys.iter().enumerate().skip(k.saturating_sub(1)).take(3) {
                     let vals: Vec<String> = key.values.iter().map(|x| format!("{x:.2}")).collect();
                     let mark = if j == k { '>' } else { ' ' };
@@ -267,11 +277,13 @@ impl Props {
         out
     }
 
-    /// Back to the scene's start poses (race restart, 0x455da0). The clock keeps running.
+    /// Back to the scene's start poses (race restart, 0x455da0): a motion lost on a hit comes back
+    /// (0x455e0b). The clock keeps running.
     pub fn reset(&mut self) {
         for p in &mut self.props {
             p.pose = p.rest;
             p.dynamics = Dyn::default();
+            p.lost = false;
         }
     }
 
@@ -280,20 +292,15 @@ impl Props {
         self.time += dt;
         let frame = self.time * self.fps;
         for p in &mut self.props {
-            let Some(m) = &p.motion else { continue };
-            let pose = Pose::from_channels(&evaluate(m, frame, p.repeat));
-            if p.flash_only && matches!(p.kind, Kind::Body { .. }) {
-                p.pose.scale = pose.scale;
-            } else {
-                p.pose = pose;
-            }
+            let Some(m) = p.motion.as_ref().filter(|_| !p.lost) else { continue };
+            p.pose = Pose::from_channels(&evaluate(m, frame, p.repeat));
         }
     }
 
     /// `0x480fbc` step 1, once per physics substep of `h` seconds: remember the poses and
     /// integrate the awake bodies.
     pub fn begin_substep(&mut self, h: f32, gravity: f32) {
-        for p in self.props.iter_mut().filter(|p| p.loose()) {
+        for p in &mut self.props {
             p.prev = p.pose;
             if let Some(b) = &p.body {
                 b.begin(&mut p.dynamics, &mut p.pose, h, gravity);
@@ -302,10 +309,16 @@ impl Props {
     }
 
     /// `0x480fbc` step 3: a car against every prop, both ways (call after the car's substep).
+    /// An animated body takes part at its motion's pose (asleep, at rest); a hit wakes it, and it
+    /// loses its motion and its light (scale 0) for the rest of the race (0x45b42c..0x45b4ac, after
+    /// the world step; here at once, which is the same: the motion is only applied per frame) [O].
     pub fn contact(&mut self, car: &mut Car) {
-        for p in self.props.iter_mut().filter(|p| p.loose()) {
+        for p in &mut self.props {
             if let Some(b) = &p.body {
-                b.car_contact(&mut p.dynamics, &mut p.pose, car);
+                if b.car_contact(&mut p.dynamics, &mut p.pose, car) && p.motion.is_some() && !p.lost {
+                    p.lost = true;
+                    p.pose.scale = Vec3::ZERO;
+                }
             }
         }
     }
@@ -313,7 +326,7 @@ impl Props {
     /// `0x480fbc` step 4: the awake bodies against the track.
     pub fn finish_substep(&mut self, h: f32, world: &World) {
         let cast = |a: Vec3, b: Vec3| world.raycast(a, b);
-        for p in self.props.iter_mut().filter(|p| p.loose()) {
+        for p in &mut self.props {
             if let Some(b) = &p.body {
                 b.finish(&mut p.dynamics, &mut p.pose, &p.prev, h, &cast);
             }
@@ -321,18 +334,6 @@ impl Props {
     }
 }
 
-impl Prop {
-    /// Moved by physics: a rigid body that is not animated (a motion that only flashes the
-    /// scale does not count).
-    fn loose(&self) -> bool {
-        matches!(self.kind, Kind::Body { .. }) && (self.motion.is_none() || self.flash_only)
-    }
-}
-
-/// Position and rotation channels of a motion's first key.
-fn motion_keys_first(m: &Motion) -> Option<&[f32]> {
-    m.keys.first().and_then(|k| k.values.get(..6))
-}
 
 #[cfg(test)]
 mod tests {

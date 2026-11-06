@@ -31,10 +31,23 @@ struct ShotState {
     saved: Arc<AtomicBool>,
 }
 
+/// The installer's icon (assets/icon/tools/motorinstall); none if it cannot be decoded.
+fn icon() -> egui::IconData {
+    let decode = || {
+        let mut r = png::Decoder::new(include_bytes!("../../../assets/icon/tools/motorinstall/motorinstall-256.png").as_slice()).read_info().ok()?;
+        let mut rgba = vec![0; r.output_buffer_size()];
+        let i = r.next_frame(&mut rgba).ok()?;
+        Some(egui::IconData { rgba, width: i.width, height: i.height })
+    };
+    decode().unwrap_or_default()
+}
+
 pub fn run(shot: Option<Shot>) -> eframe::Result {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Motorhead installer")
+            .with_app_id("motorhead-installer")
+            .with_icon(icon())
             .with_inner_size([600.0, 300.0])
             .with_min_inner_size([460.0, 260.0]),
         ..Default::default()
