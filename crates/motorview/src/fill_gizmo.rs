@@ -2,7 +2,7 @@
 //! arrows, rotate rings and scale handles on the selected piece (or its selected vertex), drawn as
 //! solid shaded meshes over the scene. Pure maths, drawing and picking; the state (mode, hot axis,
 //! drag) lives in `WorldEdit`. Game space; X red, Y green, Z blue in every mode. Move and rotate
-//! use the global axes, scale the piece's own (a block's sides, a wall's length and height).
+//! use the global axes (the Cine editor passes a camera's own axes to rotate), scale the piece's own (a block's sides, a wall's length and height).
 
 use crate::debug::Gizmos;
 use crate::world_edit::{handles, set_handle};
@@ -45,14 +45,13 @@ pub enum Delta {
     Scale { axis: usize, dir: Vec3, factor: f32 },
 }
 
-/// Which of X, Y, Z the piece can use in `mode`. Hills turn about Y only, skirts have no position. Scale: blocks all sides, walls length and height, plants and models one
-/// uniform size (any axis; a model also turns about Y), flat pieces their plan.
+/// Which of X, Y, Z the piece can use in `mode`. Hills turn about Y only, skirts have no position. Scale: blocks all sides, walls length and height, plants, models and scene objects one
+/// uniform size (any axis; they also turn about Y), flat pieces their plan.
 pub fn enabled(p: &Piece, mode: Mode) -> [bool; 3] {
     match (mode, &p.shape) {
         (Mode::Handles, _) | (_, Shape::Skirt { .. }) => [false; 3],
         (Mode::Rotate, Shape::Hill { .. }) => [false, true, false],
-        (Mode::Rotate, Shape::Plant { .. }) => [false; 3],
-        (Mode::Rotate, Shape::Model { .. }) => [false, true, false],
+        (Mode::Rotate, Shape::Plant { .. } | Shape::Model { .. } | Shape::Object { .. } | Shape::Stamp { .. } | Shape::Cloud { .. }) => [false, true, false],
         (Mode::Scale, Shape::Wall { .. }) => [true, true, false],
         (Mode::Scale, Shape::Ground { .. }) => [true, false, true],
         _ => [true; 3],
@@ -68,6 +67,10 @@ pub fn axes(p: &Piece, mode: Mode) -> [Vec3; 3] {
     match &p.shape {
         Shape::Block { yaw, pitch, roll, .. } => {
             let r = block_rotation(*yaw, *pitch, *roll);
+            AXES.map(|a| r * a)
+        }
+        Shape::Cloud { yaw, .. } => {
+            let r = block_rotation(*yaw, 0.0, 0.0);
             AXES.map(|a| r * a)
         }
         Shape::Wall { from, to, .. } => {
@@ -130,8 +133,8 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
             }
         }
         Delta::Rotate(q) => {
-            if let Shape::Model { yaw, .. } = &mut p.shape {
-                // about Y only (the gizmo offers no other axis): the turn adds to the model's yaw
+            if let Shape::Model { yaw, .. } | Shape::Plant { yaw, .. } | Shape::Object { yaw, .. } | Shape::Stamp { yaw, .. } | Shape::Cloud { yaw, .. } = &mut p.shape {
+                // about Y only (the gizmo offers no other axis): the turn adds to the plant's or model's yaw
                 let (a, _, _) = q.to_euler(glam::EulerRot::YXZ);
                 *yaw = (*yaw + a.to_degrees()).rem_euclid(360.0);
             } else if let Shape::Block { centre, yaw, pitch, roll, .. } = &mut p.shape {
@@ -148,7 +151,9 @@ pub fn apply(base: &Piece, delta: Delta, vertex: Option<usize>, y: f32) -> Piece
             let f = factor.clamp(0.05, 20.0);
             match &mut p.shape {
                 Shape::Block { size, .. } => size[axis] = (size[axis] * f).max(0.1),
-                Shape::Plant { scale, .. } | Shape::Model { scale, .. } => *scale = (*scale * f).clamp(0.05, 50.0),
+                // a cloud keeps its centre: it grows both ways along its own axis
+                Shape::Cloud { size, .. } => size[axis] = (size[axis] * f).max(1.0),
+                Shape::Plant { scale, .. } | Shape::Model { scale, .. } | Shape::Object { scale, .. } | Shape::Stamp { scale, .. } => *scale = (*scale * f).clamp(0.05, 50.0),
                 Shape::Wall { height, .. } if axis == 1 => *height = (*height * f).max(0.1),
                 Shape::Hill { height, .. } if axis == 1 => *height = (*height * f).max(0.5),
                 Shape::Skirt { .. } => {}
@@ -195,9 +200,9 @@ pub fn length(pivot: Vec3, eye: Vec3) -> f32 {
     (pivot.distance(eye) * SIZE_K).max(0.5)
 }
 
-/// The circle of axis `i`: `SEGMENTS + 1` points, the last equal to the first.
-fn circle(pivot: Vec3, i: usize, r: f32) -> Vec<Vec3> {
-    let (u, v) = (AXES[(i + 1) % 3], AXES[(i + 2) % 3]);
+/// The circle about axis `i` of `ax`: `SEGMENTS + 1` points, the last equal to the first.
+fn circle(pivot: Vec3, ax: [Vec3; 3], i: usize, r: f32) -> Vec<Vec3> {
+    let (u, v) = (ax[(i + 1) % 3], ax[(i + 2) % 3]);
     (0..=SEGMENTS)
         .map(|k| {
             let a = k as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
@@ -299,7 +304,7 @@ pub fn draw(g: &mut Gizmos, mode: Mode, pivot: Vec3, en: [bool; 3], ax: [Vec3; 3
                 rod(g, pivot, pivot + ax[i] * l * 0.95, 0.035 * l, 0.035 * l, c, eye);
                 cube(g, pivot + ax[i] * l * 1.05, ax, 0.08 * l, c, eye);
             }
-            Mode::Rotate => torus(g, pivot, AXES[i], l * 0.9, 0.03 * l, c, eye),
+            Mode::Rotate => torus(g, pivot, ax[i], l * 0.9, 0.03 * l, c, eye),
             Mode::Handles => {}
         }
     }
@@ -322,7 +327,7 @@ pub fn pick(mode: Mode, pivot: Vec3, en: [bool; 3], ax: [Vec3; 3], eye: Vec3, pr
             let pts = match mode {
                 Mode::Move => vec![pivot, pivot + ax[i] * l * 1.2],
                 Mode::Scale => vec![pivot, pivot + ax[i] * l * 1.15],
-                Mode::Rotate => circle(pivot, i, l * 0.9),
+                Mode::Rotate => circle(pivot, ax, i, l * 0.9),
                 Mode::Handles => return None,
             };
             let px: Vec<Option<(f32, f32)>> = pts.into_iter().map(project).collect();
@@ -342,10 +347,11 @@ pub fn axis_param(pivot: Vec3, a: Vec3, ray: (Vec3, Vec3)) -> Option<f32> {
     (denom > 1e-4).then(|| (b * e - f) / denom)
 }
 
-/// Angle (radians) of the mouse ray's hit on the plane through `pivot` normal to axis `i`, from
-/// the next axis towards the one after (so +angle turns the same way as `Quat::from_axis_angle`).
-pub fn plane_angle(pivot: Vec3, i: usize, ray: (Vec3, Vec3)) -> Option<f32> {
-    let (n, (o, d)) = (AXES[i], ray);
+/// Angle (radians) of the mouse ray's hit on the plane through `pivot` normal to axis `i` of `ax`, from
+/// the next axis towards the one after (so +angle turns the same way as `Quat::from_axis_angle`
+/// when `ax` is a right-handed frame; the Cine editor passes a camera's own axes).
+pub fn plane_angle(pivot: Vec3, ax: [Vec3; 3], i: usize, ray: (Vec3, Vec3)) -> Option<f32> {
+    let (n, (o, d)) = (ax[i], ray);
     let denom = n.dot(d);
     if denom.abs() < 1e-3 {
         return None;
@@ -355,7 +361,7 @@ pub fn plane_angle(pivot: Vec3, i: usize, ray: (Vec3, Vec3)) -> Option<f32> {
         return None;
     }
     let v = o + d * t - pivot;
-    Some(v.dot(AXES[(i + 2) % 3]).atan2(v.dot(AXES[(i + 1) % 3])))
+    Some(v.dot(ax[(i + 2) % 3]).atan2(v.dot(ax[(i + 1) % 3])))
 }
 
 /// Ring segments of the skirt gizmo.
@@ -540,6 +546,62 @@ mod tests {
     }
 
     #[test]
+    fn a_scene_object_turns_about_y_and_scales_uniformly() {
+        let p = piece("Piece object Name Je_tower Centre 3 1 4 Scale 2 Yaw 350\n");
+        assert_eq!(enabled(&p, Mode::Rotate), [false, true, false]);
+        assert_eq!(enabled(&p, Mode::Scale), [true; 3]);
+        let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(30f32.to_radians())), None, 0.0);
+        let Shape::Object { name, yaw, centre, scale: sc } = q.shape else { panic!() };
+        assert!((yaw - 20.0).abs() < 1e-3 && centre == [3.0, 1.0, 4.0] && sc == 2.0 && name == "Je_tower", "{yaw}");
+        for axis in 0..3 {
+            let Shape::Object { scale: k, yaw, centre, .. } = scale(&p, axis, 2.0).shape else { panic!() };
+            assert_eq!((k, yaw, centre), (4.0, 350.0, [3.0, 1.0, 4.0]));
+        }
+        // the gizmo sits on the base
+        assert_eq!(pivot(&p, 0.0), Vec3::new(3.0, 1.0, 4.0));
+    }
+
+    #[test]
+    fn a_stamp_copy_turns_about_y_and_scales_uniformly() {
+        let p = piece("Piece stamp Name tower1 Centre 3 1 4 Scale 2 Yaw 350\n");
+        assert_eq!(enabled(&p, Mode::Rotate), [false, true, false]);
+        assert_eq!(enabled(&p, Mode::Scale), [true; 3]);
+        let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(30f32.to_radians())), None, 0.0);
+        let Shape::Stamp { name, yaw, centre, scale: sc } = q.shape else { panic!() };
+        assert!((yaw - 20.0).abs() < 1e-3 && centre == [3.0, 1.0, 4.0] && sc == 2.0 && name == "tower1", "{yaw}");
+        for axis in 0..3 {
+            let Shape::Stamp { scale: k, yaw, centre, .. } = scale(&p, axis, 2.0).shape else { panic!() };
+            assert_eq!((k, yaw, centre), (4.0, 350.0, [3.0, 1.0, 4.0]));
+        }
+        assert_eq!(pivot(&p, 0.0), Vec3::new(3.0, 1.0, 4.0));
+    }
+
+    #[test]
+    fn a_cloud_turns_about_y_and_scales_along_its_own_axes() {
+        let p = piece("Piece cloud Centre 3 10 4 Size 100 20 50 Yaw 90 Density 4\n");
+        assert_eq!(enabled(&p, Mode::Rotate), [false, true, false]);
+        assert_eq!(enabled(&p, Mode::Scale), [true; 3]);
+        let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(30f32.to_radians())), None, 0.0);
+        let Shape::Cloud { yaw, centre, .. } = q.shape else { panic!() };
+        assert!((yaw - 120.0).abs() < 1e-3 && centre == [3.0, 10.0, 4.0], "{yaw}");
+        // scale axis 0 is the cloud's own x (turned 90 degrees); the centre stays put
+        assert!(axes(&p, Mode::Scale)[0].distance(block_rotation(90.0, 0.0, 0.0) * Vec3::X) < 1e-5);
+        let Shape::Cloud { size, centre, .. } = scale(&p, 0, 2.0).shape else { panic!() };
+        assert_eq!((size, centre), ([200.0, 20.0, 50.0], [3.0, 10.0, 4.0]));
+        // the pivot is the centre (the move gizmo sits in the middle of the cloud)
+        assert_eq!(pivot(&p, 0.0), Vec3::new(3.0, 10.0, 4.0));
+    }
+
+    #[test]
+    fn a_plant_turns_about_y() {
+        let p = piece("Piece plant Species tree Texture A Centre 3 1 4 Scale 2 Yaw 350\n");
+        assert_eq!(enabled(&p, Mode::Rotate), [false, true, false]);
+        let q = apply(&p, Delta::Rotate(Quat::from_rotation_y(30f32.to_radians())), None, 0.0);
+        let Shape::Plant { yaw, centre, scale: sc, .. } = q.shape else { panic!() };
+        assert!((yaw - 20.0).abs() < 1e-3 && centre == [3.0, 1.0, 4.0] && sc == 2.0, "{yaw}");
+    }
+
+    #[test]
     fn scaling_a_hill_changes_its_height_or_plan() {
         let p = piece("Piece hill Texture A Point 0 0 Point 10 0 Height 4 Width 6\n");
         let Shape::Hill { height, .. } = scale(&p, 1, 2.0).shape else { panic!() };
@@ -549,10 +611,24 @@ mod tests {
     }
 
     #[test]
+    fn rings_and_angles_follow_the_axes_passed_in() {
+        // a frame turned a quarter about Y (right = -Z, forward = +X): its up ring is the same circle, and the angle of a ray
+        // measured in that frame equals the global angle minus the quarter turn
+        let q = Quat::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let frame = AXES.map(|a| q * a);
+        let ray = (Vec3::new(5.0, 10.0, 2.0), Vec3::NEG_Y);
+        let (g, l) = (plane_angle(Vec3::ZERO, AXES, 1, ray).unwrap(), plane_angle(Vec3::ZERO, frame, 1, ray).unwrap());
+        assert!((angle_diff(l, g) - std::f32::consts::FRAC_PI_2).abs() < 1e-5, "{g} {l}");
+        // the pitch ring of the turned frame lies in the plane normal to its right axis
+        assert!(circle(Vec3::ZERO, frame, 0, 2.0).iter().all(|p| p.dot(frame[0]).abs() < 1e-5));
+        assert_eq!(circle(Vec3::ONE, AXES, 2, 1.0)[0], Vec3::ONE + AXES[0]);
+    }
+
+    #[test]
     fn drag_maths() {
         // looking straight down at +X on the Y circle: the angle from +Z towards +X is 90 degrees
         let ray = (Vec3::new(5.0, 10.0, 0.0), Vec3::NEG_Y);
-        assert!((plane_angle(Vec3::ZERO, 1, ray).unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        assert!((plane_angle(Vec3::ZERO, AXES, 1, ray).unwrap() - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
         // the X axis' nearest point to a ray crossing it at x = 3
         let t = axis_param(Vec3::ZERO, Vec3::X, (Vec3::new(3.0, 5.0, 0.0), Vec3::NEG_Y)).unwrap();
         assert!((t - 3.0).abs() < 1e-4);

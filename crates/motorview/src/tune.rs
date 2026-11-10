@@ -1,31 +1,45 @@
 //! DEBUG motorview's Properties pane (` or F11; re-notes/00-debuger.md item 6): the long grids
 //! the ribbon (`ribbon.rs`) has no room for. Live editing of the followed car's physics
-//! parameters, the camera offsets and easing, the fog, sky and lamp tuning. Edits last until
-//! the track or car is reloaded; nothing is saved.
+//! parameters, the camera offsets and easing, the fog, sky and lamp tuning. Car, gravity and paint edits last until
+//! the track or car is reloaded, the camera values until exit (Constants > Save tune.cfg keeps them); the status
+//! bar's "N CHANGED" chip and its Changes card (`tune_changes`, #434) list them.
 
 use crate::drive::{CamMode, CamTune, Session};
-use crate::render::{CarLightTune, FogColour, FogStyle, FogTune, LampTune, LocalLightTune, SkyTune, View};
+use crate::render::{CarLightTune, FogColour, FogStyle, FogTune, LampTune, LocalLightTune, RenderMode, SkyTune, View};
 use crate::icons as ic;
 use crate::glass_ui;
+use crate::tune_changes::{self as tc, Change, Row, Sect, Snap, Val, F};
 use egui::{ComboBox, Frame, Ui};
 use glam::Vec3;
+use motor_sim::race::fmt_ms;
 use motor_sim::CarParams;
+
+/// Sim time multipliers (- / =, the toolbar's Speed and the Sim page's Time scale).
+pub const TIME_SCALES: [f32; 7] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0];
 
 /// What the pane may edit besides the session.
 pub struct Targets<'a> {
     pub view: &'a mut View,
+    /// the mode drawn now (a previewed cine shot's `Mode` wins over `view.mode`): the Remaster-only pages say so in Classic (#432)
+    pub shown: RenderMode,
+    /// the key that flips Classic / Remaster (its binding, for the caption)
+    pub mode_key: &'static str,
     /// REMASTER: the loaded track and its own fog values (`Look::fog`), for the fog page
     pub track_fog: Option<(u32, FogTune)>,
     /// REMASTER: the loaded track and its HDRI dome (sky.cfg values in `Dome`), for the sky page
     pub track_sky: Option<(u32, crate::sky::Dome)>,
     /// the followed car's paint as drawn and its own (the car file's Colour1..3), for the car page
     pub paint: Option<(Paint, Paint)>,
+    /// REMASTER (#478): what loading the followed car's model file found (None: it has none), for the car page
+    pub model: Option<&'a crate::scene::ModelCheck>,
     /// REMASTER local light: where the probe volume is (`Gpu::local_status`) and the probe
     /// gizmo layer (`debug::Layers::probes`; None: not offered)
     pub local_status: &'static str,
     pub probe_gizmos: Option<&'a mut bool>,
     /// the World Editor page's caption (the fill file and whether it is saved)
     pub world_sub: String,
+    /// the sim's time scale: index into `TIME_SCALES` (the Sim page's dropdown and the toolbar's Speed share it)
+    pub time_scale: &'a mut usize,
 }
 
 /// the rail card's width with its margins, the dock's default width with its left margin, and the rail slot of the
@@ -74,8 +88,13 @@ impl Page {
         }
     }
 
+    /// The page edits only Remaster settings (nothing of it is drawn in Classic, #432).
+    pub fn remaster_only(self) -> bool {
+        matches!(self, Page::Fog | Page::Sky | Page::Lamps | Page::CarLights | Page::LocalLight)
+    }
+
     /// The icon of the page's tab in the strip.
-    fn icon(self) -> &'static str {
+    pub fn icon(self) -> &'static str {
         match self {
             Page::Sim => ic::CLOCK,
             Page::Car => ic::CAR,
@@ -119,6 +138,14 @@ pub struct Tune {
     search: String,
     /// the Constants page (`consts.rs`); its `reload_req` asks the viewer to reload the scene
     pub consts: crate::consts::ConstsPage,
+    /// the camera values tune.cfg holds (at start, and after the Constants page's Save tune.cfg): a camera change
+    /// equal to them is kept on exit (#434)
+    pub cam_saved: CamTune,
+    /// Ctrl+Z / Ctrl+Y for the dock's edits (#434); a car or track switch starts it afresh
+    pub undo: tc::Undo,
+    /// the command search asked for a harvest of the pages (#436), and its result
+    harvest_req: bool,
+    harvested: Option<Vec<(Page, glass_ui::Harvested)>>,
 }
 
 pub const CAM_MODES: [(CamMode, &str); 6] = [(CamMode::Chase, "chase"), (CamMode::FarChase, "far chase"), (CamMode::InCar, "in-car"), (CamMode::Bumper, "bumper"), (CamMode::Goal, "goal"), (CamMode::Tv, "tv")];
@@ -144,26 +171,44 @@ impl Tune {
 
     /// Remember the loaded values (after a track or car switch).
     pub fn loaded(&mut self, sess: Option<&Session>) {
-        self.orig = sess.map(|s| s.race.racers.iter().map(|r| r.car.p.clone()).collect()).unwrap_or_default();
+        self.orig = sess.map(|s| s.race.racers.iter().map(|r| r.tuned()).collect()).unwrap_or_default();
         self.gravity = sess.map_or(0.0, |s| s.race.world.gravity);
+        self.undo.clear();
+    }
+
+    /// The loaded state: the racers' parameters and the gravity as loaded, `own` = each racer's own paint (the car
+    /// files' Colour1..3), the camera's source values (what the Camera page's dots compare with).
+    pub fn orig_snap(&self, own: &[Paint]) -> Snap {
+        Snap { params: self.orig.clone(), gravity: self.gravity, paints: own.to_vec(), cam: CamTune::default() }
+    }
+
+    /// The changes of `now` (`Snap::now`) against the loaded state (#434).
+    pub fn changes(&self, now: &Snap, own: &[Paint], groups: &[String]) -> Vec<Change> {
+        tc::changes(now, &self.orig_snap(own), &self.cam_saved, groups)
     }
 
     /// The Properties dock (when a page is open) along the right edge: the page rail as its own glass card on the
     /// outer edge, then the dock card (header, property search, the page's sections). Returns both widths in
     /// points. `extra` draws the pages whose state lives in the viewer (`Page::World`, `Page::Ghost`, `Page::Cine`).
-    pub fn pane(&mut self, ui: &mut Ui, sess: Option<&mut Session>, t: Targets, extra: &mut dyn FnMut(Page, &mut Ui)) -> f32 {
+    pub fn pane(&mut self, ui: &mut Ui, mut sess: Option<&mut Session>, mut t: Targets, extra: &mut dyn FnMut(Page, &mut Ui)) -> f32 {
+        if std::mem::take(&mut self.harvest_req) {
+            self.harvested = Some(self.harvest(ui, sess.as_deref_mut(), &mut t, extra));
+        }
         let Some(mut page) = self.page else { return 0.0 };
         let ctx = ui.ctx().clone();
         glass_ui::set_filter(&ctx, &self.search);
         glass_ui::set_reset_all(&ctx, false);
         let (mut close, mut reset_page) = (false, false);
         let sub = match (page, sess.as_deref()) {
-            (Page::Car, Some(s)) => format!("car #{} · {} · followed", s.focus, s.race.racers[s.focus].car.p.name),
+            (Page::Car, Some(s)) => format!("{} · followed", s.racer_label(s.focus)),
             (Page::Camera, Some(s)) => format!("{} · followed car", CAM_MODES.iter().find(|m| m.0 == s.cam).map_or("?", |m| m.1)),
             (Page::World, _) => t.world_sub.clone(),
             (Page::Constants, _) => self.consts.caption(),
             _ => String::new(),
         };
+        // #432: a Remaster-only page edits settings that Classic does not draw
+        let not_shown = t.shown == RenderMode::Classic && page.remaster_only();
+        let sub = if not_shown { format!("not shown in Classic · {} switches", t.mode_key) } else { sub };
         // added first = outermost
         let rail = egui::Panel::right("props_tabs")
             .resizable(false)
@@ -195,39 +240,15 @@ impl Tune {
             .show(ui, |ui| {
                 let card = glass_ui::glass_frame(&ctx).inner_margin(egui::Margin::symmetric(10, 10)).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    (reset_page, close) = glass_ui::dock_header(ui, page.icon(), page.name(), &sub);
+                    (reset_page, close) = glass_ui::dock_header(ui, page.icon(), page.name(), &sub, not_shown);
                     ui.add_space(8.0);
                     glass_ui::search(ui, &mut self.search, "find a property");
                     ui.add_space(4.0);
                     glass_ui::set_reset_all(&ctx, reset_page);
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match page {
-                        Page::Sim => sim(ui, sess.as_deref()),
-                        Page::Car => match sess {
-                            Some(s) => {
-                                self.paint(ui, s.focus, t.paint);
-                                self.car(ui, s);
-                            }
-                            None => {
-                                ui.weak("no race loaded");
-                            }
-                        },
-                        Page::Camera => match sess {
-                            Some(s) => camera(ui, s),
-                            None => {
-                                ui.weak("no race loaded");
-                            }
-                        },
-                        Page::Fog => {
-                            let (track_fog, saved) = (t.track_fog, &mut self.fog_saved);
-                            fog(ui, t.view, track_fog, saved);
-                        }
-                        Page::Sky => sky(ui, t.view, t.track_sky, &mut self.sky_saved),
-                        Page::Lamps => lamps(ui, t.view),
-                        Page::CarLights => car_lights(ui, &mut t.view.remaster.car_lights),
-                        Page::LocalLight => local_light(ui, t.view, t.local_status, t.probe_gizmos),
-                        Page::World | Page::Ghost | Page::Cine => extra(page, ui),
-                        Page::Constants => self.consts.ui(ui),
-                    });
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| self.body(ui, page, sess, &mut t, extra));
+                    if std::mem::take(&mut self.consts.saved) {
+                        self.cam_saved = CamTune::live();
+                    }
                 });
                 glass_ui::finish(&ctx, &card.response);
             })
@@ -239,6 +260,60 @@ impl Tune {
             Some(page)
         };
         dock.rect.width() + rail
+    }
+
+    /// A page's sections (the dock card's scrolled part).
+    fn body(&mut self, ui: &mut Ui, page: Page, sess: Option<&mut Session>, t: &mut Targets, extra: &mut dyn FnMut(Page, &mut Ui)) {
+        match page {
+            Page::Sim => sim(ui, sess, t.time_scale),
+            Page::Car => match sess {
+                Some(s) => {
+                    self.paint(ui, s.focus, t.paint);
+                    model_file(ui, t.model);
+                    self.car(ui, s);
+                }
+                None => {
+                    ui.weak("no race loaded");
+                }
+            },
+            Page::Camera => match sess {
+                Some(s) => camera(ui, s),
+                None => {
+                    ui.weak("no race loaded");
+                }
+            },
+            Page::Fog => fog(ui, t.view, t.track_fog, &mut self.fog_saved),
+            Page::Sky => sky(ui, t.view, t.track_sky, &mut self.sky_saved),
+            Page::Lamps => lamps(ui, t.view),
+            Page::CarLights => car_lights(ui, &mut t.view.remaster.car_lights),
+            Page::LocalLight => local_light(ui, t.view, t.local_status, t.probe_gizmos.as_deref_mut()),
+            Page::World | Page::Ghost | Page::Cine => extra(page, ui),
+            Page::Constants => self.consts.ui(ui),
+        }
+    }
+
+    /// Ask the next `pane` for a harvest of every page (motorview's command search, #436); `take_harvest` reads it.
+    pub fn request_harvest(&mut self) {
+        self.harvest_req = true;
+    }
+
+    pub fn take_harvest(&mut self) -> Option<Vec<(Page, glass_ui::Harvested)>> {
+        self.harvested.take()
+    }
+
+    /// Every page but Constants (the command search lists `CATALOG` itself) drawn once, unseen and off the screen,
+    /// recording its sections and rows (`glass_ui::harvest_begin`). Rows are recorded, not drawn, so no value can
+    /// change; a page shows what it would show now (no race loaded: no Car rows).
+    fn harvest(&mut self, ui: &mut Ui, mut sess: Option<&mut Session>, t: &mut Targets, extra: &mut dyn FnMut(Page, &mut Ui)) -> Vec<(Page, glass_ui::Harvested)> {
+        let off = egui::Rect::from_min_size(egui::pos2(-20000.0, 0.0), egui::vec2(DOCK_W, 100_000.0));
+        let mut out = Vec::new();
+        for page in Page::ALL.into_iter().filter(|p| *p != Page::Constants) {
+            let mut ghost = ui.new_child(egui::UiBuilder::new().id_salt(("harvest", page.name())).max_rect(off).invisible());
+            glass_ui::harvest_begin();
+            self.body(&mut ghost, page, sess.as_deref_mut(), t, extra);
+            out.extend(glass_ui::harvest_take().into_iter().map(|h| (page, h)));
+        }
+        out
     }
 
     /// The followed car's paint, CarColour1..3 (`paint`: as drawn, its own). An edit goes to
@@ -289,34 +364,23 @@ impl Tune {
         let r = &mut s.race.racers[focus];
         let before = r.car.p.clone();
         let orig = self.orig.get(focus).cloned();
-        let o = orig.as_ref();
-        let p = &mut r.car.p;
-        let mut reset = false;
-        reset |= section(ui, ic::CAR, "Physics", orig.is_some(), |ui| {
-            ch |= num(ui, "Mass", "kg", &mut p.mass, 5.0, o.map(|o| o.mass));
-            ch |= num(ui, "Acc force", "", &mut p.acc_force, 10.0, o.map(|o| o.acc_force));
-            ch |= num(ui, "Brake force", "", &mut p.brake_force, 10.0, o.map(|o| o.brake_force));
-            ch |= num(ui, "Turn force", "", &mut p.turn_force, 50.0, o.map(|o| o.turn_force));
-            ch |= num(ui, "Min rpm", "rpm", &mut p.min_rpm, 10.0, o.map(|o| o.min_rpm));
-            ch |= num(ui, "Max rpm", "rpm", &mut p.max_rpm, 10.0, o.map(|o| o.max_rpm));
-            ch |= num(ui, "Spring length", "m", &mut p.spring_len, 0.005, o.map(|o| o.spring_len));
-            ch |= num(ui, "Spring strength", "", &mut p.spring_k, 10.0, o.map(|o| o.spring_k));
-            ch |= vec3(ui, "Centre of mass", &mut p.com, 0.01, o.map(|o| o.com));
-        });
-        section(ui, ic::SLIDERS, "Grip", false, |ui| {
-            for (i, (g, name)) in p.grip.iter_mut().zip(["Slide speed", "Slide yaw", "Lateral", "Yaw"]).enumerate() {
-                ch |= num(ui, name, "", g, 0.005, o.map(|o| o.grip[i]));
+        // the dots compare the values without the rubber band's scale (AI cars) with the file's (#434)
+        let was = orig.as_ref().map(tc::param_vals);
+        let cur = tc::param_vals(&r.tuned());
+        let mut rows = tc::param_rows(&mut r.car.p);
+        let mut draw = |ui: &mut Ui, sect: Sect| {
+            for (i, row) in rows.iter_mut().enumerate().filter(|(_, row)| row.sect == sect) {
+                let o = was.as_ref().map(|w| w[i]);
+                ch |= table_row(ui, row, o, o.is_some_and(|o| o != cur[i]));
             }
-        });
-        section_open(ui, ic::GAUGE, "Gears", false, false, |ui| {
-            for (i, g) in p.gear_top.iter_mut().enumerate() {
-                let name = if i == 0 { "Reverse top".to_string() } else { format!("Gear {i} top") };
-                ch |= num(ui, &name, "km/h", g, 0.5, o.and_then(|o| o.gear_top.get(i).copied()));
-            }
-        });
+        };
+        let reset = section(ui, ic::CAR, "Physics", orig.is_some(), |ui| draw(ui, Sect::Physics));
+        section(ui, ic::SLIDERS, "Grip", false, |ui| draw(ui, Sect::Grip));
+        section_open(ui, ic::GAUGE, "Gears", false, false, |ui| draw(ui, Sect::Gears));
+        drop(rows);
         if let (true, Some(o)) = (reset, orig) {
-            r.car.p = o;
-            ch = true;
+            r.set_tuned(&o);
+            return;
         }
         if ch {
             // keep the edit through the rubber band (AI cars)
@@ -325,12 +389,53 @@ impl Tune {
     }
 }
 
-fn sim(ui: &mut Ui, sess: Option<&Session>) {
-    match sess {
-        Some(s) => ui.label(s.hud()),
-        None => ui.weak("no race loaded"),
+/// The Sim page (#433): the time scale and the race table. A row follows that car (like N); the followed one is lit.
+fn sim(ui: &mut Ui, sess: Option<&mut Session>, scale: &mut usize) {
+    section(ui, ic::CLOCK, "Time", false, |ui| {
+        glass_ui::prow(ui, "Time scale", false, None, |ui| {
+            let names: Vec<String> = TIME_SCALES.iter().map(|x| format!("x{x}")).collect();
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            if let Some(n) = glass_ui::choice_dropdown(ui, 96.0, "Time scale", &refs, *scale) {
+                *scale = n;
+            }
+        })
+    });
+    let Some(s) = sess else {
+        ui.weak("no race loaded");
+        return;
     };
-    ui.weak("time control: toolbar Sim tab");
+    let clock = if s.race.started() { fmt_ms(s.race.clock_ms as u32) } else { format!("countdown {}", s.race.countdown.ceil().max(1.0)) };
+    section(ui, ic::CHART, &format!("Race ({} cars, {} laps)", s.race.racers.len(), s.race.laps), false, |ui| {
+        glass_ui::prow(ui, "Race clock", false, None, |ui| {
+            ui.label(egui::RichText::new(clock).monospace().color(crate::theme::WHITE));
+        });
+        glass_ui::race_row(ui, true, false, ["P", "Car", "Lap", "Gap", "km/h"]);
+        let order = s.race.standings();
+        let lead = order.first().copied();
+        let mut follow = None;
+        for (place, &i) in order.iter().enumerate() {
+            let r = &s.race.racers[i];
+            let p = &r.progress;
+            let gap = match lead.filter(|&l| l != i) {
+                None => "—".to_string(),
+                Some(l) => match motor_sim::race::live_gap(&s.race.line, &s.race.racers[l].progress, p, s.race.clock_ms as u32) {
+                    Some(motor_sim::race::Gap::Time(ms)) => format!("+{:.1}s", ms as f32 / 1000.0),
+                    Some(motor_sim::race::Gap::Laps(n)) => format!("+{n} lap{}", if n == 1 { "" } else { "s" }),
+                    None => "—".to_string(),
+                },
+            };
+            let lap = format!("{}/{}", p.lap, p.laps);
+            let name = crate::scene::car_label(r.car_id, &r.car.p.name);
+            let who = if r.human { format!("{name} (you)") } else { name };
+            let cells = [format!("P{}", place + 1), who, lap, gap, format!("{:.0}", r.telemetry.kmh.abs())];
+            if glass_ui::race_row(ui, false, i == s.focus, [&cells[0], &cells[1], &cells[2], &cells[3], &cells[4]]).on_hover_text(format!("slot {i} · {}: click to follow", r.driver.name)).clicked() {
+                follow = Some(i);
+            }
+        }
+        if let Some(i) = follow {
+            s.focus = i;
+        }
+    });
 }
 
 fn camera(ui: &mut Ui, s: &mut Session) {
@@ -347,23 +452,18 @@ fn camera(ui: &mut Ui, s: &mut Session) {
     let before = CamTune::live();
     let mut t = before;
     let d = CamTune::default();
+    let was = tc::cam_vals(&d);
+    let mut rows = tc::cam_rows(&mut t);
+    let mut draw = |ui: &mut Ui, sect: Sect| {
+        for (i, row) in rows.iter_mut().enumerate().filter(|(_, row)| row.sect == sect) {
+            let modified = was[i] != row.f.get();
+            table_row(ui, row, Some(was[i]), modified);
+        }
+    };
     let mut reset = false;
-    reset |= section(ui, ic::MOVE, "Offsets", true, |ui| {
-        vec3(ui, "Chase eye", &mut t.chase_eye, 0.02, Some(d.chase_eye));
-        vec3(ui, "Chase look", &mut t.chase_look, 0.02, Some(d.chase_look));
-        vec3(ui, "Far eye", &mut t.far_eye, 0.02, Some(d.far_eye));
-        vec3(ui, "Far look", &mut t.far_look, 0.02, Some(d.far_look));
-        vec3(ui, "In-car eye", &mut t.incar_eye, 0.01, Some(d.incar_eye));
-        vec3(ui, "Bumper eye", &mut t.bumper_eye, 0.01, Some(d.bumper_eye));
-    });
-    reset |= section(ui, ic::SLIDERS, "Easing and walls", true, |ui| {
-        num_in(ui, "Easing xz", "", &mut t.k_xz, 0.005, 0.0..=1.0, Some(d.k_xz));
-        num_in(ui, "Easing y", "", &mut t.k_y, 0.005, 0.0..=1.0, Some(d.k_y));
-        num_in(ui, "Max lag", "rad", &mut t.max_lag, 0.01, 0.0..=std::f32::consts::PI, Some(d.max_lag));
-        num_in(ui, "Wall margin", "m", &mut t.margin, 0.01, 0.0..=5.0, Some(d.margin));
-        num_in(ui, "Min distance", "m", &mut t.min, 0.01, 0.0..=10.0, Some(d.min));
-        num_in(ui, "Ease-out rate", "", &mut t.out_rate, 0.05, 0.0..=50.0, Some(d.out_rate));
-    });
+    reset |= section(ui, ic::MOVE, "Offsets", true, |ui| draw(ui, Sect::Offsets));
+    reset |= section(ui, ic::SLIDERS, "Easing and walls", true, |ui| draw(ui, Sect::Easing));
+    drop(rows);
     if reset {
         t = d;
     }
@@ -513,6 +613,47 @@ fn local_light(ui: &mut Ui, v: &mut View, status: &str, gizmos: Option<&mut bool
     }
 }
 
+/// REMASTER (#478): the followed car's model file, as the loader read it (`scene::ModelCheck`): what to fix
+/// before it is the car (a missing wheel, a name no rule knows, a track width off the sim's).
+fn model_file(ui: &mut Ui, m: Option<&crate::scene::ModelCheck>) {
+    use crate::procgen::carmodel;
+    section(ui, ic::BOX, "Model file", false, |ui| {
+        let Some(m) = m else {
+            ui.weak("no model file (remaster/cars/carNN.glb)");
+            return;
+        };
+        let text = |ui: &mut Ui, s: String| {
+            ui.label(egui::RichText::new(s).monospace().color(crate::theme::WHITE));
+        };
+        let name = m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        glass_ui::prow(ui, "File", false, None, |ui| text(ui, name));
+        glass_ui::prow(ui, "Car model", false, None, |ui| text(ui, carmodel::source().name().to_string()));
+        if let Some(e) = &m.error {
+            ui.label(egui::RichText::new(format!("does not load, the recipe takes over: {e}")).color(crate::theme::ORANGE_TEXT));
+            return;
+        }
+        glass_ui::prow(ui, "Triangles", false, None, |ui| text(ui, format!("{} body + {} wheels", m.body_tris, m.wheel_tris)));
+        glass_ui::prow(ui, "Scale", false, Some("m / unit"), |ui| text(ui, format!("{:.5}", m.scale)));
+        glass_ui::prow(ui, "Fit", false, None, |ui| match m.hub_err_mm {
+            Some(e) => text(ui, format!("hubs, error {e:.1} mm")),
+            None => text(ui, "original body's box".into()),
+        });
+        let have: Vec<&str> = m.wheels_from_file.iter().zip(carmodel::WHEEL_NODES).filter(|(h, _)| **h).map(|(_, n)| &n["wheel_".len()..]).collect();
+        glass_ui::prow(ui, "Wheels in file", false, None, |ui| text(ui, if have.is_empty() { "none (generated)".into() } else { have.join(" ") }));
+        glass_ui::prow(ui, "Lamps", false, None, |ui| text(ui, m.lamps.to_string()));
+        // wrapped text, indented as the rows' labels are
+        let warn = |ui: &mut Ui, s: String| {
+            Frame::NONE.inner_margin(egui::Margin::symmetric(8, 2)).show(ui, |ui| ui.label(egui::RichText::new(s).color(crate::theme::ORANGE_TEXT)));
+        };
+        if !m.plain_materials.is_empty() {
+            warn(ui, format!("plain materials: {}", m.plain_materials.join(", ")));
+        }
+        for w in &m.warnings {
+            warn(ui, w.clone());
+        }
+    });
+}
+
 fn car_lights(ui: &mut Ui, c: &mut CarLightTune) {
     glass_ui::slider_row(ui, "brake preview", &mut c.brake_preview, 0.0..=1.0);
     for (name, l) in [("head lights", &mut c.head), ("tail lights", &mut c.tail)] {
@@ -568,6 +709,20 @@ fn num_in(ui: &mut Ui, name: &str, unit: &str, v: &mut f32, speed: f32, range: s
     ch
 }
 
+/// A row of a field table (`tune_changes`): `orig` = its loaded value (a vector's per-axis dots), `modified` = its dot.
+/// True when it changed.
+fn table_row(ui: &mut Ui, row: &mut Row, orig: Option<Val>, modified: bool) -> bool {
+    let Row { label, unit, speed, range, f, .. } = row;
+    match f {
+        F::Num(v) => {
+            let mut ch = false;
+            glass_ui::prow(ui, label, modified, Some(unit), |ui| ch = glass_ui::num_field(ui, v, *speed, range.clone(), modified).changed());
+            ch
+        }
+        F::V3(v) => vec3(ui, label, v, *speed, orig.and_then(Val::v3)),
+    }
+}
+
 /// A property row with a vector (game axes); true when it changed.
 fn vec3(ui: &mut Ui, name: &str, v: &mut Vec3, speed: f32, orig: Option<Vec3>) -> bool {
     let modified = orig.is_some_and(|o| o != *v);
@@ -599,6 +754,14 @@ pub(crate) fn section_open(ui: &mut Ui, icon: &str, title: &str, reset: bool, op
 /// `section_open` with a count after the name (the outliner's piece count).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn section_counted(ui: &mut Ui, icon: &str, title: &str, count: Option<&str>, reset: bool, open: bool, body: impl FnOnce(&mut Ui)) -> bool {
+    // a harvest (#436): the title and every row, unseen, whether the section is open or not; no state is touched
+    if glass_ui::harvesting() {
+        glass_ui::harvest_section(title);
+        let mut ghost = ui.new_child(egui::UiBuilder::new().max_rect(ui.available_rect_before_wrap()).invisible());
+        body(&mut ghost);
+        glass_ui::harvest_section("");
+        return false;
+    }
     let ctx = ui.ctx().clone();
     let id = ui.make_persistent_id(("glass section", title));
     let mut open = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || open));

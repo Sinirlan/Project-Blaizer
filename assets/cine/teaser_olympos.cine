@@ -1,0 +1,27 @@
+# Motorhead cine v1
+# Teaser #455, quick cuts and Classic -> Remaster #2: Olympos, one segment `--from 8.5 --to 22.5` (scripts/teaser.sh).
+# (Replaces the planned RedRock part, the user's pick: Olympos has the water.)
+# Titan (10) on pole, Serpent (4) beside it: the teaser's hero cars.
+Race Track 6 Cars 10 4 3 1 2 5 6 7 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60 Letterbox 2.39
+Audio on Doppler on
+
+# Quick cuts on the cliff road, 2.3 s each, alternating the modes: Titan's nose (Remaster), a low drone on Titan's left
+# turning from its front-left quarter to its side against the dunes and the sunset (Classic), the chase camera into the
+# tunnel (Remaster).
+Camera nose  mounted Target car 0 Offset 0 0.55 2.1 Angles 0 0 0 Zoom 1 Hide on
+Camera side  orbit Target car 0 Radius 9 Height 1.5 Speed 15 Start -130 Lag 0.05 Zoom 1.2 Clear on
+Camera chase chase Target car 0
+
+# Comparison: the user's station 4 m over the road at the tunnel mouth (F3 readout: camera 103.39 -26.51 9.59, looking at
+# the sand at 61.09 -32.20 18.06). In slow motion (0.5, tape pitch; race = 15.5 + (video - 15.5) / 2) Titan comes out of
+# the tunnel (Classic), passes under the lens during the dissolve and runs away down the beach of palms and sea (Remaster).
+# Twins: a shot whose camera is already on air has no cut, so no dissolve.
+Camera o_c static Eye 103.39 -26.51 9.59 Target car 0 Zoom auto 14 Lag 0.25 Lead 0.2
+Camera o_r static Eye 103.39 -26.51 9.59 Target car 0 Zoom auto 14 Lag 0.25 Lead 0.2
+
+Shot 8.5  nose  Mode remaster
+Shot 10.8 side  Mode classic
+Shot 13.1 chase Mode remaster
+Shot 15.5 o_c Mode classic Speed 0.5 Pitch tape
+Shot 18.5 o_r Mode remaster Speed 0.5 Pitch tape Dissolve 1.5

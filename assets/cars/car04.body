@@ -10,8 +10,8 @@
 # A wedge with a raised rear deck: two-tone paint 143 146 177 (70 faces: nose, fenders, roof,
 # rear wing and the tail) and 73 103 135 (69: the sides, the haunches, the deck, the nose's
 # lower lip). The 1 1 1 faces (48) are the arch tunnels 26-65 (inner walls at |x| 0.5), the
-# back-facing walls 18-21 of the step behind each front arch (the "door blades", kept as they
-# are until the Full body), the roof scoop's mouth 22/23 and the quarter intakes 24/25. The
+# back-facing walls 18-21 of the step behind each front arch (the "door blades"; the third pass
+# narrows the step, below), the roof scoop's mouth 22/23 and the quarter intakes 24/25. The
 # underside is Underred (0 0 0: 2-11); the rear wing over the deck (66-77, 159-161, 216) and
 # the Grill1 panel between the tail lamps (14/17) stay as in the original until the Full body.
 # Stance kept as the original's (drop 0) for the first pass.
@@ -46,8 +46,14 @@ Led pts=0,0.03;0.62,0.03 repeat=2 step=0,0.1 style=bar width=0.03 margin=0 clip=
 # the user's request): a louvred vent like a window blind, its slats leaning 45 deg down from
 # upright on the panel (so they stand level, pointing back). Repainted in the vent faces' black
 # look first, so the vent picks it.
-Paint from=128,128,128 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 like=1,1,1
-Vent from=1,1,1 lo=0,0.8,-2.11 hi=0.41,0.92,-1.98 rgb=3,3,5 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=45
+# Third pass: the panel is curved in the tail's zone first (the boxes test the mean of a
+# face's points, and the faired triangles' means sit up to a centimetre off the facet), so the
+# boxes reach 2-3 cm past it; the lamps (another tag) and the deck (73 103 135) are not picked.
+# Design choice (#464, the user's request: the louvres parallel to the band's level edges): laid
+# on the panel's mean plane and dropped onto the curved floor along its normal, the slats sank
+# towards the grille's ends; `level=1` drops them horizontally, so each keeps one height.
+Paint from=128,128,128 lo=0,0.78,-2.15 hi=0.42,0.95,-1.95 like=1,1,1
+Vent from=1,1,1 lo=0,0.78,-2.15 hi=0.42,0.95,-1.95 rgb=3,3,5 frame=0.01 inset=0.04 tint=0.5 kind=slats pitch=0.02 width=0.004 blades=0 spine=0.01 tilt=45 level=1
 
 # [O] the roof scoop's top is a shallow ridge: 135 (73 103 135, n 0.10 0.97 -0.22) and 136 behind
 # it a side, their centre points 63 (0 1.279 -0.472), 183 (0 1.167 -0.932) and 184 (0 1.057
@@ -93,17 +99,39 @@ Push lo=0.505,0.315,1.94 hi=0.52,0.325,1.96 by=0,0.07,0.076
 Push lo=0.725,0.315,1.79 hi=0.735,0.325,1.81 by=0.015,0.069,0.07
 # [O] the arch column (the bumper corner's back edge, the front arch's front rim) bends: x 0.922
 # at the bottom and lip rows (y 0.189, 0.23, z 1.61), 0.874 at the chin row (y 0.321, z 1.592),
-# 0.909 at the headlight line (y 0.543). Design choice (the user's request): straight up at
-# x 0.91, the three lower corners moved onto the line, so the arch's front wall stands straight.
-Push lo=0.915,0.185,1.6 hi=0.93,0.235,1.62 by=-0.012,0,0
-Push lo=0.87,0.315,1.585 hi=0.88,0.325,1.6 by=0.036,0,0
+# 0.909 at the headlight line (y 0.543). Design choice (the user's request): straight up, the
+# three lower corners moved onto the line, so the arch's front wall stands straight (first at
+# x 0.91; third pass: 0.925, with the rest of the rim, below).
+Push lo=0.915,0.185,1.6 hi=0.93,0.235,1.62 by=0.003,0,0
+Push lo=0.87,0.315,1.585 hi=0.88,0.325,1.6 by=0.051,0,0
+# [O] The front arch's outer rim (the tunnel faces 58-65 and the fender corners on them) is not
+# in one plane: x 0.909-0.912 up the front and over the top (y 0.543 / 0.648 / 0.728), then
+# 0.930 at the top's rear corner (0.726, z 1.029), 0.978 at the rear (0.615, 0.885) and 0.931 at
+# the bottom's rear end (0.207, 0.718): the fender swells 7 cm behind the hub, and so does the
+# lip the generator runs round the rim (it interpolates the corners' x by angle). The step down
+# to the door behind it (the blades 18/19, their outer corners at 0.970 / 0.929, z 0.59-0.60)
+# is 12-14 cm deep. [O] The tyre is 0.306 m wide on a hub at x 0.775, so its outer face is at
+# 0.928, 1.8 cm proud of the front rim. Third pass (the user's request: the arch edge in one
+# plane, the vents in front of the doors smaller if need be): every rim corner and the blades'
+# outer corners onto x 0.925 (front out 1.5 cm, rear in up to 5.3 cm, the tyre flush), the
+# fender's side 137/130 a plane; the blades keep their inner edges, so the step is 8-9 cm.
+Push lo=0.9,0.54,1.545 hi=0.915,0.548,1.555 by=0.016,0,0
+Push lo=0.9,0.644,1.437 hi=0.915,0.652,1.447 by=0.015,0,0
+Push lo=0.905,0.724,1.25 hi=0.92,0.732,1.26 by=0.013,0,0
+Push lo=0.925,0.72,1.02 hi=0.935,0.73,1.035 by=-0.005,0,0
+Push lo=0.97,0.61,0.88 hi=0.985,0.62,0.89 by=-0.053,0,0
+Push lo=0.925,0.2,0.71 hi=0.935,0.212,0.725 by=-0.006,0,0
+Push lo=0.965,0.63,0.585 hi=0.975,0.64,0.595 by=-0.045,0,0
+Push lo=0.925,0.2,0.598 hi=0.935,0.212,0.606 by=-0.004,0,0
 # Curved into one rounded bumper, both tags in one zone (each face keeps its colour, the paint
-# line stays; #174 phase 2), listed before the front fender's zone so 142 goes with the bumper:
-# the lower band outside the intake (98, 99), everything over the intake, and (#342) the
-# bonnet's nose top 133/163, so the fold into the bonnet rounds like the CCX's. The intake's
-# faces (102 and 96) stay out of it: flat, their outline a crease, recessed below. The folds to
-# the underside, the headlight and the bonnet behind 133/163 stay creases.
-Smooth from=73,103,135;143,146,177 lo=0.5,0.18,1.6;0,0.3,1.6;0,0.56,1.6 hi=0.95,0.3,2.1;0.95,0.56,2.1;0.55,0.65,1.9 max_deg=50 step=0.025 loose=0 round=0.1
+# line stays; #174 phase 2): the lower band outside the intake (98, 99), everything over the
+# intake, and (#342) the bonnet's nose top 133/163, so the fold into the bonnet rounds like the
+# CCX's. The intake's faces (102 and 96) stay out of it: flat, their outline a crease, recessed
+# below. The folds to the underside and the headlight stay creases. Third pass (the user's
+# request: no edge or ridge on the bodywork): the bumper and the front fender are one zone (the
+# `Smooth` after the splitter, below), so the fold 142/154 (20 deg, from the headlight's outer
+# corner down to the arch) rounds too, and the bonnet's middle 134/164 joins it, so the 9-10 deg
+# folds 133/134 and 163/164 across the bonnet behind the headlights go.
 # The intake (#342): the lower band's middle faces 102 and 96 (|x| < 0.461, y 0.189-0.295)
 # repainted in the vent faces' black look, then recessed 5 cm with fine horizontal slats and
 # upright dividers, after the CCX's grille (a black plastic grid of horizontal bars). The boxes
@@ -127,7 +155,9 @@ Splitter edge=0,0.189,2.011;0.275,0.189,2.011;0.461,0.188,1.99;0.717,0.189,1.84;
 # (19 deg). Design choice (the user's request): those three join the zone (second box), so the
 # fender rounds into the bonnet; the folds to the glass, the lamp and the bonnet's middle 134
 # (5 deg) are its outline.
-Smooth from=143,146,177 lo=0.75,0.3,0.55;0.6,0.74,0.8 hi=1.0,0.9,1.85;0.8,0.9,1.5 max_deg=50 step=0.025 loose=0 round=0.1
+# The first three boxes are the bumper's (above), the next two the fender's, the last the
+# bonnet's middle 134 / 164 (|x| < 0.52, y 0.69-0.83, z 1.26-1.64).
+Smooth from=73,103,135;143,146,177 lo=0.5,0.18,1.6;0,0.3,1.6;0,0.56,1.6;0.75,0.3,0.55;0.6,0.74,0.8;0,0.7,1.25 hi=0.95,0.3,2.1;0.95,0.56,2.1;0.55,0.65,1.9;1.0,0.9,1.85;0.8,0.9,1.5;0.56,0.8,1.65 max_deg=50 step=0.025 loose=0 round=0.1
 # [O] the side panel 120 (73 103 135, n 0.97 0.24 0.08, |x| 0.842-0.969, y 0.471-0.895,
 # z -1.116..0.589) runs flat from the door blade to the haunch and meets 121 along 110-172;
 # the shoulder 113 over it (n 0.43 0.90 0.07, under the quarter intake) meets the haunch's top
@@ -152,14 +182,35 @@ Smooth from=143,146,177 lo=0.75,0.3,0.55;0.6,0.74,0.8 hi=1.0,0.9,1.85;0.8,0.9,1.
 # the 20-22 deg fold between the rear face 140/149 and the corner 138/148 still read as an
 # upright edge in the paint's reflection from the lamp down; over 25 cm it is one curve. The
 # haunch's top and side keep their shape (same silhouette in the side view).
-Smooth from=73,103,135;143,146,177 lo=0.65,0.55,-2.05;0.85,0.6,-0.5;0.65,0.85,-1.0;0,0.3,-2.2;0,0.6,-2.2;0.75,0.75,-0.5;0.85,0.3,-0.7 hi=1.0,1.0,-0.9;1.0,0.8,0.1;0.9,1.0,-0.5;0.93,0.64,-1.8;0.75,0.82,-1.95;0.85,0.9,0.3;1.0,0.5,0.4 max_deg=65 step=0.025 loose=0 round=0.25
+# Third pass (the user's request: the tail round the lamps convex, the lamps one with the body,
+# no edge or ridge anywhere but the scoop): the tail lamps 12/13 (127 40 0) and the Grill1
+# panel 14/17 (128 128 128, repainted and vented after the zones run) join the zone (eighth box
+# with the deck 146/147 over them and the haunch's 144/145), so the lens and the grille lie in
+# the one curved surface and get recessed out of it; [O] 12 leans 47 deg back off upright, 13 is
+# 21 deg round the corner from it, the band 149/150 under them leans 21 deg, the deck 147 over
+# them 65 deg: the folds between them (20-23 deg, the rear deck's 114/115/143/146/147 too) were
+# flat facets with creases; the lens stood as a plate in them. The deck (ninth box), the scoop
+# top's rear end 136 (tenth: the 11 deg fold 136/143 fades it into the deck; the walls' folds to
+# it, 71-78 deg, stay creases, so the scoop keeps its edges), the light panels 118/119/126 (the
+# eleventh; their own zone before, the paint-line fold 115/119 is 26 deg) and the roof 116/117/123
+# (twelfth: 9 deg folds among them and to 126) make it one plate from the A-pillars to the tail.
+# The sill flare 82 ([O] 73 103 135, n 0.69 0.72, a wedge under the side's bottom edge from
+# 10 cm proud at the blade to nothing at z -1.03, folded 51 deg to 110) joins the seventh box
+# (y down to 0.2), so the crease along the bottom of the side rounds too. The scoop's walls
+# 78-81, the intakes, the glass and the underside stay out. `round` per box: 0.25 as before, 0.1
+# on the light panels (the quarter intake's back corner 69 sits on their fold).
+# [O] The band of lamps and grille meets the paint along level edges, y 0.914 (top: 41-37-34-38)
+# and 0.810 (bottom: 40-36-35). Design choice (#464, the user's request: those edges straight):
+# faired, each fold rounded by its own amount and the edge sagged with it (the top from 0.898 at
+# the centre to 0.865 at the lamp's outer end, the bottom 0.784-0.797, steps at the lamp/grille
+# seams); `level` holds the height of their points while they slide across and along the car.
+Smooth from=73,103,135;143,146,177;127,40,0;128,128,128 lo=0.65,0.55,-2.05;0.85,0.6,-0.5;0.65,0.85,-1.0;0,0.3,-2.2;0,0.6,-2.2;0.75,0.75,-0.5;0.85,0.2,-0.7;0,0.8,-2.15;0,0.95,-1.85;0,1.06,-1.2;0.35,1.0,-1.1;0,1.1,-0.4 hi=1.0,1.0,-0.9;1.0,0.8,0.1;0.9,1.0,-0.5;0.93,0.64,-1.8;0.75,0.82,-1.95;0.85,0.9,0.3;1.0,0.5,0.4;0.85,0.97,-1.6;0.75,1.06,-1.2;0.3,1.1,-0.9;0.6,1.2,-0.55;0.6,1.2,0.1 max_deg=65 step=0.025 loose=0 round=0.25;0.25;0.25;0.25;0.25;0.25;0.25;0.25;0.25;0.25;0.1;0.25 level=127,40,0;128,128,128
 # [O] behind each quarter intake a light panel (143 146 177) runs from the roof scoop's back
 # corner 137 (0.369 1.032 -1.339) to the intake: 118 (n 0.05 0.99 -0.14) inboard and 119 (n 0.45
 # 0.86 -0.24) outboard, folded 25 deg along 137-69 (69 = the intake's inner back corner, 0.545
 # 1.107 -0.743); 126 in front of 118 (7 deg off it). Design choice (#388, the user's request):
-# curved into one panel, so that fold is no longer an edge. The folds to the scoop's side wall,
-# the intake and the deck's dark 115 (the paint line 137-68) stay.
-Smooth from=143,146,177 lo=0.35,1.0,-1.1 hi=0.6,1.2,-0.55 max_deg=50 step=0.025 loose=0 round=0.1
+# curved into one panel, so that fold is no longer an edge; since the third pass in the haunch's
+# zone (above). The folds to the scoop's side wall and the intake stay.
 # [O] under the tail: the underside's middle 10 (|x| < 0.5, between the rear arches' inner walls)
 # rises from y 0.207 at z -1.031 to 0.318 at -1.957, then 9 / 8 to the tail's bottom edge (0.340
 # at z -2.183 at x 0, 0.32 at the corner 26); the upright rear bumper 139 / 140 stands on it up to
@@ -223,7 +274,23 @@ Foil from=143,146,177 lo=0,1.0,-1.9 hi=0.75,1.12,-1.29 le=0,1.12,-1.59;0.405,1.1
 # (full to y 0.56, none from the lamps' lower edge 0.81 up, so the lamps and the grille stay
 # where they are) and from the arch's rear wall back (none forward of z -1.78). The outline is a
 # curve of 4 cm cuts, not two corners; the bottom edge lands within 1 cm of the user's curve.
-Warp by=0,0,-0.045 x=0.46,0;0.52,0.36;0.58,0.55;0.64,0.7;0.7,0.84;0.76,0.96;0.8,0.93;0.84,0.62;0.88,0.28;0.93,0 y=0.28,1;0.56,1;0.81,0;0.9,0 z=-2.3,1;-1.95,1;-1.78,0
+# Third pass (the user's request: the tail round the lamps convex): the bulge faded out over
+# y 0.56-0.81, under the lamps' lower edge, because the lamps could not follow it (their LED bars
+# were placed on the unwarped lens): the fade leaned the band 15 deg further forward at its
+# middle and back again at the lamps, a hollow with the lens standing out of it. The parts
+# follow the warp now (`cuts::warp_point`), so it runs full to y 0.95 and fades out across the
+# deck (0.95-1.06, a near-level surface moving along itself; the wing at 1.1+ stays), and the
+# z fade moves back to -1.85..-1.6 (the haunch's rear end), so the lamps move as one piece with
+# the corner instead of tilting.
+# Two warps since #464 (the user: a wave along the tail lights' bottom edge): [O] the lamps'
+# edges run straight in plan from the cage's corner at x 0.39 to 0.70, so a bulge starting at
+# x 0.46 left them a flat spot there (plan slope 0.36, 0.07, 0.40 along the lens's bottom edge),
+# a wave from any view above the tail. Below the lamps (to y 0.56, gone by 0.78) the bumper's
+# profile as above; from 0.78 up one starting at the plan corner, its growth only slowing
+# outwards (it rises 3.0, 2.9, 2.8, 2.5, 2.3, 2.0 per metre), so the plan slope rises steadily
+# (0.23 to 0.52 along the lens's bottom edge). The two weights sum to 1 across the change.
+Warp by=0,0,-0.045 x=0.46,0;0.52,0.36;0.58,0.55;0.64,0.7;0.7,0.84;0.76,0.96;0.8,0.93;0.84,0.62;0.88,0.28;0.93,0 y=0.56,1;0.78,0 z=-2.3,1;-1.85,1;-1.6,0
+Warp by=0,0,-0.045 x=0.39,0;0.4,0.03;0.52,0.38;0.58,0.55;0.64,0.7;0.7,0.84;0.76,0.96;0.8,0.93;0.84,0.62;0.88,0.28;0.93,0 y=0.56,0;0.78,1;0.95,1;1.06,0 z=-2.3,1;-1.85,1;-1.6,0
 
 # Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
 # #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.

@@ -1,0 +1,17 @@
+# Motorhead cine v1
+# Orbit drone sample for #425: RedRock, 8 AI cars, 30 s from the green light.
+# An orbit camera circles a car at a set radius and height, turning at a set speed; its centre and heading follow the car with a lag.
+Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60
+End 30
+
+Camera drone  orbit Target leader Radius 14 Height 4 Speed 25 Start 160 Lag 0.3 Zoom 1 Clear on
+Camera slow   orbit Target car 3 Radius 9 Height 2 Speed -40 Start 30 Lag 0.2 Zoom auto 14 Clear on
+Camera high   orbit Target car 5 Radius 25 Height 18 Speed 12 Lag 0.5 Zoom auto 30 Clear on
+Camera chase  chase Target leader
+
+Shot 0 chase FadeIn 1
+Shot 5 drone
+Shot 12 slow Speed 0.25 Dissolve 0.4
+Shot 20 high Dissolve 0.4
+Shot 28 chase FadeOut 2

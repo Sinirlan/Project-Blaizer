@@ -114,6 +114,20 @@ pub fn parse_lwmo(bytes: &[u8]) -> Result<Motion> {
     Ok(Motion { version, channels, keys })
 }
 
+/// The text of a motion as `parse_lwmo` reads it (#424: the TV camera's override file). Floats print as the shortest
+/// text that parses back to the same value.
+pub fn write_lwmo(m: &Motion) -> String {
+    let join = |v: &[f32]| v.iter().map(f32::to_string).collect::<Vec<_>>().join(" ");
+    let mut o = format!("LWMO\n{}\n{}\n{}\n", m.version, m.channels, m.keys.len());
+    for k in &m.keys {
+        o += &join(&k.values);
+        o += "\n";
+        o += &join(&[k.frame, k.linear, k.tension, k.continuity, k.bias]);
+        o += "\n";
+    }
+    o
+}
+
 /// One `LoadObject` of a LightWave scene, as the scene loader 0x455390 reads it [O].
 #[derive(Debug, Clone)]
 pub struct SceneObject {
@@ -198,6 +212,17 @@ pub fn parse_lwsc(bytes: &[u8]) -> Result<Scene> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lwmo_write_round_trips() {
+        let key = |f: f32| MotionKey { values: vec![1.5, -2.25, 3.0, 0.1, 0.0, -7.0, 1.0, 1.0, 1.0], frame: f, linear: 2.0, tension: -1.5, continuity: 12.5, bias: 0.0 };
+        let m = Motion { version: 1, channels: 9, keys: vec![key(0.0), key(30.0)] };
+        let b = parse_lwmo(write_lwmo(&m).as_bytes()).unwrap();
+        assert_eq!((b.version, b.channels, b.keys.len()), (1, 9, 2));
+        for (a, c) in m.keys.iter().zip(&b.keys) {
+            assert_eq!((&a.values, a.frame, a.linear, a.tension, a.continuity, a.bias), (&c.values, c.frame, c.linear, c.tension, c.continuity, c.bias));
+        }
+    }
+
     use super::*;
 
     #[test]

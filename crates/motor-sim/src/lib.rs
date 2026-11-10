@@ -11,6 +11,8 @@ pub mod car;
 pub mod cheats;
 pub mod demo;
 pub mod demo_stats;
+pub mod eggs;
+pub mod lap_compare;
 pub mod props;
 pub mod race;
 pub mod replay;

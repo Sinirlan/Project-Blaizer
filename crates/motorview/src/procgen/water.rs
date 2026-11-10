@@ -6,6 +6,7 @@
 //! ```text
 //! Water Texture WATT Style ocean [params]                    # every world polygon with this texture
 //! Water Texture WATT+Sandv2 ...                              # + the flat Sandv2 at WATT's levels
+//! Water Texture WATT+Sandv2+untextured ...                   # + the flat untextured polygons at those levels (#456)
 //! Water Texture WATT Piece x y z Style still                 # only the connected piece of WATT at that point
 //! Water Area Level y Point x z Point x z ... Style still     # a new flat area (Atlantika's sea)
 //! Water Area ... Bed Sandv2                                  # + a sloping bottom in that world texture
@@ -415,12 +416,19 @@ fn subdivide_by<T: Copy>(t: [T; 3], max: f32, out: &mut Vec<[T; 3]>, depth: u32,
     }
 }
 
-/// The world texture indices (`Scene::world_tri_texture`) named `name`, case-insensitive, with or
-/// without `.iff`.
-fn texture_ids(s: &Scene, name: &str) -> Vec<u32> {
+/// The reserved texture name of the world's untextured polygons (`Scene::world_tri_texture` = `u32::MAX`),
+/// for `Water Texture WATT+untextured` (#456).
+const UNTEXTURED: &str = "untextured";
+
+/// The world texture indices (`Scene::world_tri_texture`) named `name` in `names`, case-insensitive, with or
+/// without `.iff`. `untextured` is the polygons without a texture.
+fn texture_ids(names: &[String], name: &str) -> Vec<u32> {
     let want = name.to_ascii_lowercase();
     let want = want.strip_suffix(".iff").unwrap_or(&want).to_string();
-    let ids: Vec<u32> = s.world_textures.iter().enumerate()
+    if want == UNTEXTURED {
+        return vec![u32::MAX];
+    }
+    let ids: Vec<u32> = names.iter().enumerate()
         .filter(|(_, n)| { let n = n.to_ascii_lowercase(); n.strip_suffix(".iff").unwrap_or(&n) == want })
         .map(|(i, _)| i as u32).collect();
     if ids.is_empty() {
@@ -431,9 +439,10 @@ fn texture_ids(s: &Scene, name: &str) -> Vec<u32> {
 
 /// The world triangles (indices into `Scene::world_tri_texture`) of texture `name`. `WATT+Sandv2`:
 /// the first texture is the water; the others join only where they lie flat at one of its levels
-/// (the original's dark shallows, Olympos `Sandv2` at y −32.2).
+/// (the original's dark shallows, Olympos `Sandv2` at y −32.2). `untextured` is a texture too: Olympos's far sea
+/// is 429 flat untextured quads at y −32.2 west of `WATT` (#456).
 fn texture_tris(s: &Scene, name: &str) -> Vec<usize> {
-    let ids = |name: &str| texture_ids(s, name);
+    let ids = |name: &str| texture_ids(&s.world_textures, name);
     let mut names = name.split('+').filter(|n| !n.is_empty());
     let main = names.next().map(ids).unwrap_or_default();
     let extra: Vec<u32> = names.flat_map(ids).collect();
@@ -575,7 +584,7 @@ const BED_TILE: f32 = 4.0;
 /// (weighted by area), for a bed made from nothing (`Water Area ... Bed NAME`). None: the track
 /// has no such textured polygon.
 fn bed_look(s: &Scene, name: &str) -> Option<(f32, [f32; 4])> {
-    let ids = texture_ids(s, name);
+    let ids = texture_ids(&s.world_textures, name);
     let (mut layer, mut sum, mut area) = (None, [0.0f32; 4], 0.0f32);
     for ti in s.world_tri_texture.iter().enumerate().filter(|(_, t)| ids.contains(t)).map(|(ti, _)| ti) {
         let Some(v) = s.tris.get(ti * 3..ti * 3 + 3).filter(|v| v[0].layer >= 0.0) else { continue };
@@ -643,14 +652,20 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
         let mut tris: Vec<[[f32; 3]; 3]> = Vec::new();
         let mut floor: Vec<[Vertex; 3]> = Vec::new();
         match &b.source {
-            Source::Texture { piece, .. } => {
+            Source::Texture { piece, name } => {
+                // the bed of joined untextured polygons (#456) takes the first texture's look, so the dark flat colour
+                // of the original's far sea does not show as a seam against the `WATT` bed [design choice]
+                let main_look = name.split('+').next().and_then(|n| bed_look(s, n));
                 for &ti in sets[bi].as_deref().unwrap_or_default() {
                     // a body without `Piece` leaves the pieces other bodies claimed to them
                     if piece.is_none() && claimed.contains(&ti) {
                         continue;
                     }
                     let v = &s.tris[ti * 3..ti * 3 + 3];
-                    floor.push([v[0], v[1], v[2]]);
+                    match main_look.filter(|_| s.world_tri_texture.get(ti) == Some(&u32::MAX)) {
+                        Some((layer, color)) => floor.push(floor_tri(&[v[0].pos, v[1].pos, v[2].pos], layer, color)),
+                        None => floor.push([v[0], v[1], v[2]]),
+                    }
                     if m.hide.is_empty() {
                         m.hide = vec![false; s.tris.len() / 3];
                     }
@@ -661,11 +676,7 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
                 // have no world triangle to hide, and take the bed's look from the texture
                 if b.params.fill_holes > 0.0 {
                     let patch = hole_patches(&tris, b.params.fill_holes);
-                    let look = match &b.source {
-                        Source::Texture { name, .. } => name.split('+').next().and_then(|n| bed_look(s, n)),
-                        _ => None,
-                    };
-                    if let Some((layer, color)) = look {
+                    if let Some((layer, color)) = main_look {
                         floor.extend(patch.iter().map(|t| floor_tri(t, layer, color)));
                     }
                     tris.extend(patch);
@@ -734,6 +745,16 @@ mod tests {
         assert_eq!(parse(&to_text(&a).split_whitespace().skip(1).collect::<Vec<_>>()).unwrap(), a);
         assert!(!to_text(&b).contains("Bed") && !to_text(&b).contains("Caustics"));
         assert_eq!(a.params.packed()[6][1], 0.2);
+    }
+
+    #[test]
+    fn untextured_is_a_texture_name() {
+        let names = vec!["Watt.iff".to_string(), "Sandv2.iff".to_string()];
+        assert_eq!(texture_ids(&names, "UNTEXTURED"), vec![u32::MAX]);
+        assert_eq!(texture_ids(&names, "watt"), vec![0]);
+        let b = parse(&["Texture", "WATT+Sandv2+untextured", "Style", "ocean"]).unwrap();
+        assert_eq!(b.source, Source::Texture { name: "WATT+Sandv2+untextured".into(), piece: None });
+        assert_eq!(parse(&to_text(&b).split_whitespace().skip(1).collect::<Vec<_>>()).unwrap(), b);
     }
 
     #[test]

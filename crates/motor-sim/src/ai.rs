@@ -76,7 +76,7 @@ pub struct Traffic {
     pub offset: f32,
     pub lane: f32,
     pub speed: f32,
-    /// car Width / Length (A+0x44 / A+0x48), m [I: CarDef 0x1218 / 0x1220]
+    /// traffic width / length (A+0x44 / A+0x48), m: `TRAFFIC_WIDTH` / `TRAFFIC_LENGTH` for every car [O, #379]
     pub width: f32,
     pub length: f32,
     /// heading · node direction (A+0x54)
@@ -592,8 +592,8 @@ impl GameAi {
         }
 
         // ---- traffic (0x407f09..0x4081c9)
-        // The array the original walks is sorted by raw node index, so a car "ahead" has the
-        // larger node and the wrap at the finish line is not seen.
+        // The array the original walks is sorted by raw node index, so a car "ahead" has the larger node. Pass 1
+        // compares raw indices; pass 2 also sees a car just past the finish line (0x40882b, below).
         let mut shift = 0.0f32;
         let w = self.width;
         let is_ahead = |o: &Traffic| o.node > i || (o.node == i && o.slot < self.slot);
@@ -616,20 +616,25 @@ impl GameAi {
                 }
             }
         }
-        // pass 2: cars ahead, nearest first
-        let mut ahead: Vec<&Traffic> = others.iter().filter(|o| is_ahead(o)).collect();
-        ahead.sort_by_key(|o| (o.node, std::cmp::Reverse(o.slot)));
+        // pass 2. CLASSIC 0x40802c..0x4089fa: the walk runs backwards from this car's entry in the race-order array,
+        // 7 entries around its copies: the cars ahead, nearest first, then from the last car (smallest node) up to the
+        // one just behind; a level car after this one in the array comes last [O, #379]
+        let mut walk: Vec<&Traffic> = others.iter().collect();
+        walk.sort_by_key(|o| (!is_ahead(o), o.node, std::cmp::Reverse(o.slot)));
         let mut seen = false;
-        for o in ahead {
+        for o in walk {
             let eff = (1.0 - o.align) * o.length + o.width * o.align;
             let room = 0.5 * eff + w + 0.2;
             let need = ((v - o.speed) * 5.0) as i32;
             if need < 0 {
                 continue;
             }
-            let gap = (o.node - i) as i32;
+            let gap = o.node as i32 - i as i32;
             let (wl, wr) = (self.wl[i], self.wr[i]);
-            if gap > 0 && gap < need {
+            // CLASSIC 0x40882b..0x40885b: a car behind by raw index counts as ahead when `gap < need − N` as unsigned,
+            // i.e. it is `gap + N < need` nodes ahead across the finish line (N = node count, 0x4db17c) [O, #379]
+            let wrapped = o.node < i && (gap as u32) < ((need - n as i32) as u32);
+            if (gap > 0 && gap < need) || wrapped {
                 seen = true;
                 if o.speed * 1.01 >= v || (o.offset - off).abs() >= 0.5 * (w + eff) + 0.1 {
                     continue;
@@ -860,6 +865,44 @@ mod tests {
         }
         // 6 m of road on the right; the old clamp held the lane at 6 − 1.5 = 4.5 m
         assert!(a.traffic().lane > 6.0, "lane {}", a.traffic().lane);
+    }
+
+    /// #379, CLASSIC 0x40882b: pass 2 sees a slower car just past the finish line (small node index) as ahead when
+    /// `gap + N < need`; further round the ring it stays behind.
+    #[test]
+    fn traffic_sees_across_the_finish_line() {
+        // a slower car at node 3 of the 200-node ring, on our low-offset side; need = (30 − 10)·5 = 100 nodes
+        let slow = Traffic { slot: 1, node: 3, offset: 0.5, lane: 0.0, speed: 10.0, width: 2.1, length: 4.4, align: 1.0 };
+        let lane_after = |z: f32| {
+            let mut car = test_car();
+            car.pos = Vec3::new(1.0, 0.0, z);
+            car.vel = Vec3::new(0.0, 0.0, 30.0);
+            let mut a = ai(0);
+            a.reset(&car);
+            a.drive(&car, 0.02, &[slow]);
+            a.traffic().lane
+        };
+        // node 195: 8 nodes ahead across the line, pass it on the right (+0.2 m)
+        assert!((lane_after(195.0) - 0.2).abs() < 1e-6, "lane {}", lane_after(195.0));
+        // node 100: 103 nodes ahead across the line, beyond `need`: not seen
+        assert_eq!(lane_after(100.0), 0.0);
+    }
+
+    /// #379, CLASSIC 0x408861: the walk reaches a level car that comes after this one in the race-order array too
+    /// (last, 0x4089f3), so both of two level cars drifting together move apart.
+    #[test]
+    fn level_car_behind_in_the_array_is_seen() {
+        let mut car = test_car();
+        car.pos = Vec3::new(1.0, 0.0, 10.0);
+        car.vel = Vec3::new(0.0, 0.0, 30.0);
+        // the other car on the same node, a higher slot (after us in the array), on our low-offset side
+        let level = Traffic { slot: 1, node: 10, offset: 0.5, lane: 0.0, speed: 30.0, width: 2.1, length: 4.4, align: 1.0 };
+        let mut a = ai(0);
+        a.reset(&car);
+        // drifting towards it (lateral velocity of the previous tick < 0): move away to the right
+        a.inject(10, 0.0, 1.0, -1.0);
+        a.drive(&car, 0.02, &[level]);
+        assert!((a.traffic().lane - 0.2).abs() < 1e-6, "lane {}", a.traffic().lane);
     }
 
     #[test]

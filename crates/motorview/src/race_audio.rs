@@ -38,11 +38,6 @@ motor_tune::tunable! {
     /// range: 0..4
     /// area: Audio/Engine
     LOOP_GAIN: f32 = 1.8;
-    /// `b` of the engine update (P+0xc28, 0x483d7b): fades the four L/R loops in. Only the loader
-    /// writes it (0 at 0x483cbd), so the loops never sound (07-audio 7.2) [D].
-    /// range: 0..1
-    /// area: Audio/Engine
-    LOOP_FADE: f32 = 0.0;
     /// Pitch slope of the other cars' engines (0x4d835f; the car you hear: `PITCH_PER_RPM`) [O].
     /// range: 0..0.001
     /// area: Audio/Engine
@@ -706,6 +701,8 @@ impl RaceAudio {
         };
 
         // ---- engine: six samples at one rpm pitch (0x483efe..0x48405c)
+        // `b` = the echo channel of the centreline at the heard car's arc (0x425bab -> P+0xc28, 07-audio 7.2) [O]
+        let echo = race.line.echo_at(me.progress.s);
         let pedal = if t.gear == 0 { 0.0 } else { (t.drive_force > 0.0) as u8 as f32 };
         ra.throttle += (pedal - ra.throttle) * (1.0 - (-12.0 * dt).exp());
         let pitch = engine_pitch(t.rpm);
@@ -722,7 +719,7 @@ impl RaceAudio {
         } else {
             // CLASSIC
             let (on, off) = engine_levels(me.car.pedal, t.rpm, in_car);
-            let vols = engine_volumes(on, off, LOOP_FADE.get());
+            let vols = engine_volumes(on, off, echo);
             for (k, v) in ra.engine.iter().enumerate() {
                 let (_, base, pan) = ENGINE_SAMPLES[k];
                 self.set(*v, self.focus(Params { volume: vols[k] * base * 0.5, pitch, pan, looping: true }));
@@ -731,7 +728,7 @@ impl RaceAudio {
         // turbo whine: volume rpm*5.3e-5 - 0.3, pitch rpm*1.1e-4 + 0.1 (0x484063)
         self.set(ra.turbo, self.focus(Params { volume: (t.rpm * 5.3e-5 - 0.3).clamp(0.0, 1.0) * 0.6, pitch: t.rpm * 1.1e-4 + 0.1, pan: 0.0, looping: true }));
         // interior hum, in-car only: volume 0.25 * (1 - 0.3 b), pitch rpm * 2.628e-5 + 0.9 (0x4840b0)
-        let hum = if in_car { 0.25 * (1.0 - 0.3 * LOOP_FADE.get()) } else { 0.0 };
+        let hum = if in_car { 0.25 * (1.0 - 0.3 * echo) } else { 0.0 };
         self.set(ra.inside, Params { volume: hum, pitch: t.rpm * 2.628e-5 + 0.9, pan: 0.0, looping: true });
         // overrun backfire: one of eburst1/2 (0.9, 0x4837b0) while P+0xb0 is set and neither plays (0x4840f6)
         if me.car.overrun && !ra.burst.is_some_and(|v| self.audio.with(|m| m.is_playing(v))) {
@@ -980,6 +977,9 @@ mod tests {
         assert!(close(on, 0.5) && close(off, 0.45));
         assert_eq!(engine_levels(0.0, 13000.0, false), (0.0, 0.9));
         // b = 0: the four L/R loops stay silent
-        assert_eq!(&engine_volumes(1.0, 0.0, LOOP_FADE.get())[2..], &[0.0; 4]);
+        assert_eq!(&engine_volumes(1.0, 0.0, 0.0)[2..], &[0.0; 4]);
+        // b = 0.5: gason halves, the left/right on-throttle loops come in at b * on * 1.8
+        let v = engine_volumes(1.0, 0.0, 0.5);
+        assert!(close(v[0], 0.5) && close(v[2], 0.5 * LOOP_GAIN.get()) && close(v[2], v[3]) && v[4] == 0.0);
     }
 }

@@ -130,6 +130,11 @@ const ROW_PITCH: f32 = 2.2;
 const BOWL_STEP: f32 = 0.005;
 /// bisection steps finding where a bowl cell's edge leaves the lens (`BOWL_STEP` / 4096, ~1 µm)
 const EDGE_BISECT: usize = 12;
+/// two lens faces whose normals' dot product is under this (about 1°) meet in a fold, and a bowl
+/// cell across it is cut along their shared edge (#359)
+const FOLD_COS: f32 = 0.99985;
+/// at most this many fold cuts in one bowl cell (three faces meeting in it need two)
+const FOLD_CUTS: usize = 4;
 /// a bulb dome's segments round and rings up
 const DOME_SEGMENTS: usize = 10;
 const DOME_RINGS: usize = 3;
@@ -145,6 +150,9 @@ const BAR_STEP: f32 = 0.01;
 /// the stretch of the outline the bottom edge is fitted to, in facet widths from the inner end
 /// (clear of a corner sliver and of a lower outer part)
 const BOTTOM_FIT: (f32, f32) = (0.1, 0.5);
+/// a lens of more faces than this was faired by a `Smooth` zone into small triangles (a cage lens
+/// is 1-6 facets); `cluster` then frames it round the pane's mean normal
+const FAIRED_PANE: usize = 8;
 
 /// The insides of the lamps of `faces` (after `inset_glass`), one set per halo in `halos` that
 /// sits on a lamp's faces, and the strips the `Leds` patterns give those halos.
@@ -214,9 +222,14 @@ fn seg_dist(p: Vec3, a: Vec3, b: Vec3) -> f32 {
 /// Where the line through `q` along `n` meets the outermost of `faces`: the point and that
 /// face's normal.
 pub(super) fn hit(faces: &[&Face], q: Vec3, n: Vec3) -> Option<(Vec3, Vec3)> {
+    hit_face(faces, q, n).map(|(p, m, _)| (p, m))
+}
+
+/// `hit`, and the index in `faces` of the face it met.
+fn hit_face(faces: &[&Face], q: Vec3, n: Vec3) -> Option<FaceHit> {
     let o = q + n * 0.3;
-    let mut best: Option<(f32, Vec3)> = None;
-    for f in faces {
+    let mut best: Option<(f32, Vec3, usize)> = None;
+    for (fi, f) in faces.iter().enumerate() {
         let p0 = Vec3::from(f.pts[0]);
         for k in 1..f.pts.len().saturating_sub(1) {
             let (e1, e2) = (Vec3::from(f.pts[k]) - p0, Vec3::from(f.pts[k + 1]) - p0);
@@ -232,11 +245,11 @@ pub(super) fn hit(faces: &[&Face], q: Vec3, n: Vec3) -> Option<(Vec3, Vec3)> {
             let v = (-n).dot(qv) / det;
             let t = e2.dot(qv) / det;
             if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 0.0 && best.is_none_or(|b| t < b.0) {
-                best = Some((t, Vec3::from(f.normal).normalize_or(n)));
+                best = Some((t, Vec3::from(f.normal).normalize_or(n), fi));
             }
         }
     }
-    best.map(|(t, fnorm)| (o - n * t, fnorm))
+    best.map(|(t, fnorm, fi)| (o - n * t, fnorm, fi))
 }
 
 pub(super) fn vert(p: Vec3, n: Vec3, color: [f32; 4], env: f32) -> Vertex {
@@ -336,16 +349,21 @@ fn projector(out: &mut Vec<Vertex>, c: Vec3, cn: Vec3, r: f32, depth: f32, glow:
 /// lens's farthest rim point and dips to the floor at each focus (creases between foci like a
 /// multi-reflector lamp); a glowing dome of radius `bulb` at each focus on the floor. The grid's
 /// cells are clipped to the lens's outline where it crosses them (#357), so the sheet ends on the
-/// outline, not on a staircase of whole cells, where the lens's edge is slanted to the grid.
+/// outline, not on a staircase of whole cells, where the lens's edge is slanted to the grid; and
+/// cut where the floor folds (two of its faces at an angle, `FOLD_COS`) along the faces' shared
+/// edge (#359), so the sheet's crease is that straight line, not a zigzag of cells drawn flat
+/// across it. A point on the fold is lifted along both faces' mitre, so the two sides share it
+/// and the sheet has no crack there.
 #[allow(clippy::too_many_arguments)]
 fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: &[Vec3], depth: f32, bulb: f32, glow: [f32; 4]) {
     let u = (b - a).reject_from(n).normalize_or(n.any_orthonormal_vector());
     let v = n.cross(u);
     let mid = (a + b) / 2.0;
-    let at = |s: f32, t: f32| hit(pane, mid + u * s + v * t, n);
+    let ray = |q: Vec2| mid + u * q.x + v * q.y;
+    let at = |s: f32, t: f32| hit_face(pane, ray(Vec2::new(s, t)), n);
     let half = ((SCAN * SCAN_N as f32 / 2.0) / BOWL_STEP).ceil() as i32;
     let x = |i: i32| i as f32 * BOWL_STEP;
-    let grid: Vec<Vec<Option<(Vec3, Vec3)>>> = (-half..=half).map(|i| (-half..=half).map(|j| at(x(i), x(j))).collect()).collect();
+    let grid: Vec<Vec<Option<FaceHit>>> = (-half..=half).map(|i| (-half..=half).map(|j| at(x(i), x(j))).collect()).collect();
     let f2: Vec<Vec2> = foci.iter().map(|c| Vec2::new((*c - mid).dot(u), (*c - mid).dot(v))).collect();
     let near = |p: Vec2| f2.iter().map(|c| p.distance(*c)).fold(f32::MAX, f32::min);
     let mut reach = 0.0f32;
@@ -360,19 +378,21 @@ fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: 
         return;
     }
     let height = |p: Vec2| depth * (near(p) / reach).powi(2).min(1.0);
-    // the sheet: a point (frame position q, its floor hit) lifted along the floor's normal,
-    // shaded by the height field's slope
-    let point_at = |q: Vec2, (p, fnorm): (Vec3, Vec3)| -> Vertex {
-        let d = BOWL_STEP / 2.0;
+    // the sheet: a point lifted off its floor point by the height field, shaded by the height
+    // field's slope
+    let point_at = |s: SheetPt| -> Vertex {
+        let (q, d) = (s.q, BOWL_STEP / 2.0);
         let (ds, dt) = ((height(q + Vec2::X * d) - height(q - Vec2::X * d)) / (2.0 * d), (height(q + Vec2::Y * d) - height(q - Vec2::Y * d)) / (2.0 * d));
-        let nn = (fnorm - u * ds - v * dt).normalize_or(fnorm);
-        vert(p + fnorm * (height(q) + LIFT), nn, CHROME, METAL_ENV)
+        let nn = (s.fnorm - u * ds - v * dt).normalize_or(s.fnorm);
+        vert(s.p + s.lift * (height(q) + LIFT), nn, CHROME, METAL_ENV)
     };
+    let floor_pt = |q: Vec2, (p, fnorm, face): FaceHit| SheetPt { q, p, fnorm, lift: fnorm, face };
+    let frame = |p: Vec3| Vec2::new((p - mid).dot(u), (p - mid).dot(v));
     let corner = |i: usize, j: usize| Vec2::new(x(i as i32 - half), x(j as i32 - half));
     // where a cell edge leaves the lens: bisect between its inside and outside corner, keeping
     // the last point that hits (always taken as inside → outside, so the two cells sharing the
     // edge get the same point and the sheet has no crack)
-    let edge_hit = |inside: Vec2, mut hit_in: (Vec3, Vec3), outside: Vec2| -> Vertex {
+    let edge_hit = |inside: Vec2, mut hit_in: FaceHit, outside: Vec2| -> SheetPt {
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
         for _ in 0..EDGE_BISECT {
             let m = (lo + hi) / 2.0;
@@ -382,14 +402,88 @@ fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: 
                 None => hi = m,
             }
         }
-        point_at(inside.lerp(outside, lo), hit_in)
+        floor_pt(inside.lerp(outside, lo), hit_in)
+    };
+    // the fold between the floor's faces under `a` and `b`, if they share an edge: the two
+    // corners they have in common farthest apart, in the frame and on the floor (the faces in
+    // index order, so every cell on it gets the same line)
+    let seam = |fa: usize, fb: usize| -> Option<(Vec2, Vec2, Vec3, Vec3)> {
+        let (fa, fb) = (fa.min(fb), fa.max(fb));
+        let common: Vec<Vec3> = pane[fa].pts.iter().map(|&p| Vec3::from(p)).filter(|p| pane[fb].pts.iter().any(|&r| p.distance(Vec3::from(r)) < 1e-5)).collect();
+        let mut ends: Option<(f32, Vec3, Vec3)> = None;
+        for (k, &p) in common.iter().enumerate() {
+            for &r in &common[k + 1..] {
+                if ends.is_none_or(|e| p.distance(r) > e.0) {
+                    ends = Some((p.distance(r), p, r));
+                }
+            }
+        }
+        let (len, p0, p1) = ends.filter(|e| e.0 > 1e-4)?;
+        let (q0, q1) = (frame(p0), frame(p1));
+        // an edge along the ray (end-on in the frame) gives no line
+        (q0.distance(q1) > len * 1e-3).then_some((q0, q1, p0, p1))
+    };
+    // `poly` cut along that fold: the pieces either side, each with the crossings on it
+    let fold = |poly: &[SheetPt], a: SheetPt, b: SheetPt| -> Option<(Vec<SheetPt>, Vec<SheetPt>)> {
+        let (na, nb) = (a.fnorm, b.fnorm);
+        if na.dot(nb) < -0.9 {
+            return None;
+        }
+        let (q0, q1, p0, p1) = seam(a.face, b.face)?;
+        let dq = q1 - q0;
+        let side = |q: Vec2| dq.perp_dot(q - q0);
+        let (da, db) = (side(a.q), side(b.q));
+        if da * db >= 0.0 {
+            return None;
+        }
+        // the mitre: m · na = m · nb = 1, so a point on the fold lifted by h along it is h off
+        // both faces' planes
+        let mitre = (na + nb) / (1.0 + na.dot(nb));
+        let (mut pa, mut pb) = (Vec::with_capacity(8), Vec::with_capacity(8));
+        for k in 0..poly.len() {
+            let (s, e) = (poly[k], poly[(k + 1) % poly.len()]);
+            let (gs, ge) = (side(s.q) * da.signum(), side(e.q) * da.signum());
+            if gs >= 0.0 {
+                pa.push(s);
+            }
+            if gs <= 0.0 {
+                pb.push(s);
+            }
+            if gs * ge < 0.0 {
+                // taken in one direction along the edge, so the cell on its other side gets the
+                // same point
+                let (from, to, g0, g1) = if (s.q.x, s.q.y) < (e.q.x, e.q.y) { (s.q, e.q, gs, ge) } else { (e.q, s.q, ge, gs) };
+                let q = from.lerp(to, g0 / (g0 - g1));
+                let p = p0.lerp(p1, (q - q0).dot(dq) / dq.length_squared());
+                pa.push(SheetPt { q, p, fnorm: na, lift: mitre, face: a.face });
+                pb.push(SheetPt { q, p, fnorm: nb, lift: mitre, face: b.face });
+            }
+        }
+        (pa.len() >= 3 && pb.len() >= 3).then_some((pa, pb))
+    };
+    let mut fan = |poly: &[SheetPt]| {
+        let first = point_at(poly[0]);
+        let mut prev = point_at(poly[1]);
+        for &s in &poly[2..] {
+            let next = point_at(s);
+            tri(out, [first, prev, next]);
+            prev = next;
+        }
+    };
+    // two points of `poly` either side of a fold
+    let folded = |a: &SheetPt, b: &SheetPt| a.fnorm.dot(b.fnorm) < FOLD_COS;
+    let cut = |poly: &[SheetPt]| {
+        let pairs = poly.iter().enumerate().flat_map(|(k, a)| poly[k + 1..].iter().map(move |b| (a, b)));
+        pairs.filter(|(a, b)| folded(a, b)).find_map(|(a, b)| fold(poly, *a, *b))
     };
     // each cell clipped to the lens's outline (marching squares): its corners in order with, on
-    // each edge whose ends differ, the crossing; a whole cell gives the two triangles of its quad
-    let n = grid.len();
-    let mut poly: Vec<Vertex> = Vec::with_capacity(8);
-    for i in 0..n - 1 {
-        for j in 0..n - 1 {
+    // each edge whose ends differ, the crossing; a whole cell gives the two triangles of its quad.
+    // A cell across a fold is cut along it, piece by piece.
+    let n_grid = grid.len();
+    let mut poly: Vec<SheetPt> = Vec::with_capacity(8);
+    let mut pieces: Vec<(Vec<SheetPt>, usize)> = Vec::new();
+    for i in 0..n_grid - 1 {
+        for j in 0..n_grid - 1 {
             let cs = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)];
             if cs.iter().all(|&(a, b)| grid[a][b].is_none()) {
                 continue;
@@ -399,7 +493,7 @@ fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: 
                 let ((a0, b0), (a1, b1)) = (cs[k], cs[(k + 1) % 4]);
                 let (h0, h1) = (grid[a0][b0], grid[a1][b1]);
                 if let Some(h) = h0 {
-                    poly.push(point_at(corner(a0, b0), h));
+                    poly.push(floor_pt(corner(a0, b0), h));
                 }
                 match (h0, h1) {
                     (Some(h), None) => poly.push(edge_hit(corner(a0, b0), h, corner(a1, b1))),
@@ -407,14 +501,25 @@ fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: 
                     _ => {}
                 }
             }
-            for k in 1..poly.len().saturating_sub(1) {
-                tri(out, [poly[0], poly[k], poly[k + 1]]);
+            if poly.len() < 3 {
+                continue;
+            }
+            if !poly.iter().any(|s| folded(s, &poly[0])) {
+                fan(&poly);
+                continue;
+            }
+            pieces.push((poly.clone(), 0));
+            while let Some((piece, cuts)) = pieces.pop() {
+                match (cuts < FOLD_CUTS).then(|| cut(&piece)).flatten() {
+                    Some((pa, pb)) => pieces.extend([(pa, cuts + 1), (pb, cuts + 1)]),
+                    None => fan(&piece),
+                }
             }
         }
     }
     // the bulbs: a glowing dome on the floor at each focus that lies on the lens
     for c in &f2 {
-        let Some((p, fnorm)) = at(c.x, c.y) else { continue };
+        let Some((p, fnorm, _)) = at(c.x, c.y) else { continue };
         let e = |k: usize| {
             let ang = k as f32 / DOME_SEGMENTS as f32 * std::f32::consts::TAU;
             u * ang.cos() + v * ang.sin()
@@ -438,6 +543,19 @@ fn bowl(out: &mut Vec<Vertex>, pane: &[&Face], n: Vec3, a: Vec3, b: Vec3, foci: 
     }
 }
 
+/// A point of the reflector bowl's sheet (`bowl`): its frame position `q`, its floor point `p`,
+/// the floor normal `fnorm` it is shaded with and the direction `lift` the height field raises
+/// it along (the floor's normal; on a fold the mitre of the faces either side).
+#[derive(Clone, Copy)]
+struct SheetPt {
+    q: Vec2,
+    p: Vec3,
+    fnorm: Vec3,
+    lift: Vec3,
+    /// the index of its floor face in the lens's faces
+    face: usize,
+}
+
 /// The face's area.
 fn area(f: &Face) -> f32 {
     let p0 = Vec3::from(f.pts[0]);
@@ -451,7 +569,15 @@ fn area(f: &Face) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn cluster(out: &mut Vec<Vertex>, strips: &mut Vec<LampStrip>, halo: usize, pane: &[&Face], mid: Vec3, glow: [f32; 4], paths: &[LedPath], inset: f32) {
     let Some(big) = pane.iter().max_by(|x, y| area(x).total_cmp(&area(y))) else { return };
-    let nm = Vec3::from(big.normal).normalize_or(Vec3::Y);
+    // REMASTER: a lens faired by a `Smooth` zone (the Serpent's tail) is dozens of small
+    // triangles, and the biggest may lie at its edge, where the fairing tilts it towards the body
+    // round it: the main facet is then taken round the area-weighted mean normal. A lens of a few
+    // cage facets keeps its biggest one (the Titan's six-face cluster), as before.
+    let nm = if pane.len() > FAIRED_PANE {
+        pane.iter().map(|f| Vec3::from(f.normal).normalize_or_zero() * area(f)).sum::<Vec3>().normalize_or(Vec3::Y)
+    } else {
+        Vec3::from(big.normal).normalize_or(Vec3::Y)
+    };
     let main: Vec<&Face> = pane.iter().copied().filter(|f| Vec3::from(f.normal).normalize_or_zero().dot(nm) > 0.85).collect();
     let su = Vec3::new(-mid.x.signum(), 0.0, 0.0).reject_from(nm).normalize_or_zero();
     let mut sv = nm.cross(su);
@@ -741,6 +867,8 @@ fn disc(out: &mut Vec<Vertex>, at: &dyn Fn(f32, f32) -> Option<Hit>, c: (f32, f3
 
 /// a point on the lens and its normal
 type Hit = (Vec3, Vec3);
+/// a `Hit` and the index of the face it met
+type FaceHit = (Vec3, Vec3, usize);
 
 #[cfg(test)]
 mod tests {
@@ -939,6 +1067,44 @@ mod tests {
         let lens = 0.1 * (0.4 + 0.363) / 2.0;
         assert!((covered / lens - 1.0).abs() < 1e-3, "{covered} of {lens}");
         assert!(tris.iter().flat_map(|t| t.iter()).all(|p| p.pos[0] <= 0.4 - 0.37 * p.pos[1] + 1e-5));
+    }
+
+    /// on a lens folding 30° round a corner (two faces sharing the edge x = 0.25) the bowl is cut
+    /// along the fold (#359): no triangle reaches across the plane through the fold along the
+    /// mitre of the two faces, and the triangles either side share their edges on it (no crack)
+    #[test]
+    fn bowl_folds_on_a_straight_line() {
+        let rgb = [125, 126, 82];
+        let (c, s) = (30f32.to_radians().cos(), 30f32.to_radians().sin());
+        let mut a = quad([[0.0, 0.0, 0.0], [0.25, 0.0, 0.0], [0.25, 0.1, 0.0], [0.0, 0.1, 0.0]], rgb);
+        a.normal = [0.0, 0.0, 1.0];
+        let end = [0.25 + 0.15 * c, -0.15 * s];
+        let mut b = quad([[0.25, 0.0, 0.0], [end[0], 0.0, end[1]], [end[0], 0.1, end[1]], [0.25, 0.1, 0.0]], rgb);
+        b.normal = [s, 0.0, c];
+        let halos = [HaloSeg { p0: [0.0, 0.05, 0.0], p1: [end[0], 0.05, end[1]], rgb: [252, 255, 134] }];
+        let housing = Glass { rgb, frame: 0.0, inset: 0.03, tint: 0.5 };
+        let lamp = Lamp { housing, kind: LampKind::Reflector { count: 2, rows: 1, pitch: 0.0, bulb: 0.01, paths: Vec::new(), inset: 0.0 } };
+        let (v, _) = lamps(&[a, b], &halos, &[lamp]);
+        let tris: Vec<&[Vertex]> = v.chunks(3).filter(|t| t[0].env == METAL_ENV).collect();
+        // the mitre plane: through the fold (x = 0.25, z = 0) along y and (na + nb); in view
+        // space z is negated
+        let m = Vec3::new(s, 0.0, 1.0 + c);
+        let k = Vec3::Y.cross(m).normalize();
+        let side = |p: &Vertex| (Vec3::new(p.pos[0], p.pos[1], -p.pos[2]) - Vec3::new(0.25, 0.0, 0.0)).dot(k);
+        assert!(tris.iter().all(|t| t.iter().all(|p| side(p) <= 1e-5) || t.iter().all(|p| side(p) >= -1e-5)));
+        // every edge on the fold belongs to two triangles, one either side
+        let key = |p: &Vertex| p.pos.map(f32::to_bits);
+        let mut edges: std::collections::HashMap<([u32; 3], [u32; 3]), usize> = std::collections::HashMap::new();
+        for t in &tris {
+            for e in 0..3 {
+                let (p, q) = (&t[e], &t[(e + 1) % 3]);
+                if side(p).abs() < 1e-5 && side(q).abs() < 1e-5 && key(p) != key(q) {
+                    *edges.entry(if key(p) < key(q) { (key(p), key(q)) } else { (key(q), key(p)) }).or_default() += 1;
+                }
+            }
+        }
+        assert!(edges.len() >= 10, "{}", edges.len());
+        assert!(edges.values().all(|&n| n == 2), "{edges:?}");
     }
 
     /// a bar is a ribbon on the lens, whole pieces only, and gives one strip per straight run

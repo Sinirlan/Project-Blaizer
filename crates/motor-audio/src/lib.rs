@@ -61,13 +61,15 @@ pub struct Mixer {
     voices: Vec<Voice>,
     pub out_rate: u32,
     pub master: f32,
+    /// tape speed (#426): every voice's step is multiplied by it (1 = off; the music stream is not affected)
+    pub rate: f32,
     generations: u32,
     music: Option<MusicStream>,
 }
 
 impl Mixer {
     pub fn new(out_rate: u32) -> Mixer {
-        Mixer { voices: Vec::new(), out_rate, master: 1.0, generations: 0, music: None }
+        Mixer { voices: Vec::new(), out_rate, master: 1.0, rate: 1.0, generations: 0, music: None }
     }
 
     pub fn play(&mut self, clip: &Clip, p: Params) -> VoiceId {
@@ -140,7 +142,7 @@ impl Mixer {
                 v.alive = false;
                 continue;
             }
-            let step = v.p.pitch.max(0.0) as f64 * v.clip.rate as f64 / self.out_rate as f64;
+            let step = v.p.pitch.max(0.0) as f64 * self.rate.max(0.0) as f64 * v.clip.rate as f64 / self.out_rate as f64;
             let (ls, le) = v.clip.loop_points.unwrap_or((0, data.len()));
             let le = le.min(data.len()).max(ls + 1);
             // equal-power pan
@@ -292,6 +294,19 @@ mod tests {
         assert!(m.is_playing(id));
         // pitch 2 plays the 10-sample clip in 5 frames: frame 5 wraps to the start
         assert!(out[2 * 5].abs() < 1e-3);
+    }
+
+    #[test]
+    fn tape_rate() {
+        let mut m = Mixer::new(100);
+        m.rate = 0.5;
+        let id = m.play(&clip(10), Params::default());
+        let mut out = vec![0.0; 2 * 15];
+        m.render(&mut out, 2);
+        // rate 0.5 plays the 10-sample clip in 20 frames: still going after 15
+        assert!(m.is_playing(id));
+        m.render(&mut out, 2);
+        assert!(!m.is_playing(id));
     }
 
     #[test]

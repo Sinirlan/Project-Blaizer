@@ -49,6 +49,12 @@ pub fn replay_dir() -> Option<PathBuf> {
     Some(config_dir()?.join("Replays"))
 }
 
+/// REMASTER (#292): motorview's `Exports` folder in the settings directory: the generated car
+/// bodies as OBJ (`procgen::bodyobj`, Sim > Car > Export body).
+pub fn export_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("Exports"))
+}
+
 /// The `.mhr` files of `Replays`, by name (the runs motorview can open).
 pub fn runs() -> Vec<Entry> {
     list().into_iter().filter(|e| e.path.extension().is_some_and(|x| x.eq_ignore_ascii_case("mhr"))).collect()

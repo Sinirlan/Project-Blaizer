@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use winit::keyboard::KeyCode;
 
 /// The car tasks the controls screen lets you change, then the fixed in-game tasks
@@ -231,8 +232,12 @@ pub fn load_layouts(root: &Path) -> Vec<Layout> {
 }
 
 /// Stick and trigger dead zones and the steering sensitivity, set on the modern Controller
-/// page [design choice; the original scales the raw axis, `|axis| * sens * K(0x4d2740)` clamped
-/// to 1]. Defaults: 15 % dead zones, sensitivity 1.
+/// page [design choice]. The original's stick axis code has no dead zone or sensitivity of its own
+/// (`(x - centre) / (end - centre)`, above 0.98 snapped to 1: 0x426c3a, 0x4d2738 [O static]; the
+/// 5 % seen live comes from the DirectInput / Wine layer [I]); `K(0x4d2740)` is its mouse path.
+/// Ours steers in proportion to the travel right up to full lock and skips the original's
+/// full-lock key ramp (half lock, then +0.6 / s, 0x45bf34) [design choice, #377].
+/// Defaults: 5 % stick dead zone (the original's live value), 15 % triggers, sensitivity 1.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct PadTune {
     pub stick_dead: f32,
@@ -242,7 +247,7 @@ pub struct PadTune {
 
 impl Default for PadTune {
     fn default() -> PadTune {
-        PadTune { stick_dead: 0.15, trigger_dead: 0.15, steer_sens: 1.0 }
+        PadTune { stick_dead: 0.05, trigger_dead: 0.15, steer_sens: 1.0 }
     }
 }
 
@@ -266,6 +271,27 @@ impl PadTune {
 const MOUSE_RANGE: f32 = 400.0;
 /// Stick deflection that counts as a press (menus, binding capture).
 const PRESS: f32 = 0.6;
+/// Menu navigation by a held d-pad or stick [design choice, #419]: the first repeat comes after this pause,
+/// the next few are slow, then it speeds up.
+const NAV_DELAY: Duration = Duration::from_millis(400);
+const NAV_SLOW: Duration = Duration::from_millis(180);
+const NAV_FAST: Duration = Duration::from_millis(70);
+/// Repeats that keep the slow pace before the fast one.
+const NAV_SLOW_STEPS: u32 = 3;
+
+/// The gap before repeat `n + 1`, after `n` repeats were sent.
+fn nav_gap(n: u32) -> Duration {
+    if n <= NAV_SLOW_STEPS { NAV_SLOW } else { NAV_FAST }
+}
+
+/// A d-pad button or stick direction held in a menu, repeating its arrow key.
+struct NavHold {
+    key: KeyCode,
+    /// the d-pad button (`None` = the left stick)
+    button: Option<gilrs::Button>,
+    next: Instant,
+    n: u32,
+}
 
 /// gilrs buttons for JoyButton1..8.
 pub const PAD_BUTTONS: [gilrs::Button; 8] = {
@@ -402,6 +428,8 @@ pub struct Controls {
     mouse: (f32, f32),
     /// left stick direction last reported to the menus
     stick_dir: Option<Dir>,
+    /// the d-pad or stick arrow being held (repeats in `poll`)
+    nav: Option<NavHold>,
     /// a gamepad or mouse control pressed since the last `take_pressed`
     pressed: Option<Code>,
     held: [bool; TASKS.len()],
@@ -438,7 +466,7 @@ impl Controls {
     pub fn new(root: &Path) -> Controls {
         let layouts = load_layouts(root);
         let active = layouts.iter().position(|l| l.name.eq_ignore_ascii_case(DEFAULT_LAYOUT_NAME)).unwrap_or(0);
-        Controls { layouts, active, gilrs: None, mouse_buttons: [false; 3], mouse: (0.0, 0.0), stick_dir: None, pressed: None, held: [false; TASKS.len()], last: Device::Keyboard, pad_pressed: None, pad_bind: DEFAULT_PAD_BIND, tune: PadTune::default(), pad_held: HashSet::new(), ff: Vec::new(), ff_gain: (0.0, 0.0) }
+        Controls { layouts, active, gilrs: None, mouse_buttons: [false; 3], mouse: (0.0, 0.0), stick_dir: None, nav: None, pressed: None, held: [false; TASKS.len()], last: Device::Keyboard, pad_pressed: None, pad_bind: DEFAULT_PAD_BIND, tune: PadTune::default(), pad_held: HashSet::new(), ff: Vec::new(), ff_gain: (0.0, 0.0) }
     }
 
     /// Start reading gamepads, joysticks and wheels (interactive runs only).
@@ -589,7 +617,16 @@ impl Controls {
             track_held(&mut self.pad_held, ev.id, &ev.event);
             let menu = |key| PadKey { key, in_race: false, start: false };
             match ev.event {
-                EventType::Connected | EventType::Disconnected => reconnect = true,
+                EventType::Connected => reconnect = true,
+                EventType::Disconnected => {
+                    reconnect = true;
+                    self.nav = None;
+                }
+                EventType::ButtonReleased(b, _) => {
+                    if self.nav.as_ref().is_some_and(|h| h.button == Some(b)) {
+                        self.nav = None;
+                    }
+                }
                 EventType::ButtonPressed(b, _) => {
                     self.last = pad_kind(&g.gamepad(ev.id));
                     if b != Button::Unknown {
@@ -598,11 +635,18 @@ impl Controls {
                     if let Some(i) = PAD_BUTTONS.iter().position(|&x| x == b) {
                         self.pressed = Some(Code::JoyButton(i as u8 + 1));
                     }
+                    let arrow = match b {
+                        Button::DPadUp => Some(KeyCode::ArrowUp),
+                        Button::DPadDown => Some(KeyCode::ArrowDown),
+                        Button::DPadLeft => Some(KeyCode::ArrowLeft),
+                        Button::DPadRight => Some(KeyCode::ArrowRight),
+                        _ => None,
+                    };
+                    if let Some(key) = arrow {
+                        out.push(menu(key));
+                        self.nav = Some(NavHold { key, button: Some(b), next: Instant::now() + NAV_DELAY, n: 0 });
+                    }
                     match b {
-                        Button::DPadUp => out.push(menu(KeyCode::ArrowUp)),
-                        Button::DPadDown => out.push(menu(KeyCode::ArrowDown)),
-                        Button::DPadLeft => out.push(menu(KeyCode::ArrowLeft)),
-                        Button::DPadRight => out.push(menu(KeyCode::ArrowRight)),
                         Button::South => out.push(PadKey { key: KeyCode::Enter, in_race: true, start: false }),
                         Button::East => out.push(menu(KeyCode::Escape)),
                         // the modern graphic options: LB / RB switch tab, Y applies, X restores defaults
@@ -636,6 +680,9 @@ impl Controls {
                         None
                     };
                     if dir != self.stick_dir {
+                        if self.nav.as_ref().is_some_and(|h| h.button.is_none()) {
+                            self.nav = None;
+                        }
                         if let Some(d) = dir {
                             self.last = pad_kind(&pad);
                             self.pressed = Some(Code::Joy(d));
@@ -650,6 +697,9 @@ impl Controls {
                                 _ => None,
                             };
                             out.extend(key.map(menu));
+                            if let Some(key) = key {
+                                self.nav = Some(NavHold { key, button: None, next: Instant::now() + NAV_DELAY, n: 0 });
+                            }
                         }
                         self.stick_dir = dir;
                     }
@@ -659,6 +709,15 @@ impl Controls {
                     self.last = pad_kind(&g.gamepad(ev.id));
                 }
                 _ => {}
+            }
+        }
+        // a held arrow repeats: a pause, a few slow steps, then fast (menu keys: the race ignores them, front.rs `poll_pads`)
+        if let Some(h) = &mut self.nav {
+            let now = Instant::now();
+            if now >= h.next {
+                out.push(PadKey { key: h.key, in_race: false, start: false });
+                h.n += 1;
+                h.next = now + nav_gap(h.n);
             }
         }
         if reconnect {
@@ -770,6 +829,14 @@ impl Controls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nav_repeat_speeds_up() {
+        assert!(NAV_DELAY > NAV_SLOW && NAV_SLOW > NAV_FAST);
+        assert_eq!(nav_gap(1), NAV_SLOW);
+        assert_eq!(nav_gap(NAV_SLOW_STEPS), NAV_SLOW);
+        assert_eq!(nav_gap(NAV_SLOW_STEPS + 1), NAV_FAST);
+    }
 
     #[test]
     fn codes_round_trip() {

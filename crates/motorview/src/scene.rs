@@ -6,7 +6,7 @@ use crate::loading::{Progress, Stage};
 use crate::{procgen, texpack};
 use motor_data::{aidat, cfg::Config, iff, myo, myw, pdi, tga};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const TEX: u32 = 256; // every texture is resampled into a 256x256 array layer
 /// 256 was enough before the scene objects; Olympos with a full grid needs a little more
@@ -39,9 +39,13 @@ pub const METALLIC_ENV: f32 = 2.0;
 /// the paint band (fragment code 5.25). shader.wgsl `tag_finish` reads the three tags (1 gloss, 1.75, 2).
 pub const PEARL_ENV: f32 = 1.75;
 /// `Vertex::env` of an env-mapped scene-object polygon (Gouraud types 8/9 with flags & 0x60,
-/// 05-formats "Env-mapped polygons"): the track's `EnvMapName` texture times an even light
-/// (`0x433354` / `0x434080`, `0x42d044`), no sun, no N.L
+/// 05-formats "Env-mapped polygons"): the track's `EnvMapName` texture times the vertex light (CLASSIC: the D3D
+/// env polygon, `0x4402f3` with `0x43ecfc`, #459; REMASTER: the software path's even light `0x42d044`)
 pub const PROP_ENV: f32 = 9.0;
+/// CLASSIC: `Vertex::env` of a lit object's non-Gouraud polygon (types 0..7) with flag 0x10. The D3D converter passes
+/// the flag on untextured types only (`0x441146`): a scene object's such face is face colour x ObjectBrightness, unlit
+/// (`0x44073d`, shader.wgsl `vs_main`); textured faces and car draws ignore the tag. `vs_remaster` treats it as 0.
+pub const SELF_LIT_ENV: f32 = 10.0;
 /// CHEAT tribute to tron (#320, `0x48e964`, 08 §8.14): in a Tron scene `Vertex::color.a` of every MYO triangle is
 /// `TRON_CODE` plus its code (plain scenes keep alpha 1). Bits 0..2: the edge opposite corner k is an edge of the
 /// polygon, outlined (a fan diagonal of a quad is not); `TRON_DARK`: untextured flat polygon, black fill; `TRON_KEYED`:
@@ -260,6 +264,8 @@ pub struct Scene {
     /// REMASTER the original's tree cards (`trees::find`), every one found, swapped or not: the fill's placed
     /// models (#390) are lit and coloured like them
     pub tree_sites: Vec<procgen::trees::Site>,
+    /// REMASTER clouds (#470): the fill's `Piece cloud` fog volumes, read by the Remaster fog shaders
+    pub clouds: Vec<procgen::fill::Cloud>,
     /// REMASTER (#390): the layer of the tree pack's first image in `layers` (the pack's images follow it), for
     /// the cards' models and the fill's `Shape::Model`; None when the pack does not load or the layers are full
     pub tree_pack_layer: Option<usize>,
@@ -327,10 +333,12 @@ pub struct Scene {
     pub world_textures_sorted: Vec<String>,
     /// per `props` mesh: the .lws object file stem
     pub prop_names: Vec<String>,
-    /// per car slot: "carNN 'CarName'"
+    /// per car slot: `car_label` ("01 Kobra X3")
     pub car_names: Vec<String>,
     /// per car slot: the car file's own Colour1..3 (what CustomCarColours replaces)
     pub car_colours: Vec<[[u8; 3]; 3]>,
+    /// REMASTER (#478) per car slot: what loading its model file found (None: the car has no file)
+    pub car_models: Vec<Option<ModelCheck>>,
     /// the track's ObjectBrightness: the car face colours are emitted times it (`rgba_obj`)
     pub object_scale: [f32; 3],
     pub stats: String,
@@ -427,24 +435,54 @@ impl TexLib<'_> {
 /// texture has one, e.g. TRIROAD.IFF says 10).
 const ZERO_TRANSPARENT: u8 = 4;
 
-/// Nearest-neighbour resample to TEX x TEX RGBA.
+/// Wrapping bilinear resample to TEX x TEX RGBA.
 /// `key`: the colour index drawn transparent (alpha 0), if any.
+///
+/// CLASSIC Begin3D (0x415354) sets linear texture filtering and the D3D texture is sampled at its own size, so a magnified
+/// 64x64 texture is smooth; the array layer is TEX x TEX, so the upscale is bilinear here (#450; it was nearest, which
+/// left square stair steps on the chevron arrows) and the Linear sampler does the rest. Texels wrap (the sampler repeats).
+/// A layer of TEX x TEX is copied unchanged. APPROX [I]: RGB is weighted by alpha so the key colour never bleeds into
+/// its neighbours, alpha interpolates, and `fs_main` cuts at 0.5 (the D3D colour-key rule with filtering is not traced).
 fn resample(img: &iff::Image, key: Option<u16>) -> Vec<u8> {
-    let src: Vec<u8> = img
+    let (w, h) = (img.width as usize, img.height as usize);
+    let src: Vec<[f32; 4]> = img
         .indices
         .iter()
-        .flat_map(|&i| {
+        .map(|&i| {
             let c = img.palette.get(i as usize).copied().unwrap_or([255, 0, 255]);
-            [c[0], c[1], c[2], if key == Some(i as u16) { 0 } else { 255 }]
+            [c[0] as f32, c[1] as f32, c[2] as f32, if key == Some(i as u16) { 0.0 } else { 255.0 }]
         })
         .collect();
-    let (w, h) = (img.width as usize, img.height as usize);
-    let mut out = vec![0u8; (TEX * TEX * 4) as usize];
-    for y in 0..TEX as usize {
-        for x in 0..TEX as usize {
-            let (sx, sy) = (x * w / TEX as usize, y * h / TEX as usize);
-            let s = (sy * w + sx) * 4;
-            out[(y * TEX as usize + x) * 4..][..4].copy_from_slice(&src[s..s + 4]);
+    let t = TEX as usize;
+    // per output index: the two source indices and the weight of the second
+    let taps = |n: usize| -> Vec<(usize, usize, f32)> {
+        (0..t)
+            .map(|o| {
+                let f = (o as f32 + 0.5) * n as f32 / t as f32 - 0.5;
+                let i0 = f.floor();
+                ((i0 as isize).rem_euclid(n as isize) as usize, ((i0 as isize + 1).rem_euclid(n as isize)) as usize, f - i0)
+            })
+            .collect()
+    };
+    let (tx, ty) = (taps(w), taps(h));
+    let mut out = vec![0u8; t * t * 4];
+    for (y, &(y0, y1, fy)) in ty.iter().enumerate() {
+        for (x, &(x0, x1, fx)) in tx.iter().enumerate() {
+            let px = [(y0, x0, (1.0 - fy) * (1.0 - fx)), (y0, x1, (1.0 - fy) * fx), (y1, x0, fy * (1.0 - fx)), (y1, x1, fy * fx)];
+            let (mut rgb, mut a) = ([0.0f32; 3], 0.0f32);
+            for (sy, sx, wt) in px {
+                let s = src[sy * w + sx];
+                a += s[3] * wt;
+                for k in 0..3 {
+                    rgb[k] += s[k] * s[3] * wt;
+                }
+            }
+            let o = (y * t + x) * 4;
+            for k in 0..3 {
+                // fully keyed neighbourhood (a == 0): the plain mix, so the key texels keep their colour (mip chains)
+                out[o + k] = if a > 0.0 { (rgb[k] / a).round() as u8 } else { px.iter().map(|&(sy, sx, wt)| src[sy * w + sx][k] * wt).sum::<f32>().round() as u8 };
+            }
+            out[o + 3] = a.round() as u8;
         }
     }
     out
@@ -616,6 +654,22 @@ impl Layers {
         Some(l as f32)
     }
 
+    /// REMASTER (#478): an imported car model's base colour image as one layer, cached under `key`. No
+    /// 3DAccBrightness gain (not the game's art, as `carbon`) [design choice]. None when the array is full.
+    fn image(&mut self, key: String, m: &texpack::Map) -> Option<f32> {
+        let key = (key, false);
+        if let Some(&(l, _, _)) = self.by_name.get(&key) {
+            return Some(l as f32);
+        }
+        if self.data.len() >= MAX_LAYERS || m.w == 0 || m.h == 0 {
+            return None;
+        }
+        self.data.push(texpack::resize(m, TEX, TEX).rgba);
+        let l = self.data.len() - 1;
+        self.by_name.insert(key, (l, m.w, m.h));
+        Some(l as f32)
+    }
+
     /// Layer for an IFF file outside the PDI packs (halo textures), or None if unreadable.
     fn file(&mut self, root: &Path, rel: &str) -> Option<usize> {
         let key = (format!("file:{}", rel.to_ascii_lowercase()), false);
@@ -642,13 +696,19 @@ impl Layers {
 /// Texture layers of the particle and flare effects. The D3D build loads its own sets
 /// (gfx_InitAnims 0x445c8c..0x445d69): `d3d\smoke\smoke%.2d.iff` x9, `d3d\grass\gras%.2d.iff`
 /// x9 [O: path 0x4d39da], `d3d\sparks\spark%.2d.iff` x6 (11 files ship), and race load
-/// 0x45e87c reads `data\hex.iff` (the only flare texture its D3D drawer uses [O]).
+/// 0x45e87c reads `data\hex.iff`, the flares of the software halo drawer (mode 1, 0x435bd2 [O];
+/// REMASTER's hex flares). CLASSIC: the D3D GeometryEngineInit (0x43a963..0x43ab8d) builds the 256²
+/// halo page from `data\halofix.iff` at (0, 0) and `data\hwhex.iff` at (128, 0) (halofix's palette,
+/// which hwhex's own equals) [O]; every halo of the D3D list samples halofix (`halo`), its lens flares
+/// hwhex (`hwhex`, 0x43d864).
 #[derive(Clone, Debug, Default)]
 pub struct FxLayers {
     pub smoke: Vec<usize>,
     pub grass: Vec<usize>,
     pub sparks: Vec<usize>,
     pub flare: Option<usize>,
+    pub halo: Option<usize>,
+    pub hwhex: Option<usize>,
 }
 
 impl FxLayers {
@@ -657,7 +717,9 @@ impl FxLayers {
         let smoke = set(&|i| format!("Data/d3d/smoke/smoke{i:02}.iff"), 9);
         let grass = set(&|i| format!("Data/d3d/grass/gras{i:02}.iff"), 9);
         let sparks = set(&|i| format!("Data/d3d/sparks/spark{i:02}.iff"), 6);
-        FxLayers { smoke, grass, sparks, flare: layers.file(root, "Data/hex.iff") }
+        let flare = layers.file(root, "Data/hex.iff");
+        let (halo, hwhex) = (layers.file(root, "Data/halofix.iff"), layers.file(root, "Data/hwhex.iff"));
+        FxLayers { smoke, grass, sparks, flare, halo, hwhex }
     }
 }
 
@@ -703,7 +765,8 @@ pub(crate) fn rgba_f(c: [u8; 4], scale: [f32; 3]) -> [f32; 4] {
 }
 
 /// A lit object's face colour byte times ObjectBrightness, not clamped: the shaders clamp the final colour after the
-/// object light, as `0x4302f8` does (face x ObjectBrightness x light). Every track ships ObjectBrightness 1, so it only
+/// object light, as `0x4302f8` does (face x ObjectBrightness x light). CLASSIC textured faces do not use it (shader.wgsl
+/// `TEX_FACE`); REMASTER keeps it for every face. Every track ships ObjectBrightness 1, so it only
 /// matters for ramlosa / h2o's (0.5, 1.0, 1.2) (#317).
 pub(crate) fn rgba_obj(c: [u8; 4], scale: [f32; 3]) -> [f32; 4] {
     let ch = |i: usize| c[i] as f32 * scale[i] / 255.0;
@@ -760,9 +823,16 @@ fn emit(
             _ => [0.0, 0.0],
         }
     };
-    // Reflection mode (CarShading Reflection): an env-map layer over car paint, i.e. the
-    // Gouraud polygons (types 8/9) [I: the polygon selection is not traced]
-    let env = if shade.normals.is_some() && matches!(p.ty, 8 | 9) { 1.0 } else { 0.0 };
+    // Reflection mode (CarShading Reflection): car paint = the Gouraud polygons (types 8/9) with flags 0x60, which the
+    // mesh loop sends to the env-map builders (0x4351e2); every car Gouraud polygon has 0x60 [O: all 10 cars]
+    let lit = shade.normals.is_some();
+    let env = if lit && matches!(p.ty, 8 | 9) {
+        1.0
+    } else if lit && p.flags & 0x10 != 0 {
+        SELF_LIT_ENV
+    } else {
+        0.0
+    };
     let vtx = |k: usize| Vertex { pos: xf(verts[p.v[k] as usize]), uv: uv(k), color: cols[k], layer, normal: normal(k), env };
     // The original skips a polygon unless the eye is on the front of its plane (0x405b28 from
     // the mesh loop 0x434ffc). Each triangle is wound counter-clockwise as seen from the
@@ -981,6 +1051,7 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
     let mut wheel_half_width = Vec::new();
     let mut notes = Vec::new();
     let mut car_names = Vec::new();
+    let mut car_models: Vec<Option<ModelCheck>> = Vec::new();
     let mut car_colours = Vec::new();
     // REMASTER: (car index, index of its note, job) of the generated bodies, run after the loop
     let mut body_jobs: Vec<(usize, usize, BodyJob)> = Vec::new();
@@ -988,15 +1059,46 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
     for (k, &id) in car_ids.iter().enumerate() {
         Progress::report(progress, Stage::Cars, k as f32 / car_ids.len().max(1) as f32)?;
         let mut halos = Vec::new();
+        // REMASTER (#478): the halos of an imported car's lamps (empty: the original's)
+        let mut imported_halos = Vec::new();
         let colours = paint.iter().find(|p| p.0 == k).map(|p| p.1);
-        car_colours.push(config(root, &format!("Game/car{id:02}.car")).map_or([[0; 3]; 3], |c| own_colours(&c)));
+        let cfg = config(root, &format!("Game/car{id:02}.car")).ok();
+        car_colours.push(cfg.as_ref().map_or([[0; 3]; 3], own_colours));
+        let label = car_label(id, &cfg.as_ref().and_then(|c| c.get("CarName").map(|e| e.values.join(" "))).unwrap_or_default());
         match build_car(root, id, &mut halos, &mut layers, &lib, object_scale, colours, cheat.tron) {
-            Ok((meshes, generated, hubs, n, job, lods)) => {
-                car_names.push(n.clone());
-                // the generated body's budget goes into the note once the body is built
-                if let Some(job) = job {
-                    body_jobs.push((k, notes.len(), job));
+            Ok((meshes, mut generated, hubs, mut n, job, lods)) => {
+                // REMASTER (#478): a model file's body wins over the recipe, its wheels over the
+                // generated ones corner by corner, its lamps carry the halos
+                let livery = colours.unwrap_or_else(|| CarPaint::gloss(cfg.as_ref().map_or([[0; 3]; 3], own_colours)));
+                let (imp, check) = imported_car(root, id, &meshes[0], hubs, livery, &halos, &mut layers, object_scale);
+                car_models.push(check);
+                match imp {
+                    Some(imp) => {
+                        let from_file: Vec<&str> = imp.wheels.iter().zip(procgen::carmodel::WHEEL_NODES).filter(|(w, _)| w.is_some()).map(|(_, n)| &n["wheel_".len()..]).collect();
+                        generated[0] = imp.body;
+                        for (g, w) in generated[1..].iter_mut().zip(imp.wheels) {
+                            if let Some(w) = w {
+                                *g = w;
+                            }
+                        }
+                        let wheel_tris: usize = generated[1..].iter().map(|w| w.len() / 3).sum();
+                        let file = if from_file.is_empty() { String::new() } else { format!(" ({} from the file)", from_file.join(" ")) };
+                        let mut note = imp.note;
+                        if (generated[0].len() + 3 * wheel_tris) / 3 > procgen::carmodel::CAR_TRI_BUDGET {
+                            note += &format!(", over the {} triangle budget", procgen::carmodel::CAR_TRI_BUDGET);
+                        }
+                        n = format!("{label} (imported body {} tris, wheels {wheel_tris}{file}{note})", generated[0].len() / 3);
+                        imported_halos = imp.halos;
+                    }
+                    // the generated body's budget goes into the note once the body is built
+                    None => {
+                        // REMASTER (#478): `--car-source original` draws the MYO model: no recipe job
+                        if let Some(job) = job.filter(|_| procgen::carmodel::source() != procgen::carmodel::CarSource::Original) {
+                            body_jobs.push((k, notes.len(), job));
+                        }
+                    }
                 }
+                car_names.push(label);
                 notes.push(n);
                 cars.extend(meshes);
                 remaster_cars.extend(generated);
@@ -1006,7 +1108,8 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
             }
             Err(e) => {
                 notes.push(format!("car{id:02} not shown: {e}"));
-                car_names.push(format!("car{id:02}"));
+                car_models.push(None);
+                car_names.push(label);
                 cars.extend((0..CAR_MESHES).map(|_| Vec::new()));
                 remaster_cars.extend((0..CAR_MESHES).map(|_| Vec::new()));
                 car_lods.push([Vec::new(), Vec::new(), Vec::new()]);
@@ -1016,7 +1119,7 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         }
         car_halos.push(halos);
         car_halos.extend((1..CAR_MESHES).map(|_| Vec::new()));
-        remaster_car_halos.push(Vec::new());
+        remaster_car_halos.push(imported_halos);
         remaster_car_halos.extend((1..CAR_MESHES).map(|_| Vec::new()));
     }
     // REMASTER: the generated bodies, several cars at once (09-remaster 9.22)
@@ -1028,7 +1131,15 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         let body_tris = verts.len() / 3;
         let wheel_tris: usize = remaster_cars[at + 1..at + CAR_MESHES].iter().map(|w| w.len() / 3).sum();
         if body_tris > 0 {
-            notes[note] = format!("{} (generated body {body_tris} tris, wheels {wheel_tris})", car_names[k]);
+            // REMASTER (#292): the hand fixes, and the ones that no longer match
+            let fixes = match &job.fixed {
+                Some(r) if r.total > 0 => format!(", {}", r.summary()),
+                _ => String::new(),
+            };
+            for f in job.fixed.iter().flat_map(|r| &r.stale) {
+                eprintln!("{}: stale body fix {f}", car_names[k]);
+            }
+            notes[note] = format!("{} (generated body {body_tris} tris, wheels {wheel_tris}{fixes})", car_names[k]);
         }
         remaster_car_halos[at] = job.halos(&car_halos[at], &strips);
         remaster_cars[at] = verts;
@@ -1073,7 +1184,7 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
                 h.tint = layers.data.get(h.layer as usize).map_or([1.0; 3], |px| dominant(px));
             }
         }
-        tris.iter_mut().filter(|v| v.env != RETRO_ENV && v.env != PROP_ENV).for_each(|v| v.env = 0.0);
+        tris.iter_mut().filter(|v| v.env != RETRO_ENV && v.env != PROP_ENV && v.env != SELF_LIT_ENV).for_each(|v| v.env = 0.0);
         // REMASTER headlamps
         let stem = Path::new(&file).file_stem().and_then(|s| s.to_str()).unwrap_or_default();
         let lamps = PROP_HEADLAMPS.iter().find(|d| d.name.eq_ignore_ascii_case(stem)).and_then(|d| {
@@ -1171,6 +1282,7 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
     let mut scene = Scene {
         tris,
         fill: Vec::new(),
+        clouds: Vec::new(),
         water: Vec::new(),
         water_params: Vec::new(),
         water_hide: Vec::new(),
@@ -1214,6 +1326,7 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         prop_names: prop_list.meshes.iter().map(|m| m.name.clone()).chain(["first", "second", "third"].map(String::from)).collect(),
         car_names,
         car_colours,
+        car_models,
         object_scale,
         stats,
     };
@@ -1251,9 +1364,9 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
     // REMASTER tree models (#389): the cards of the world's trees (before the fill: its models match them)
     let swap = procgen::trees::find(&scene.tris, &scene.world_objects, &scene.world_tri_texture, &scene.world_textures);
     scene.tree_sites = swap.sites.clone();
-    if !fill.pieces.is_empty() {
-        scene.fill = procgen::fill::mesh(&fill, &scene);
-        scene.stats.push_str(&format!("; world fill {} pieces, {} tris", fill.pieces.len(), scene.fill.len() / 3));
+    scene.clouds = procgen::fill::clouds(&fill);
+    if !scene.clouds.is_empty() {
+        scene.stats.push_str(&format!("; {} clouds", scene.clouds.len()));
     }
     // REMASTER tree models (#389): the models in place of the cards
     if let (false, Some(first)) = (swap.sites.is_empty(), scene.tree_pack_layer) {
@@ -1266,6 +1379,11 @@ fn load_parts(root: &Path, track: u32, car_ids: &[u32], paint: &[(usize, CarPain
         }
     } else if !swap.sites.is_empty() {
         scene.stats.push_str(&format!("; {} tree cards kept (no models)", swap.sites.len()));
+    }
+    // after the tree models: a fill's stamps (#466) leave out the cards they replace (`tree_hide`)
+    if !fill.pieces.is_empty() {
+        scene.fill = procgen::fill::mesh(&fill, &scene);
+        scene.stats.push_str(&format!("; world fill {} pieces, {} tris", fill.pieces.len(), scene.fill.len() / 3));
     }
     // REMASTER grass: the fill's bodies, else the built-in rule (`Grass none` turns it off);
     // after the fill so its ground pieces can join
@@ -1472,9 +1590,175 @@ fn build_car(
         Some(emit_mesh(&m, &lod_finish, layers))
     });
     let lods = lods.map(Option::unwrap_or_default);
-    let job = procgen::bodyfile::load(root, car).map(|st| BodyJob::prepare(&body_mesh, &tags, &body_finish, st, &hubs, radius, layers, lib, scale));
+    let job = procgen::bodyfile::load(root, car).map(|st| BodyJob::prepare(&body_mesh, &tags, &body_finish, st, procgen::bodyfix::load(root, car), &hubs, radius, layers, lib, scale));
     let name = format!("car{car:02} '{}'", c.get("CarName").map(|e| e.values.join(" ")).unwrap_or_default());
     Ok((meshes, generated, (hubs, radius, half_widths), name, job, lods))
+}
+
+/// REMASTER (#478) what a car's model file gives: its body, the wheels it has, its lamps' halos.
+struct ImportedCar {
+    body: Vec<Vertex>,
+    /// FL, FR, BR, BL centred on their hubs as `build_car`'s; None: the generated wheel stays
+    wheels: [Option<Vec<Vertex>>; 4],
+    /// for `Scene::remaster_car_halos` (empty: the original's)
+    halos: Vec<HaloInst>,
+    /// for the stats line: `, hub error 0.4 mm` and the warnings
+    note: String,
+}
+
+/// REMASTER (#478): what loading a car's model file found, for motorview's Model file section and
+/// `--check-model`. Made whenever the file exists, also when `carmodel::source` leaves it unused.
+#[derive(Clone, Debug, Default)]
+pub struct ModelCheck {
+    pub path: PathBuf,
+    /// the file did not load or fit (the recipe takes over); everything below is then empty
+    pub error: Option<String>,
+    pub body_tris: usize,
+    pub wheel_tris: usize,
+    /// model units to metres
+    pub scale: f32,
+    /// the largest miss of a wheel node from its hub, mm; None: fitted to the original body's box
+    pub hub_err_mm: Option<f32>,
+    /// FL, FR, BR, BL: the file has a wheel mesh there
+    pub wheels_from_file: [bool; 4],
+    /// lamp spots found (`carmodel::lamps`)
+    pub lamps: usize,
+    /// material names no rule knows (not `rubber` or `trim_*`, which the contract names): they keep their base colour
+    pub plain_materials: Vec<String>,
+    /// the fit's, the wheels', the loader's and the lamps' warnings, and the triangle budget's
+    pub warnings: Vec<String>,
+}
+
+impl ModelCheck {
+    /// One fact per line, for `--check-model`.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![format!("file: {}", self.path.display())];
+        if let Some(e) = &self.error {
+            out.push(format!("error: {e}"));
+            return out;
+        }
+        out.push(format!("triangles: body {}, wheels {}", self.body_tris, self.wheel_tris));
+        out.push(format!("scale: {:.5} (model units to metres)", self.scale));
+        out.push(match self.hub_err_mm {
+            Some(e) => format!("fit: wheel nodes, hub error {e:.1} mm"),
+            None => "fit: the original body's box (no usable wheel nodes)".into(),
+        });
+        let have: Vec<&str> = self.wheels_from_file.iter().zip(procgen::carmodel::WHEEL_NODES).filter(|(h, _)| **h).map(|(_, n)| &n["wheel_".len()..]).collect();
+        out.push(format!("wheels from the file: {}", if have.is_empty() { "none (generated ones)".to_string() } else { have.join(" ") }));
+        out.push(format!("lamps: {}", self.lamps));
+        if !self.plain_materials.is_empty() {
+            out.push(format!("plain materials (base colour only): {}", self.plain_materials.join(", ")));
+        }
+        out.extend(self.warnings.iter().map(|w| format!("warning: {w}")));
+        out
+    }
+}
+
+/// REMASTER (#478): car `car` from its model file (`procgen::carmodel`), fitted to the wheel hubs of
+/// `wheels` (`build_car`'s hubs, radius, half-widths; else to `body`, the original OBJ0 mesh's box),
+/// painted in `livery`, its lamps' halos made from the car's own `halos`.
+/// - no file: (None, None)
+/// - it does not load (reported; the recipe takes over): (None, the check with its error)
+/// - `carmodel::source` is not Imported: (None, the check): the file is read for the check only
+/// - else: (the car, the check)
+#[allow(clippy::too_many_arguments)]
+fn imported_car(root: &Path, car: u32, body: &[Vertex], wheels: ([Vec3; 4], f32, [f32; 4]), livery: CarPaint, halos: &[HaloInst], layers: &mut Layers, scale: [f32; 3]) -> (Option<ImportedCar>, Option<ModelCheck>) {
+    use procgen::carmodel;
+    let (hubs, radius, half_widths) = wheels;
+    let Some(path) = carmodel::path(root, car) else { return (None, None) };
+    let failed = |e: String| {
+        eprintln!("{}: {e}", path.display());
+        (None, Some(ModelCheck { path: path.clone(), error: Some(e), ..Default::default() }))
+    };
+    let model = match carmodel::load(&path) {
+        Ok(m) => m,
+        Err(e) => return failed(e),
+    };
+    let body_box = body.iter().map(|v| Vec3::from(v.pos)).fold(None, |b: Option<(Vec3, Vec3)>, p| Some(b.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p)))));
+    let fit = match carmodel::fit(&model, &hubs, body_box) {
+        Ok(f) => f,
+        Err(e) => return failed(e),
+    };
+    let use_it = carmodel::source() == carmodel::CarSource::Imported;
+    let paint = carmodel::Paint { colours: livery.colours.map(|c| rgba_obj([c[0], c[1], c[2], 255], scale)), env: livery.finish.map(|f| f.tag().unwrap_or(1.0)) };
+    // not used: the layers stay as without the file
+    let layer_of: Vec<Option<f32>> = if use_it { model.images.iter().enumerate().map(|(i, m)| layers.image(format!("glb:car{car:02}:{i}"), m)).collect() } else { Vec::new() };
+    let layer = |i: usize| layer_of.get(i).copied().flatten();
+    let verts = carmodel::vertices(&model, &fit, &paint, scale, &layer);
+    let mut warnings = fit.warnings.clone();
+    // a corner the car has no wheel at keeps nothing
+    let wheels: [Option<Vec<Vertex>>; 4] = std::array::from_fn(|i| {
+        let sim = carmodel::SimWheel { radius, half_width: half_widths[i] };
+        let (v, w) = carmodel::wheel(&model, &fit, i, sim, &paint, scale, &layer).filter(|_| hubs[i] != Vec3::ZERO)?;
+        warnings.extend(w);
+        Some(v)
+    });
+    let spots = carmodel::lamps(&model, &fit);
+    let (halos, lamp_notes) = imported_halos(&spots, halos);
+    let mut note = fit.hub_err.map_or_else(|| ", fitted to the original body's box".to_string(), |e| format!(", hub error {:.1} mm", e * 1000.0));
+    warnings.extend(model.notes.iter().chain(&lamp_notes).cloned());
+    for w in &warnings {
+        eprintln!("{}: {w}", path.display());
+        note += &format!(", {w}");
+    }
+    let wheel_tris: usize = wheels.iter().flatten().map(|w| w.len() / 3).sum();
+    let body_tris = verts.len() / 3;
+    let mut check_warnings = warnings;
+    if body_tris + wheel_tris > carmodel::CAR_TRI_BUDGET {
+        check_warnings.push(format!("over the {} triangle budget", carmodel::CAR_TRI_BUDGET));
+    }
+    let check = ModelCheck {
+        path: path.clone(),
+        error: None,
+        body_tris,
+        wheel_tris,
+        scale: fit.scale,
+        hub_err_mm: fit.hub_err.map(|e| e * 1000.0),
+        wheels_from_file: std::array::from_fn(|i| wheels[i].is_some()),
+        lamps: spots.len(),
+        plain_materials: model.plain_materials.iter().filter(|n| !carmodel::expected_plain(n)).cloned().collect(),
+        warnings: check_warnings,
+    };
+    if !use_it {
+        return (None, Some(check));
+    }
+    eprintln!("car{car:02}: model from {}", path.display());
+    (Some(ImportedCar { body: verts, wheels, halos, note }), Some(check))
+}
+
+/// REMASTER (#478): the halos of an imported car: per group (front, rear: view z of the middle, as the
+/// renderer splits them), one at each of its lamps when the file has some, else the car's own. A lamp's
+/// halo is the nearest own halo of its group, moved onto the lamp's centre and laid along x (keeps its
+/// texture, colour and length, so it looks as before) [design choice]. Empty when no lamp moved one.
+fn imported_halos(lamps: &[procgen::carmodel::LampSpot], own: &[HaloInst]) -> (Vec<HaloInst>, Vec<String>) {
+    use procgen::carmodel::Lamp;
+    let mid = |h: &HaloInst| (h.p0 + h.p1) * 0.5;
+    let (mut out, mut notes, mut any) = (Vec::new(), Vec::new(), false);
+    for (rear, name) in [(false, "front"), (true, "rear")] {
+        let group: Vec<&HaloInst> = own.iter().filter(|h| (mid(h).z > 0.0) == rear).collect();
+        let spots: Vec<_> = lamps.iter().filter(|l| (l.kind != Lamp::Front) == rear).collect();
+        let moved: Vec<HaloInst> = spots
+            .iter()
+            .filter_map(|l| {
+                let t = group.iter().min_by(|a, b| mid(a).distance(l.centre).total_cmp(&mid(b).distance(l.centre)))?;
+                let half = Vec3::X * (t.p1 - t.p0).length() * 0.5;
+                Some(HaloInst { p0: l.centre - half, p1: l.centre + half, strip: HaloStrip::None, ..**t })
+            })
+            .collect();
+        if !spots.is_empty() && moved.is_empty() {
+            notes.push(format!("{name} lamps without a {name} halo of the car's to copy: the car's own stay"));
+        }
+        if moved.is_empty() {
+            out.extend(group.into_iter().copied());
+        } else {
+            any = true;
+            out.extend(moved);
+        }
+    }
+    if !any {
+        out.clear();
+    }
+    (out, notes)
 }
 
 /// Wheel `i`'s (FL, FR, BR, BL) LOD0 mesh of a car file.
@@ -1503,6 +1787,10 @@ pub struct ShowroomCar {
     pub hubs: [Vec3; 4],
     /// FL, FR, BR, BL; None where the car has no such wheel
     pub wheels: [Option<ShowroomWheel>; 4],
+    /// the original body's light halos (car-local view space)
+    pub halos: Vec<HaloInst>,
+    /// REMASTER (#478): what loading the car's model file found (None: no file)
+    pub model: Option<ModelCheck>,
 }
 
 /// What `build_car` feeds `procgen::wheel` for one wheel, less the rim style.
@@ -1538,6 +1826,16 @@ impl ShowroomCar {
     }
 }
 
+/// The one way a car is named in motorview (#433): its number and the game's own name, `01 Kobra X3` (the number alone
+/// when the file has no name). The top bar's car list shows the same.
+pub fn car_label(id: u32, name: &str) -> String {
+    if name.is_empty() {
+        format!("{id:02}")
+    } else {
+        format!("{id:02} {name}")
+    }
+}
+
 /// A car file's CarName ("carNN" when unreadable).
 pub fn car_name(root: &Path, car: u32) -> String {
     config(root, &format!("Game/car{car:02}.car")).ok().and_then(|c| c.get("CarName").map(|e| e.values.join(" "))).unwrap_or_else(|| format!("car{car:02}"))
@@ -1547,26 +1845,116 @@ pub fn car_name(root: &Path, car: u32) -> String {
 /// (the cars' art ships in every track's packs; the game's Car screen uses track 1), its
 /// ObjectBrightness and 3DAccBrightness, no world. Original textures only (no texture pack).
 pub fn load_showroom(root: &Path, track: u32, car: u32) -> Res<ShowroomCar> {
+    with_car_textures(root, track, |lib, layers, scale| {
+        let mut halos = Vec::new();
+        let (mut meshes, _, (hubs, radius, half_widths), _, job, _) = build_car(root, car, &mut halos, layers, lib, scale, None, false)?;
+        let c = config(root, &format!("Game/car{car:02}.car"))?;
+        // REMASTER (#478): a model file's body wins over the recipe (rimshop edits the generated wheels: those stay)
+        let (imp, model) = imported_car(root, car, &meshes[0], (hubs, radius, half_widths), CarPaint::gloss(own_colours(&c)), &halos, layers, scale);
+        let generated = match imp {
+            Some(imp) => imp.body,
+            None => job.filter(|_| procgen::carmodel::source() != procgen::carmodel::CarSource::Original).map(|j| run_bodies(vec![j]).swap_remove(0).1).unwrap_or_default(),
+        };
+        let wheels = std::array::from_fn(|i| {
+            let m = wheel_myo(root, &c, i).filter(|_| hubs[i] != Vec3::ZERO)?;
+            let (radius, half_width) = wheel_size(&m);
+            // the layers are cached by name: the same indices as build_car's
+            let (face, side) = wheel_face(&m, layers, lib, scale, i);
+            Some(ShowroomWheel { radius, half_width, side, face, tyre: layers.tyre(), scale })
+        });
+        if layers.data.is_empty() {
+            layers.data.push(checker());
+        }
+        Ok(ShowroomCar { name: car_name(root, car), body: std::mem::take(&mut meshes[0]), generated, layers: std::mem::take(&mut layers.data), hubs, wheels, halos, model })
+    })
+}
+
+/// `f` with the texture packs of `track` (the cars' art ships in every track's packs), their
+/// layers and the track's ObjectBrightness: a car built without its world.
+fn with_car_textures<R>(root: &Path, track: u32, f: impl FnOnce(&TexLib, &mut Layers, [f32; 3]) -> Res<R>) -> Res<R> {
     let trk = config(root, &format!("Game/Track{track}.trk"))?;
     let base = s(&trk, "BasePath")?;
     let pack_bytes: Vec<Vec<u8>> = ["tex1.pdi", "tex2.pdi"].iter().filter_map(|n| read(root, &format!("{base}/Packed/{n}")).ok()).collect();
     let lib = TexLib { packs: pack_bytes.iter().filter_map(|b| pdi::parse(b).ok()).collect() };
     let mut layers = Layers::new(root, &trk, track, false);
     let scale = trk_rgb(&trk, "ObjectBrightness", [1.0; 3]);
-    let (mut meshes, _, (hubs, _, _), _, job, _) = build_car(root, car, &mut Vec::new(), &mut layers, &lib, scale, None, false)?;
-    let generated = job.map(|j| run_bodies(vec![j]).swap_remove(0).1).unwrap_or_default();
-    let c = config(root, &format!("Game/car{car:02}.car"))?;
-    let wheels = std::array::from_fn(|i| {
-        let m = wheel_myo(root, &c, i).filter(|_| hubs[i] != Vec3::ZERO)?;
-        let (radius, half_width) = wheel_size(&m);
-        // the layers are cached by name: the same indices as build_car's
-        let (face, side) = wheel_face(&m, &mut layers, &lib, scale, i);
-        Some(ShowroomWheel { radius, half_width, side, face, tyre: layers.tyre(), scale })
-    });
-    if layers.data.is_empty() {
-        layers.data.push(checker());
+    f(&lib, &mut layers, scale)
+}
+
+/// REMASTER (#292): a car's generated body for the OBJ export (`procgen::bodyobj`).
+pub struct BodyExport {
+    /// the car file's CarName
+    pub name: String,
+    /// car-local view space at the MYO body's height: the recipe's ride-height `drop` is left
+    /// out, so a hand fix keyed to a position survives a changed drop
+    pub verts: Vec<Vertex>,
+    pub parts: BodyParts,
+}
+
+/// REMASTER (#292): the parts of a generated body, one per triangle.
+#[derive(Default)]
+pub struct BodyParts {
+    /// `<class>_<r>_<g>_<b>` for the refined cage's faces (`part_name`), else the added part
+    /// (`lamps`, `vents`, `splitter`, `wing`, `fins`, `exhaust`)
+    pub names: Vec<String>,
+    /// per triangle, an index into `names`
+    pub tri: Vec<u16>,
+}
+
+impl BodyParts {
+    fn id(&mut self, name: String) -> u16 {
+        match self.names.iter().position(|n| *n == name) {
+            Some(i) => i as u16,
+            None => {
+                self.names.push(name);
+                (self.names.len() - 1) as u16
+            }
+        }
     }
-    Ok(ShowroomCar { name: car_name(root, car), body: std::mem::take(&mut meshes[0]), generated, layers: layers.data, hubs, wheels })
+
+    /// the next `verts / 3` triangles are part `name`
+    fn add(&mut self, name: &str, verts: usize) {
+        if verts > 0 {
+            let i = self.id(name.to_string());
+            self.tri.extend(std::iter::repeat_n(i, verts / 3));
+        }
+    }
+}
+
+/// REMASTER (#292): the part of a refined cage face, by what the recipe made of it, and its
+/// colour tag as the recipes write it (`r,g,b` before the repaint).
+fn part_name(f: &procgen::body::Face, st: &procgen::body::BodyStyle) -> String {
+    let class = if f.env == procgen::CARBON_ENV {
+        "carbon"
+    } else if st.glass.as_ref().is_some_and(|g| g.rgb == f.rgb) {
+        "glass"
+    } else if f.rgb == procgen::body::RUBBER_RGB {
+        "rubber"
+    } else if st.mirror_glass == Some(f.rgb) {
+        "mirror"
+    } else if st.lamps.iter().any(|l| l.housing.rgb == f.rgb) {
+        "lamp"
+    } else if st.vents.iter().any(|v| v.housing.rgb == f.rgb) {
+        "vent"
+    } else if (0.5..2.5).contains(&f.env) {
+        // the paint band of `Vertex::env` (gloss 1, pearl 1.75, metallic 2)
+        "paint"
+    } else {
+        "trim"
+    };
+    format!("{class}_{}_{}_{}", f.rgb[0], f.rgb[1], f.rgb[2])
+}
+
+/// REMASTER (#292): car `car`'s generated body and its parts, built as the game builds it (the
+/// recipe from `bodyfile`, live or `--cars-dir` included) with `track`'s textures, which leave
+/// the shape alone. An error if the car has no recipe.
+pub fn export_body(root: &Path, track: u32, car: u32) -> Res<BodyExport> {
+    with_car_textures(root, track, |lib, layers, scale| {
+        let (.., job, _) = build_car(root, car, &mut Vec::new(), layers, lib, scale, None, false)?;
+        let mut job = job.ok_or_else(|| format!("car {car} has no body recipe (remaster/cars/car{car:02}.body)"))?;
+        let (verts, _, parts) = job.run_parts(false);
+        Ok(BodyExport { name: car_name(root, car), verts, parts })
+    })
 }
 
 /// REMASTER (09-remaster 9.22): a car's body refined from the MYO cage after the repaint, its
@@ -1583,13 +1971,17 @@ struct BodyJob {
     segs: Vec<procgen::lamps::HaloSeg>,
     /// the cage's halo records' ends (game space), which the lit strips refer to
     halo_src: Vec<([f32; 3], [f32; 3])>,
+    /// REMASTER (#292): the car's hand fixes (`procgen::bodyfix`), applied by `run_parts` as drawn
+    fixes: Vec<procgen::bodyfix::Fix>,
+    /// what the fixes did at the last `run_parts` as drawn
+    fixed: Option<procgen::bodyfix::Report>,
 }
 
 impl BodyJob {
     /// `tags`: the cage polygons' original RGBs (before CustomCarColours), which mark the parts;
     /// `finish`: per polygon, its paint finish (#136, #351; empty: all gloss).
     #[allow(clippy::too_many_arguments)]
-    fn prepare(body_mesh: &myo::Mesh, tags: &[[u8; 3]], finish: &[Finish], st: procgen::body::BodyStyle, hubs: &[Vec3; 4], radius: f32, layers: &mut Layers, lib: &TexLib, scale: [f32; 3]) -> BodyJob {
+    fn prepare(body_mesh: &myo::Mesh, tags: &[[u8; 3]], finish: &[Finish], st: procgen::body::BodyStyle, fixes: Vec<procgen::bodyfix::Fix>, hubs: &[Vec3; 4], radius: f32, layers: &mut Layers, lib: &TexLib, scale: [f32; 3]) -> BodyJob {
         let mut faces = cage_faces(body_mesh, tags, layers, lib, scale);
         faces.iter_mut().zip(finish).for_each(|(f, fin)| {
             if let Some(tag) = fin.tag() {
@@ -1609,13 +2001,24 @@ impl BodyJob {
         let carbon = if st.uses_carbon() { layers.carbon() } else { None };
         let segs = body_mesh.halos.iter().map(|h| procgen::lamps::HaloSeg { p0: left(h.p0), p1: left(h.p1), rgb: h.rgb }).collect();
         let halo_src = body_mesh.halos.iter().map(|h| (h.p0, h.p1)).collect();
-        BodyJob { faces, st, game_hubs, radius, carbon, segs, halo_src }
+        BodyJob { faces, st, game_hubs, radius, carbon, segs, halo_src, fixes, fixed: None }
     }
 
     /// The body's triangles and the lit patterns' strips.
     fn run(&mut self) -> (Vec<Vertex>, Vec<procgen::lamps::LampStrip>) {
+        let (verts, strips, _) = self.run_parts(true);
+        (verts, strips)
+    }
+
+    /// `run`, and each triangle's part (#292); `as_drawn`: at the recipe's ride height and with
+    /// the car's hand fixes (`procgen::bodyfix`), else at the MYO body's height and unfixed (the
+    /// OBJ export: Blender's Basis is the raw shape, the add-on applies the `.fix` itself).
+    fn run_parts(&mut self, as_drawn: bool) -> (Vec<Vertex>, Vec<procgen::lamps::LampStrip>, BodyParts) {
         let (faces, st, carbon) = (&mut self.faces, &self.st, self.carbon);
         procgen::cuts::mirror_copies(faces, &st.mirror_copies);
+        // the slices before the pushes: a face cut first and moved then bends only at the cut (the
+        // ASC's tail: the red corners' inner strips become the side walls of the set-back centre)
+        procgen::cuts::slice(faces, &st.slices);
         procgen::cuts::push(faces, &st.pushes);
         if let Some(rgb) = st.mirror_glass {
             faces.iter_mut().filter(|f| f.rgb == rgb).for_each(|f| f.env = procgen::METAL_ENV);
@@ -1649,34 +2052,71 @@ impl BodyJob {
         }
         let recessed = procgen::vents::recess(faces, &st.vents);
         let faces: &[procgen::body::Face] = faces;
+        let mut parts = BodyParts::default();
+        // per triangle the part of its face, named once per face
+        let mut label = |faces: &[procgen::body::Face], src: Vec<usize>| {
+            let mut ids: HashMap<usize, u16> = HashMap::new();
+            let tri = src.into_iter().map(|f| *ids.entry(f).or_insert_with(|| parts.id(part_name(&faces[f], st)))).collect();
+            parts.tri = tri;
+        };
         let mut out = if st.refine > 0.0 || !st.warps.is_empty() {
             // REMASTER (#388): the bulges carry the refine's cut points, so they come after it
             let mut cage = if st.refine > 0.0 { procgen::smooth::refine(faces, st.refine, st.refine_seams) } else { faces.to_vec() };
             procgen::cuts::warp(&mut cage, &st.warps);
-            procgen::body::body(&cage, st)
+            let (out, src) = procgen::body::body_parts(&cage, st);
+            label(&cage, src);
+            out
         } else {
-            procgen::body::body(faces, st)
+            let (out, src) = procgen::body::body_parts(faces, st);
+            label(faces, src);
+            out
         };
-        let (lit, strips) = procgen::lamps::lamps(faces, &self.segs, &st.lamps);
-        out.extend(lit);
-        out.extend(procgen::vents::vents(faces, &st.vents, &recessed));
+        let body_len = out.len();
+        let mut extra = |out: &mut Vec<Vertex>, name: &str, v: Vec<Vertex>| {
+            parts.add(name, v.len());
+            out.extend(v);
+        };
+        let (lit, mut strips) = procgen::lamps::lamps(faces, &self.segs, &st.lamps);
+        extra(&mut out, "lamps", lit);
+        extra(&mut out, "vents", procgen::vents::vents(faces, &st.vents, &recessed));
         if let Some(s) = &st.splitter {
-            out.extend(procgen::aero::splitter(s, carbon));
+            extra(&mut out, "splitter", procgen::aero::splitter(s, carbon));
         }
         if let Some(w) = &st.wing {
-            out.extend(procgen::aero::wing(w, faces, carbon));
+            extra(&mut out, "wing", procgen::aero::wing(w, faces, carbon));
         }
         if let Some(f) = &st.fins {
-            out.extend(procgen::aero::fins(f, faces, carbon));
+            extra(&mut out, "fins", procgen::aero::fins(f, faces, carbon));
         }
         if let Some(e) = &st.exhaust {
-            out.extend(procgen::exhaust::exhausts(e));
+            extra(&mut out, "exhaust", procgen::exhaust::exhausts(e));
+        }
+        // REMASTER: the added parts and the lit strips were built from the unwarped cage; they
+        // follow the body through the warps, a pure function of position (`cuts::warp_point`;
+        // the Serpent's tail lamps sit in its rear bulge). View space here, game z negated.
+        if !st.warps.is_empty() {
+            for v in &mut out[body_len..] {
+                let g = procgen::cuts::warp_point([v.pos[0], v.pos[1], -v.pos[2]], &st.warps);
+                v.pos = [g[0], g[1], -g[2]];
+            }
+            for ls in &mut strips {
+                ls.p0 = procgen::cuts::warp_point(ls.p0, &st.warps);
+                ls.p1 = procgen::cuts::warp_point(ls.p1, &st.warps);
+            }
         }
         // the lower ride height: the body and its lights, not the wheels; and the mirror plane
         // back where the cage has it (`prepare`)
         for v in &mut out {
             v.pos[0] += self.st.centre;
-            v.pos[1] -= self.st.drop;
+        }
+        // REMASTER (#292): the hand fixes, in the frame the Blender add-on saw: the cage's mirror
+        // plane back, the ride-height drop not yet taken
+        if as_drawn {
+            self.fixed = Some(procgen::bodyfix::apply(&mut out, &self.fixes));
+        }
+        let down = if as_drawn { self.st.drop } else { 0.0 };
+        for v in &mut out {
+            v.pos[1] -= down;
         }
         let strips = strips
             .into_iter()
@@ -1686,7 +2126,7 @@ impl BodyJob {
                 ls
             })
             .collect();
-        (out, strips)
+        (out, strips, parts)
     }
 
     /// The halos of the generated body: the car's, lowered with it, and the lit patterns' strips,
@@ -1694,6 +2134,7 @@ impl BodyJob {
     fn halos(&self, halos: &[HaloInst], strips: &[procgen::lamps::LampStrip]) -> Vec<HaloInst> {
         let down = |p: Vec3| p - Vec3::Y * self.st.drop;
         let mut out: Vec<HaloInst> = halos.iter().map(|h| HaloInst { p0: down(h.p0), p1: down(h.p1), ..*h }).collect();
+        let n_car = out.len();
         for ls in strips {
             let src = self.halo_src[ls.halo];
             let (a, b) = (Vec3::from(to_view(src.0)), Vec3::from(to_view(src.1)));
@@ -1701,6 +2142,19 @@ impl BodyJob {
             h.strip = HaloStrip::Anchor;
             let strip = HaloInst { p0: down(Vec3::from(to_view(ls.p0))), p1: down(Vec3::from(to_view(ls.p1))), strip: HaloStrip::Strip { width: ls.width, join: ls.join }, ..*h };
             out.push(strip);
+        }
+        // REMASTER: the car's own halos follow the body through the warps like the lit parts
+        // (`run_parts`); the cage is warped with its mirror plane on x = 0 (`centre`). The
+        // strips were warped there already.
+        if !self.st.warps.is_empty() {
+            let bend = |p: Vec3| {
+                let g = procgen::cuts::warp_point([p.x - self.st.centre, p.y, -p.z], &self.st.warps);
+                down(Vec3::new(g[0] + self.st.centre, g[1], -g[2]))
+            };
+            for (h, raw) in out[..n_car].iter_mut().zip(halos) {
+                h.p0 = bend(raw.p0);
+                h.p1 = bend(raw.p1);
+            }
         }
         out
     }
@@ -2001,7 +2455,7 @@ mod sort_tests {
             let style = crate::procgen::RimStyle::default();
             for (i, (w, hub)) in car.wheels.iter().zip(car.hubs).enumerate() {
                 let w = w.as_ref().unwrap_or_else(|| panic!("car {id} wheel {i}"));
-                let alone = super::ShowroomCar { wheels: std::array::from_fn(|k| (k == i).then_some(*w)), name: String::new(), body: Vec::new(), generated: Vec::new(), layers: car.layers.clone(), hubs: car.hubs };
+                let alone = super::ShowroomCar { wheels: std::array::from_fn(|k| (k == i).then_some(*w)), name: String::new(), body: Vec::new(), generated: Vec::new(), layers: car.layers.clone(), hubs: car.hubs, halos: Vec::new(), model: None };
                 let v = alone.wheels(&style);
                 let (lo, hi) = v.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), v| (lo.min(v.pos.into()), hi.max(v.pos.into())));
                 let want = Vec3::new(w.half_width, w.radius, w.radius);
@@ -2064,5 +2518,72 @@ mod tron_tests {
         let mut out = Vec::new();
         emit(&mut out, &poly(1, 4, 0), &quad, &[[0.0, 1.0, 0.0, 0.0]], &[], None, &to_view, &Shade { scale: [1.0; 3], normals: None, tron: false });
         assert!(out.iter().all(|v| v.color[3] == 1.0));
+    }
+
+    /// #459: a lit non-Gouraud polygon with flag 0x10 is tagged `SELF_LIT_ENV` (untextured too: the D3D converter
+    /// draws a scene object's such face unlit); a Gouraud one keeps the paint tag
+    #[test]
+    fn flag_0x10_tags_lit_flat_polygons() {
+        let quad = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 0.0, 1.0]];
+        let planes = [[0.0, 1.0, 0.0, 0.0]];
+        let lit = Shade { scale: [1.0; 3], normals: Some((&[], &planes)), tron: false };
+        let env = |ty, flags, shade: &Shade| {
+            let mut out = Vec::new();
+            emit(&mut out, &poly(ty, 4, flags), &quad, &planes, &[], None, &to_view, shade);
+            out[0].env
+        };
+        assert_eq!(env(1, 0x10, &lit), SELF_LIT_ENV);
+        assert_eq!(env(1, 0, &lit), 0.0);
+        assert_eq!(env(9, 0x10, &lit), 1.0);
+        assert_eq!(env(1, 0x10, &Shade { scale: [1.0; 3], normals: None, tron: false }), 0.0, "the pre-lit world is untagged");
+    }
+}
+
+#[cfg(test)]
+mod resample_tests {
+    use super::*;
+
+    fn img(w: u32, h: u32, indices: Vec<u8>, palette: Vec<[u8; 3]>) -> iff::Image {
+        iff::Image { width: w, height: h, planes: 8, indices, palette, transparent: None }
+    }
+
+    #[test]
+    fn full_size_texture_is_copied_unchanged() {
+        let n = (TEX * TEX) as usize;
+        let palette: Vec<[u8; 3]> = (0..=255u8).map(|i| [i, 255 - i, i / 2]).collect();
+        let indices: Vec<u8> = (0..n).map(|i| (i * 7 % 256) as u8).collect();
+        let out = resample(&img(TEX, TEX, indices.clone(), palette.clone()), None);
+        for (i, &ix) in indices.iter().enumerate() {
+            let c = palette[ix as usize];
+            assert_eq!(out[i * 4..i * 4 + 4], [c[0], c[1], c[2], 255], "texel {i}");
+        }
+    }
+
+    #[test]
+    fn upscale_is_a_smooth_ramp_that_wraps() {
+        // 2x2: black | white on both rows; 256 wide -> each source texel covers 128 columns
+        let out = resample(&img(2, 2, vec![0, 1, 0, 1], vec![[0, 0, 0], [255, 255, 255]]), None);
+        let at = |x: usize| out[x * 4];
+        assert!(at(64) <= 2, "centre of the black texel: {}", at(64));
+        assert!(at(192) >= 253, "centre of the white texel: {}", at(192));
+        assert!((at(128) as i32 - 128).abs() <= 2, "midway between: {}", at(128));
+        assert!(at(100) < at(110) && at(110) < at(120), "monotonic");
+        // wrap: column 0 blends white (left neighbour across the edge) with black
+        assert!(at(0) > 0 && at(255) > at(0), "wraps: {} {}", at(0), at(255));
+    }
+
+    #[test]
+    fn key_colour_does_not_bleed_and_alpha_crosses_half_midway() {
+        let mut im = img(2, 2, vec![0, 1, 0, 1], vec![[255, 0, 255], [10, 20, 30]]);
+        im.transparent = Some(0);
+        let out = resample(&im, Some(0));
+        let px = |x: usize| &out[x * 4..x * 4 + 4];
+        assert!(px(64)[3] <= 2, "keyed centre {}", px(64)[3]);
+        assert!(px(192)[3] >= 253 && px(192)[..3] == [10, 20, 30], "opaque centre {:?}", px(192));
+        // between the two texels the visible colour stays the opaque texel's, never magenta
+        assert_eq!(px(150)[..3], [10, 20, 30]);
+        assert!(px(100)[3] < 128 && px(156)[3] > 128, "alpha {} {}", px(100)[3], px(156)[3]);
+        // a fully keyed texel keeps the key colour (its alpha is 0 only well inside the keyed block; here 2x2 never has one)
+        assert!(px(10)[3] < 128);
     }
 }

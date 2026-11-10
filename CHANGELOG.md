@@ -2,7 +2,47 @@
 
 What changed in each release, newest first. Game data is never part of a release.
 
-## Unreleased
+## v0.9.2 - 2026-11-10
+
+### Gameplay
+
+- Keyboard steering: holding both steering keys steers right, as in the original.
+- Gamepad: the stick keeps proportional steering, and its dead zone now defaults to 5 %.
+- AI: a stuck opponent is only reset once it is out of your sight (150 m from the camera), so RedRock stalls play out like the original. The AI also sees across the finish line and passes cars that are level beside it.
+- The camera you pick in a race is remembered. Holding the d-pad or stick repeats in menus. The Time Attack ghost stands steady on the grid.
+- Attract demo: after 2 minutes idle on the main menu a 25-lap AI race starts; any key returns to the menu.
+- League: after a race that is not the last of the season, Classic shows the standings table. The default name, the order of the New screens, and the way back to the main menu and the current league after the final follow the original.
+- Hidden extras: RuhrStadt's club message with a hidden Credits page, and Atlantika's roof scroller, are in. The NeoCity sky road and Okkun's helicopter were checked against the track data and are both there.
+
+### Graphics (Classic)
+
+- Classic is closer to the original's Direct3D look: car and scene-object shading, depth fog on the world and on objects (distant things fade to silhouettes), larger world halos, and the original's lens flares. Cars and loose props are lit by the track's centreline tint.
+- Textures are scaled up smoothly instead of blocky, like the original's linear filtering.
+- Ghost cars (Ghost mode, the Time Attack ghost and the casper cheat) look like the original's remote cars: a soft additive glow with no shadow or halos.
+- Widescreen: the view keeps the original's height of view and shows more to the sides (106° across at 16:9) instead of stretching.
+- In-car views no longer draw the shadow of the car you are in.
+
+### Graphics (Remaster)
+
+- Widescreen works the same way as in Classic. The main view keeps the original's height of view, and the Cine cameras keep their field of view.
+- Olympos: the whole far part of the sea is water (waves, reflections, shore foam and fog).
+- Car bodies: the Kobra X3 gets rounded front fenders, a domed bonnet and nose, rear quarters and honeycomb intakes. The Serpent gets a smoother front arch and a tail with level lamp and grille edges and louvres. The ASC gets faired-in lamps, a filled and domed bonnet, and a tail with a diffuser and outlet.
+- Headlight reflector bowls follow the lens edge at folds on the Avalanche and the ASC.
+
+### Audio
+
+- Engine echo follows the track data like the original.
+
+### Menus and HUD
+
+- Classic menus: every screen slides in from the original's start positions and slides out before the next one comes in, with the original's per-row effects. The title and box and the halftone dots panel match the original on every screen. Fixed glitches in the slot drawer, the title/box flip-over and value rolls.
+- New Lap Analysis screen: compare two laps (your ghosts, replays or demos) with driver cards, a track map coloured by the faster stretch, a speed chart, a time delta and a lap picker. Open it with ANALYSE on the Ghost screen, or browse and drag in files from outside the game.
+- Proximity arrows no longer flicker along their axis.
+
+### Tools
+
+- Car models can be loaded from .glb files (body, wheels per corner, lamp halos), and the generated car body can be exported for editing in Blender.
+
 
 ## v0.9.1-alpha - 2026-11-06
 

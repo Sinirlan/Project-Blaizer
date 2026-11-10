@@ -5,7 +5,8 @@
 
 use glam::{Mat3, Vec3};
 use crate::World;
-use motor_data::cfg::Motion;
+use motor_data::cfg::{parse_lwmo, Config, Motion};
+use std::path::{Path, PathBuf};
 
 /// Degrees to radians as the original multiplies them (`0x4d491e` · `0x4d4926`).
 const DEG: f32 = std::f32::consts::PI / 180.0;
@@ -71,6 +72,25 @@ pub fn keys(m: &Motion) -> Vec<TvKey> {
             cap: k.bias,
         })
         .collect()
+}
+
+/// Where an exported TV station file lives (#424): `<install>/remaster/tv/trackNN.mot`, an LWMO like the shipped one.
+pub fn override_path(root: &Path, track: u32) -> PathBuf {
+    root.join(format!("remaster/tv/track{track:02}.mot"))
+}
+
+/// The track's shipped TV motion (`CameraSplineName`, 0x45ea6d) [O]; `trk` is its `TrackN.trk`.
+pub fn shipped_motion(root: &Path, trk: &Config) -> Option<Motion> {
+    let name = trk.get("CameraSplineName")?.values.first()?.clone();
+    let t = motor_data::tbl::load(&motor_data::fs::read(root, &name).ok()?, None).ok()?;
+    parse_lwmo(&t.data).ok()
+}
+
+/// The TV stations of a track. REMASTER-era design choice (#424): a user file `remaster/tv/trackNN.mot` (written by
+/// motorview's cine export) replaces the shipped motion when it parses; without it nothing differs from the original.
+pub fn load(root: &Path, track: u32, trk: &Config) -> Vec<TvKey> {
+    let own = std::fs::read(override_path(root, track)).ok().and_then(|b| parse_lwmo(&b).ok());
+    own.or_else(|| shipped_motion(root, trk)).map(|m| keys(&m)).unwrap_or_default()
 }
 
 /// Rotation from the game's Euler angles `(pitch, heading, bank)` (`0x42cc7c`).

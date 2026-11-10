@@ -198,7 +198,7 @@ impl Picker {
             }
             Target::Car { slot, part } => {
                 let part = ["body", "wheel FL", "wheel FR", "wheel BR", "wheel BL"].get(part).copied().unwrap_or("?");
-                format!("car slot {slot}: {} {part}", name(&self.car_names, slot))
+                format!("{} {part}", name(&self.car_names, slot))
             }
             Target::Prop { index, mesh } => format!("scene object #{index}: {}", name(&self.prop_names, mesh)),
         }

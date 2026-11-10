@@ -161,7 +161,7 @@ fn mix2(a: [f32; 2], b: [f32; 2], t: f32) -> [f32; 2] {
 /// `f` cut by the plane `p[axis]` = `c` into the pieces under and over it, or None when the
 /// plane misses it (a convex face: the cage's quads and triangles). The cut points go into
 /// `made`.
-fn split(f: &Face, axis: usize, c: f32, made: &mut Vec<[f32; 3]>) -> Option<(Face, Face)> {
+pub(super) fn split(f: &Face, axis: usize, c: f32, made: &mut Vec<[f32; 3]>) -> Option<(Face, Face)> {
     let d: Vec<f32> = f.pts.iter().map(|p| p[axis] - c).collect();
     if d.iter().all(|&x| x >= -ON) || d.iter().all(|&x| x <= ON) {
         return None;
@@ -223,7 +223,7 @@ fn triangles(f: &Face) -> Vec<Face> {
 }
 
 /// `f` as triangles when it is not convex (the slicing cuts convex faces), else as it is.
-fn convex_pieces(f: Face) -> Vec<Face> {
+pub(super) fn convex_pieces(f: Face) -> Vec<Face> {
     if f.pts.len() <= 3 || convex(&f) { vec![f] } else { triangles(&f) }
 }
 
@@ -247,7 +247,7 @@ fn slice(faces: Vec<Face>, d: &Diffuser, xmax: f32, axis: usize, c: f32, down: b
 }
 
 /// `f` with the points of `made` lying on its edges put in (T-junctions closed).
-fn close_t(f: &Face, made: &[[f32; 3]]) -> Face {
+pub(super) fn close_t(f: &Face, made: &[[f32; 3]]) -> Face {
     let n = f.pts.len();
     let mut g = Face { pts: Vec::new(), colour: Vec::new(), uv: Vec::new(), ..f.clone() };
     for k in 0..n {

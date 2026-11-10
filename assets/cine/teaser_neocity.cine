@@ -1,0 +1,23 @@
+# Motorhead cine v1
+# Teaser #455, opening: NeoCity, the street down from the crest (AI nodes 1960..2300).
+# Rendered as a range of race time, not from 0: `--from 26 --to 42` (scripts/teaser.sh).
+# A crane over the empty street lowers slowly to the road while the pack comes over the crest
+# and down the hill; the cars rush past at about 39.4..41.7 s. They run single file here (all within
+# -1.6..+0.5 m of the AI line at nodes 2250..2280), so the lens sits 2.4 m right of the line and every car passes
+# on its right, about 3 m away (the closest car about 1.5 m).
+# Titan (10) on pole, Serpent (4) beside it: the teaser's hero cars.
+Race Track 3 Cars 10 4 3 1 2 5 6 7 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60 Letterbox 2.39
+Audio on Doppler on
+End 42
+
+# keys in seconds since the shot (race 26): high over node 2330, down to 0.9 m above the road 2.4 m right of
+# the AI line at node 2270, looking back up the street (heading 18) at the crest; a slow pan from heading 26
+Camera crane path Drive time Aim keys
+Key crane 0    Eye -226 58 58      Angles 24 24 0 Fov 55
+Key crane 5.5  Eye -211 22 89.5    Angles 14 22 0
+Key crane 10.5 Eye -202 5.5 111.5  Angles 2 19 0
+Key crane 12.5 Eye -201.4 2.9 118  Angles -4 18 0 Fov 70
+Shake crane proximity 2
+
+Shot 26 crane FadeIn 2

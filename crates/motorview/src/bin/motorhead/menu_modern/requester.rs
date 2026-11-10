@@ -81,7 +81,7 @@ impl Ask {
 }
 
 /// `.card.req`: the near-opaque glass of a requester over busy content.
-fn req_card(m: &mut Mesh, d: Glass, (x, y, w, h): (f32, f32, f32, f32)) {
+pub(super) fn req_card(m: &mut Mesh, d: Glass, (x, y, w, h): (f32, f32, f32, f32)) {
     let body = vec::rounded_rect(x, y, w, h, d.d(12.0));
     m.shadow(&body, 0.0, d.d(18.0), d.d(48.0), [0.0, 0.0, 0.0, 0.6]);
     m.halo(&body, d.d(40.0), hex(0x50aaff, 0.18));
@@ -96,18 +96,18 @@ fn req_card(m: &mut Mesh, d: Glass, (x, y, w, h): (f32, f32, f32, f32)) {
 
 impl Game {
     /// The scrim over the whole screen (`.scrim`).
-    fn req_scrim(b: &mut Batch) {
+    pub(super) fn req_scrim(b: &mut Batch) {
         let mut m = Mesh::default();
         m.quad(0.0, 0.0, b.canvas.w, b.canvas.h, [[2.0 / 255.0, 5.0 / 255.0, 10.0 / 255.0, 0.55]; 4]);
         b.mesh(&m);
     }
 
-    /// The question's title row: the warning icon (when `icon`) and the title, Glass 28 / 1. Returns
-    /// the title's width.
-    fn req_title(b: &mut Batch, d: Glass, (x, y): (f32, f32), title: &str, icon: bool) {
+    /// The question's title row: the icon (the warning triangle for a question, `Some(char)` for another) and the title,
+    /// Glass 28 / 1.
+    fn req_title(b: &mut Batch, d: Glass, (x, y): (f32, f32), title: &str, icon: Option<char>) {
         let mut tx = x + d.d(22.0);
-        if icon {
-            Self::glass_icon(b, ui_font::icon::ALERT, tx, y + d.d(21.0), d.d(26.0), hex(0xffb26a, 1.0));
+        if let Some(icon) = icon {
+            Self::glass_icon(b, icon, tx, y + d.d(21.0), d.d(26.0), hex(0xffb26a, 1.0));
             tx += d.d(26.0 + 12.0);
         }
         b.font_text(HudFont::Glass, &title.to_uppercase(), tx, d.cap_top(HudFont::Glass, 28.0, y + d.d(18.0), Some(32.0)), &d.font(HudFont::Glass, 28.0, 1.0, WHITE));
@@ -122,17 +122,33 @@ impl Game {
     /// explanation, the two buttons (`sel` is the chosen one) and the hints.
     pub(crate) fn requester_modern(&self, b: &mut Batch, ask: Ask, sel: usize, px: f32) {
         let d = Glass::new(&b.canvas, px);
+        let buttons: Vec<(char, String)> = ask.icons().into_iter().zip(ask.buttons()).map(|(i, n)| (i, n.to_string())).collect();
+        self.req_dialog(b, d, (ui_font::icon::ALERT, ask.title()), &[(ask.explain(), false)], &buttons, sel, 460.0, &[(&[0, 1], "CHOOSE"), (&[2], "CONFIRM"), (&[3], "CANCEL")]);
+    }
+
+    /// The requester's card centred over the screen (`.card.req`): the scrim, the `title` with its icon, the text
+    /// (`runs` of (text, bold): bold is `.rx b`, Rajdhani Bold in white) wrapped to the card, the buttons centred under it
+    /// (`sel` with the orange rim and pulse; one button or more) and `hints` in place of the screen's. The card is `min_w`
+    /// design px wide or wider for a long title or label. Ask's questions and Lap Analysis's refusals (#429) draw here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn req_dialog(&self, b: &mut Batch, d: Glass, (title_icon, title): (char, &str), runs: &[(String, bool)], buttons: &[(char, String)], sel: usize, min_w: f32, hints: &[(&[usize], &str)]) {
         let pulse = 0.5 - 0.5 * (self.t * TAU / 1.1).cos();
-        let names = ask.buttons().map(str::to_uppercase);
+        let names: Vec<String> = buttons.iter().map(|(_, n)| n.to_uppercase()).collect();
+        let nb = names.len().max(1) as f32;
         let bst = d.font(HudFont::Glass, 22.0, 1.0, WHITE);
         // the buttons: 200 design px, wider for a long label (icon 20, 10, text, 18 each side)
         let tw: Vec<f32> = names.iter().map(|n| b.font_width(HudFont::Glass, n, &bst) - bst.tracking).collect();
         let bw = d.d(200.0).max(tw.iter().cloned().fold(0.0, f32::max) + d.d(20.0 + 10.0 + 36.0));
         let gap = d.d(16.0);
-        let w = d.d(460.0).max(Self::req_title_w(b, d, ask.title(), true)).max(2.0 * bw + gap + d.d(44.0));
+        let w = d.d(min_w).max(Self::req_title_w(b, d, title, true)).max(nb * bw + (nb - 1.0) * gap + d.d(44.0));
         let st = d.font(HudFont::GlassMed, 15.0, 0.5, hex(G_TEXT, 1.0));
-        let text = ask.explain();
-        let lines = wrap_text(b, HudFont::GlassMed, &st, &text, w - d.d(44.0));
+        let bold = d.font(HudFont::Glass, 15.0, 0.5, WHITE);
+        let lines: Vec<Vec<(String, bool)>> = if runs.iter().all(|r| !r.1) {
+            let text: String = runs.iter().map(|r| r.0.as_str()).collect();
+            wrap_text(b, HudFont::GlassMed, &st, &text, w - d.d(44.0)).into_iter().map(|l| vec![(l, false)]).collect()
+        } else {
+            wrap_runs(b, (&st, &bold), runs, w - d.d(44.0))
+        };
         let n = lines.len() as f32;
         let h = d.d(60.0 + 20.0 * n + 26.0 + 44.0 + 24.0);
         let (x, y) = (d.x(640.0) - w * 0.5, d.y(353.0) - h * 0.5);
@@ -140,14 +156,19 @@ impl Game {
         let mut m = Mesh::default();
         req_card(&mut m, d, (x, y, w, h));
         b.mesh(&m);
-        Self::req_title(b, d, (x, y), ask.title(), true);
+        Self::req_title(b, d, (x, y), title, Some(title_icon));
         for (k, line) in lines.iter().enumerate() {
-            b.font_text(HudFont::GlassMed, line, x + d.d(22.0), d.cap_top(HudFont::GlassMed, 15.0, y + d.d(60.0 + 20.0 * k as f32), Some(20.0)), &st);
+            let top = y + d.d(60.0 + 20.0 * k as f32);
+            let mut lx = x + d.d(22.0);
+            for (s, strong) in line {
+                let (f, sty) = if *strong { (HudFont::Glass, &bold) } else { (HudFont::GlassMed, &st) };
+                lx += b.font_text(f, s, lx, d.cap_top(f, 15.0, top, Some(20.0)), sty);
+            }
         }
         // the buttons, centred under the text
         let (by, bh) = (y + d.d(60.0 + 20.0 * n + 26.0), d.d(44.0));
-        let bx0 = x + (w - 2.0 * bw - gap) * 0.5;
-        for (i, (name, icon)) in names.iter().zip(ask.icons()).enumerate() {
+        let bx0 = x + (w - nb * bw - (nb - 1.0) * gap) * 0.5;
+        for (i, (name, (icon, _))) in names.iter().zip(buttons).enumerate() {
             let on = i == sel;
             let bx = bx0 + i as f32 * (bw + gap);
             let r = vec::rounded_rect(bx, by, bw, bh, d.d(12.0));
@@ -164,10 +185,10 @@ impl Game {
             b.mesh(&m);
             let col = hex(if on { G_ORANGE } else { G_TEXT }, 1.0);
             let ix = bx + (bw - (d.d(30.0) + tw[i])) * 0.5;
-            Self::glass_icon(b, icon, ix, by + d.d(12.0), d.d(20.0), col);
+            Self::glass_icon(b, *icon, ix, by + d.d(12.0), d.d(20.0), col);
             b.font_text(HudFont::Glass, name, ix + d.d(30.0), d.cap_top(HudFont::Glass, 22.0, by, Some(44.0)), &d.font(HudFont::Glass, 22.0, 1.0, col));
         }
-        Self::glass_hints(b, d, self.controls.last, &[(&[0, 1], "CHOOSE"), (&[2], "CONFIRM"), (&[3], "CANCEL")], 626.0);
+        Self::glass_hints(b, d, self.controls.last, hints, 626.0);
     }
 
     /// REMASTER text entry requester (league name, recorded race name): the requester's card with a
@@ -185,7 +206,7 @@ impl Game {
         m.fill(&field, [1.0, 1.0, 1.0, 0.08], d.px);
         m.stroke(&field, true, d.w(1.0), Ends::Round, hex(G_LINE, 0.5), d.px);
         b.mesh(&m);
-        Self::req_title(b, d, (x, y), title, false);
+        Self::req_title(b, d, (x, y), title, None);
         let st = d.font(HudFont::Glass, 20.0, 0.5, WHITE);
         let tx = fx + d.d(14.0);
         b.font_text(HudFont::Glass, text, tx, d.cap_top(HudFont::Glass, 20.0, fy, Some(40.0)), &st);
@@ -406,6 +427,50 @@ impl Game {
         // A type, X delete, Y space, B undo (or the field's own), Menu keep
         Self::glass_hints_at(b, d, self.pad_device(), &[(&[2], "TYPE"), (&[7], "DELETE"), (&[6], "SPACE"), (&[3], *undo), (&[8], *keep)], (640.0, cy + 296.0), 0.8, 20.0);
     }
+}
+
+/// `runs` of (text, bold) wrapped to `max_w` canvas px (`wrap_text` with the `<b>` parts of a requester's text in their
+/// own face): the lines as runs; a word that spans runs ("36.820" then ",") stays whole.
+fn wrap_runs(b: &Batch, (st, bold): (&FontStyle, &FontStyle), runs: &[(String, bool)], max_w: f32) -> Vec<Vec<(String, bool)>> {
+    let font = |strong: bool| if strong { (HudFont::Glass, bold) } else { (HudFont::GlassMed, st) };
+    let width = |segs: &[(String, bool)]| segs.iter().map(|(s, strong)| { let (f, sty) = font(*strong); b.font_width(f, s, sty) }).sum::<f32>() - st.tracking;
+    // words as segments of runs, split at spaces
+    let mut words: Vec<Vec<(String, bool)>> = vec![Vec::new()];
+    for (text, strong) in runs {
+        for (i, part) in text.split(' ').enumerate() {
+            if i > 0 {
+                words.push(Vec::new());
+            }
+            if !part.is_empty() {
+                words.last_mut().unwrap().push((part.to_string(), *strong));
+            }
+        }
+    }
+    words.retain(|w| !w.is_empty());
+    let mut lines: Vec<Vec<(String, bool)>> = vec![Vec::new()];
+    for word in words {
+        let line = lines.last_mut().unwrap();
+        let mut next = line.clone();
+        let mut word = word;
+        if !next.is_empty() {
+            word[0].0.insert(0, ' ');
+        }
+        next.extend(word.iter().cloned());
+        if !line.is_empty() && width(&next) > max_w {
+            word[0].0.remove(0);
+            lines.push(word);
+        } else {
+            *line = next;
+        }
+    }
+    // neighbours in the same face as one run
+    lines.into_iter().map(|l| l.into_iter().fold(Vec::<(String, bool)>::new(), |mut acc, (s, strong)| {
+        match acc.last_mut() {
+            Some(last) if last.1 == strong => last.0.push_str(&s),
+            _ => acc.push((s, strong)),
+        }
+        acc
+    })).collect()
 }
 
 #[cfg(test)]

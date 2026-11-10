@@ -119,6 +119,12 @@ pub fn replay_dir(persist: bool) -> Option<PathBuf> {
     Some(p.parent()?.join("Replays"))
 }
 
+/// The Time Attack ghosts (`.ghl`) live beside the hiscores (`ghost_path`); Lap Analysis lists them (#429).
+pub fn ghost_dir(persist: bool) -> Option<PathBuf> {
+    let p = crate::front::settings_path().filter(|_| persist)?;
+    Some(p.parent()?.join("Ghosts"))
+}
+
 /// Time Attack ghost (`.ghl`): the best lap of a track and car (cars differ in performance, so a
 /// ghost is only ever the car you drive).
 pub fn ghost_path(persist: bool, track_name: &str, car: u32) -> Option<PathBuf> {

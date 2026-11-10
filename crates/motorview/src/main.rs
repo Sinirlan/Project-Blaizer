@@ -4,7 +4,10 @@
 //!   motorview <installed_game> --shot out.png [--view chase|side|near|hood|quarter|top] [--sim-seconds S] [--size WxH]
 //!   motorview <installed_game> --cine FILE.cine --render out.mp4 [--from S --to S] [--fps N] [--size WxH] [--codec h264|hevc|nvenc|png] [--no-audio]
 //!   motorview <installed_game> --cine FILE.cine --shot out.png --at-time S   (cine.rs: planned camera sequences, re-notes/20-cine.md)
-//!   motorview <installed_game> --cine FILE.cine --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N] --menu cine --tune cine]   (the Cine editor, cine_edit.rs)
+//!   motorview <installed_game> ... --view-distance PERCENT   (30..400: the game's view-distance option for --shot, --cine and the window; the track's far plane, not unlimited)
+//!   motorview <installed_game> --export-body N out.obj [--cars-dir DIR]   (car N's generated Remaster body for Blender, procgen/bodyobj.rs)
+//!   motorview <installed_game> --cine FILE.cine --export-tv   (write the sequence's static cameras as TV camera stations, remaster/tv/trackNN.mot, #424)
+//!   motorview <installed_game> --cine FILE.cine --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N] [--cine-gizmo move|rotate] --menu cine --tune cine]   (the Cine editor, cine_edit.rs)
 //!
 //! Race (default): you start at the back of an 8-car grid against bots.
 //! Up/W throttle, Down/S brake/reverse, Left/A Right/D steer, R respawn, Backspace restart race.
@@ -15,7 +18,7 @@
 //! F9 Classic/Remaster graphics, K Enhanced car paint, J dynamic lights, Ctrl+F flashlight (a torch cone at the camera, Classic and Remaster),
 //! U MSAA and O colour grade (Remaster),
 //! F3 debug overlay (FPS, camera, crosshair target), F4 wire style (lines, solid, check; Shift+F4 back), Esc exit (asks first).
-//! Menu bar along the top (\ hides it): every option by topic, with its key.
+//! Menu bar along the top (\ hides it): every option by topic, with its key. Space: command search (#436, `command.rs`).
 //! The F3 card has a copy button: its values as Markdown to the clipboard.
 //! Debug (see `BINDS`): P pause, . single step, - / = time scale, N focus car, I inspect target,
 //! F6 sim panel, F7 car gizmos, F8 track gizmos, F2 collision faces, F12 screenshot.
@@ -24,7 +27,7 @@
 //! volumes, X light ranges. Data: T browser (textures, scene objects, cars; PgUp/PgDn,
 //! Home/End, Enter jumps to the next object), I pins the target's full data (texture preview).
 //! ` (or F11) tuning window (egui): car parameters, camera offsets, render options, debug layers.
-//! Ctrl+E world-fill editor (re-notes/12-world-fill.md 12.5): Ctrl / Ctrl+Shift keys, Help > all shortcuts lists them.
+//! Ctrl+E world-fill editor (re-notes/12-world-fill.md 12.5): Ctrl / Ctrl+Shift keys, Space (or Help > Shortcuts) finds them.
 
 use glam::Vec3;
 use motor_sim::replay::{Header, Recording};
@@ -35,11 +38,12 @@ use motorview::ghost::{self, Follow, Sync as GhostSync, ViewerGhost};
 use motorview::inspect::{self, Browser, Catalog, Passes, Tab};
 use motorview::pick::{Hit, Picker, Target};
 use motorview::wire::WireStyle;
-use motorview::render::{CarDetail, CarShading, Camera, DebugShade, DebugView, Frame, Gpu, GrassLevel, RemasterView, RenderAa, RenderMode, SceneFrost, View};
+use motorview::render::{CarDetail, CarShading, Camera, DebugShade, DebugView, Frame, Gpu, GrassLevel, RemasterView, RenderAa, RenderMode, SceneFrost, View, far_distance};
 use motorview::scene::TEX;
 use motorview::timeline::Timeline;
+use motorview::tune::TIME_SCALES;
 use motorview::ui::{Assets, Rect};
-use overlay::{Line, OverlayText, Row, Telem, Val};
+use overlay::{Ask, AskKind, Line, OverlayText, Row, Telem, Val};
 use motorview::palette;
 use motorview::cine_edit::{self, CineEdit, Preview, Req};
 use motorview::world_edit::{self, Cmd, Kind, WorldEdit};
@@ -47,6 +51,7 @@ use motorview::fill_gizmo;
 use motorview::glass_ui;
 use motorview::gui::Gui;
 use motorview::tune::{self, Page, Targets, Tune};
+use motorview::tune_changes::{self, Change, Snap};
 use ribbon::{Pick, RTab, Ribbon, RibbonState};
 use motorview::{device, instance, png, scene};
 use std::collections::{HashMap, HashSet};
@@ -59,14 +64,16 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+mod command;
 mod overlay;
 mod ribbon;
 mod status;
+mod transport;
 
 const USAGE: &str = "usage: motorview [installed_game] [--track N] [--car NN] [--free [--drive-free]] [--difficulty easy|medium|hard|beginner] \
-                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--sim-toast running|paused] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--confirm-exit] [--solid-ui] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts] [--limited-distance|--unlimited-distance] [--flashlight] [--car-sheet sheet.png] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|render|remaster|debug|world|ghost|cine|help] [--ribbon-flyout GROUP] [--ribbon-pick car|track]] [--tune-search TEXT] [--wgsl NAME=VALUE]... [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--trees on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
-                     [--cine FILE.cine [--render out.mp4 [--from S] [--to S] [--fps N] [--codec h264|hevc|nvenc|png] [--no-audio] | --shot out.png --at-time S | --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N]]] [--size WxH] [--classic|--remaster ...]] \
-                     [--fill-auto [--seed S] [--force]] [--probes-stats [--track N|all]] [--world-edit [--world-gizmo move|rotate[:N]] [--world-tool KIND]]";
+                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--sim-toast running|paused] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--cam-pose X,Y,Z,M0..M8[,ZOOM]] [--lineup N,N,..] [--car-states FILE] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--sky-lines N] [--sky-stretch] [--confirm-exit [unsaved|changes|both]] [--confirm-switch track|car] [--confirm-cine close|new|open|exit] [--confirm-world] [--solid-ui] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts,halos] [--racing-line] [--limited-distance|--unlimited-distance|--view-distance PERCENT] [--flashlight] [--car-sheet sheet.png] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|render|remaster|debug|world|ghost|cine|help] [--ribbon-flyout GROUP] [--ribbon-pick car|track|NAME]] [--tune-search TEXT] [--command [TEXT]] [--tune-set KEY=VALUE,... (mass, acc-force, gear-2-top, centre-of-mass-y, chase-eye-y, max-lag, gravity)] [--changes] [--wgsl NAME=VALUE]... [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--trees on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
+                     [--cine FILE.cine [--export-tv | --render out.mp4 [--from S] [--to S] [--fps N] [--codec h264|hevc|nvenc|png] [--no-audio] | --shot out.png --at-time S | --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N] [--cine-gizmo move|rotate]]] [--size WxH] [--classic|--remaster ...]] \
+                     [--fill-auto [--seed S] [--force]] [--probes-stats [--track N|all]] [--export-body N OUT.obj [--cars-dir DIR]] [--export-blueprint N OUT.glb [--cars-dir DIR]] [--check-model N [--cars-dir DIR]] [--car-source imported|generated|original] [--world-edit [--world-gizmo move|rotate[:N]] [--world-holes off|on] [--world-select N|none] [--paused] [--world-tool KIND] [--world-stamp N] [--world-water N] [--world-grass N] [--world-capture X Z]]";
 
 struct Args {
     root: PathBuf,
@@ -103,14 +110,36 @@ struct Args {
     /// shot camera eye and target, game coordinates
     eye: Option<Vec3>,
     at: Option<Vec3>,
+    /// `--cam-pose X,Y,Z,M0..M8[,ZOOM]`: shot camera from the original's camera block (#275): eye, the 3x3 rows
+    /// (right, up, forward) and the zoom, game coordinates; wins over `--eye/--at`
+    cam_pose: Option<(Vec3, glam::Mat3, f32)>,
+    /// `--lineup N,N,..`: the car of each grid slot of a shot's race (#275), else `drive::lineup(car)`
+    lineup: Option<Vec<u32>>,
+    /// `--car-states FILE`: per slot the original's pose, set after the shot's sim seconds (#275)
+    car_states: Option<PathBuf>,
     /// shot: debug overlay and crosshair, wireframe, exit requester
     overlay: bool,
     wireframe: WireStyle,
     /// DEBUG: a solid colour in place of the sky (`--backdrop R,G,B`)
     backdrop: Option<[u8; 3]>,
+    /// DEBUG, Classic (#448 previews): `--sky-lines N`, `--sky-stretch`
+    sky_lines: f32,
+    sky_stretch: bool,
     confirm_exit: bool,
     /// shot: the exit requester as with unsaved World Editor edits
     confirm_unsaved: bool,
+    /// shot: the requester lists the tuning changes (`--confirm-exit changes`, #434)
+    confirm_changes: bool,
+    /// shot: the requester of a track / car switch (`--confirm-switch track|car`)
+    confirm_switch: Option<bool>,
+    /// shot: the requester of a Cine sequence with unsaved edits (`--confirm-cine close|new|open|exit`, #438)
+    confirm_cine: Option<String>,
+    /// shot: the requester of closing the World Editor with unsaved edits (`--confirm-world`, #473)
+    confirm_world: bool,
+    /// shot: tuning edits of the followed car / the camera (`--tune-set KEY=VALUE,...`, `Snap::set_slug`, #434)
+    tune_set: Vec<(String, f32)>,
+    /// shot: the status bar's Changes card open (`--changes`)
+    changes: bool,
     /// Solid panels: opaque glass, no scene frost (`--solid-ui`, #395)
     solid_ui: bool,
     /// shot: debug gizmo layers, sim panel, followed car, print the sim panels
@@ -127,6 +156,8 @@ struct Args {
     /// shot: render debug view, hidden passes, the track's own far plane, pinned target, browser
     shade: DebugShade,
     hide: Passes,
+    /// `--racing-line`: the red AI racing line on the road in a shot (off like the window's L key; #194)
+    racing_line: bool,
     limited: bool,
     /// `--flashlight`: the torch cone at the camera is on
     flashlight: bool,
@@ -138,11 +169,13 @@ struct Args {
     menu: Option<RTab>,
     /// shot: the Properties dock's search text (`--tune-search mass`)
     tune_search: Option<String>,
+    /// shot: the command search open on this text (`--command fog`, #436; the toolbar too)
+    command: Option<String>,
     /// shot: `--wgsl NAME=VALUE` shader values set after a first frame, then the shaders rebuilt (#398)
     wgsl: Vec<(String, String)>,
     /// shot: the flyout of this shelf group open (`--ribbon-flyout HDR`, with `--menu TAB`)
     ribbon_flyout: Option<String>,
-    /// shot: the car or track dropdown of the top bar open (`--ribbon-pick car|track`, with `--menu`)
+    /// shot: a dropdown held open (`--ribbon-pick car|track`, or a toolbar choice of 5 or more options by name, with `--menu`)
     ribbon_pick: Option<Pick>,
     /// `--world-edit` (`--fill-edit`): the World Editor open in the shot (forces Remaster, 400 % distance)
     world_edit: bool,
@@ -150,6 +183,20 @@ struct Args {
     fill_gizmo: Option<(fill_gizmo::Mode, usize)>,
     /// `--world-tool KIND`: a place tool armed in the shot (`ground`, `block`, `plant` ...)
     world_tool: Option<Kind>,
+    /// `--world-capture X Z`: "New stamp" clicked on the topmost world triangle over game point (X, Z), fitted round its
+    /// building (#475)
+    world_capture: Option<(f32, f32)>,
+    /// `--world-stamp N`: stamp N of the fill selected in the shot (its box, gizmo and cut triangles, #466)
+    world_stamp: Option<usize>,
+    /// `--world-water N` / `--world-grass N` (#476): water body N / grass body N of the fill selected in the shot (their rows)
+    world_water: Option<usize>,
+    world_grass: Option<usize>,
+    /// `--world-holes off|on` (#474): the hole finder in the shot (default on; the interactive editor opens with it off)
+    world_holes: bool,
+    /// `--world-select N|none` (#474): the selected piece in the shot (absent: piece 0, or the `--world-gizmo` piece)
+    world_select: Option<Option<usize>>,
+    /// `--paused` (#474): the sim paused in the shot (status bar PAUSED, as the editor opens)
+    paused: bool,
     /// `--track all` (every track: `--fill-auto`, `--probes-stats`)
     all_tracks: bool,
     /// REMASTER: generate `remaster/fill/trackNN.fill` (12-world-fill 12.4) and exit
@@ -159,6 +206,12 @@ struct Args {
     force: bool,
     /// REMASTER: bake the irradiance probes (probes.rs), print counts and times, exit
     probes_stats: bool,
+    /// REMASTER (#292): `--export-body N OUT`: car N's generated body as OBJ (procgen/bodyobj.rs), exit
+    export_body: Option<(u32, PathBuf)>,
+    /// REMASTER (#478): `--export-blueprint N OUT.glb`: car N as a model-file blueprint (procgen/blueprint.rs), exit
+    export_blueprint: Option<(u32, PathBuf)>,
+    /// REMASTER (#478): `--check-model N`: print what loading car N's model file found, exit (1: no file or it failed)
+    check_model: Option<u32>,
     /// `--ghost FILE`: a .ghl or .mhr loaded at start (in the shot: drawn in the main view)
     ghost: Option<PathBuf>,
     ghost_sync: GhostSync,
@@ -179,20 +232,26 @@ struct Args {
     codec: motorview::cine_render::Codec,
     /// `--no-audio`: the cine render stays silent (#153)
     no_audio: bool,
+    /// the game's saved sound output (settings.cfg `SoundDevice`), for the Cine editor's live sound (#349)
+    sound_device: Option<String>,
     at_time: Option<f32>,
     /// `--size` was given (else the cine file's `Output Size` applies)
     size_set: bool,
     /// `--cine-edit`: open the `--cine` file in the Cine editor (#152) instead of rendering it; `--cine-preview`: the
     /// shot looks through a camera of it
     cine_edit: bool,
+    /// `--export-tv` (with `--cine`): write the sequence's static cameras as TV camera stations (#424) instead of rendering
+    export_tv: bool,
     cine_preview: Preview,
     /// `--cine-sel N`: the camera selected in the editor's shot (its gizmo)
     cine_sel: usize,
+    /// `--cine-gizmo move|rotate`: the editor's gizmo mode in the shot
+    cine_gizmo: fill_gizmo::Mode,
 }
 
 impl Args {
     fn view(&self) -> View {
-        View { car_shading: self.car_shading, car_detail: self.car_detail, mode: self.mode, remaster: self.remaster, debug: DebugView { shade: self.shade, unlimited: !self.limited, flashlight: self.flashlight, backdrop: self.backdrop, ..DebugView::default() }, ..self.base }
+        View { car_shading: self.car_shading, car_detail: self.car_detail, mode: self.mode, remaster: self.remaster, debug: DebugView { shade: self.shade, unlimited: !self.limited, flashlight: self.flashlight, backdrop: self.backdrop, sky_lines: self.sky_lines, sky_stretch: self.sky_stretch, ..DebugView::default() }, ..self.base }
     }
 }
 
@@ -233,9 +292,14 @@ fn parse_args() -> Result<Args, String> {
         difficulty: Difficulty::Medium,
         eye: None,
         at: None,
+        cam_pose: None,
+        lineup: None,
+        car_states: None,
         overlay: false,
         wireframe: WireStyle::Off,
         backdrop: None,
+        sky_lines: 0.0,
+        sky_stretch: false,
         car_shading: base.car_shading,
         car_detail: base.car_detail,
         mode: base.mode,
@@ -243,6 +307,12 @@ fn parse_args() -> Result<Args, String> {
         base,
         confirm_exit: false,
         confirm_unsaved: false,
+        confirm_changes: false,
+        confirm_switch: None,
+        confirm_cine: None,
+        confirm_world: false,
+        tune_set: Vec::new(),
+        changes: false,
         solid_ui: false,
         layers: Layers::default(),
         panel: false,
@@ -253,8 +323,12 @@ fn parse_args() -> Result<Args, String> {
         fill_seed: 1,
         force: false,
         probes_stats: false,
+        export_body: None,
+        export_blueprint: None,
+        check_model: None,
         shade: DebugShade::Off,
         hide: Passes { skids: loaded.as_ref().is_none_or(|l| l.skid_marks), ..Passes::default() },
+        racing_line: false,
         // the game clips at its view distance (the fog's clip guard sits there); without settings the viewer is unlimited
         limited: loaded.is_some(),
         flashlight: false,
@@ -262,6 +336,7 @@ fn parse_args() -> Result<Args, String> {
         browse: None,
         tune: None,
         tune_search: None,
+        command: None,
         wgsl: Vec::new(),
         menu: None,
         ribbon_flyout: None,
@@ -279,13 +354,23 @@ fn parse_args() -> Result<Args, String> {
         fps: None,
         codec: motorview::cine_render::Codec::H264,
         no_audio: false,
+        sound_device: loaded.as_ref().and_then(|l| l.sound_device.clone()),
         at_time: None,
         cine_edit: false,
+        export_tv: false,
         cine_preview: Preview::Off,
         cine_sel: 0,
+        cine_gizmo: fill_gizmo::Mode::Move,
         size_set: false,
         world_edit: false,
         fill_gizmo: None,
+        world_stamp: None,
+        world_water: None,
+        world_grass: None,
+        world_holes: true,
+        world_select: None,
+        paused: false,
+        world_capture: None,
         world_tool: None,
     };
     let mut root = None;
@@ -298,6 +383,20 @@ fn parse_args() -> Result<Args, String> {
             },
             "--fill-auto" => a.fill_auto = true,
             "--probes-stats" => a.probes_stats = true,
+            "--export-body" => {
+                let car = val("--export-body")?.parse().map_err(|_| "--export-body N OUT.obj: bad car number")?;
+                a.export_body = Some((car, val("--export-body")?.into()));
+            }
+            "--export-blueprint" => {
+                let car = val("--export-blueprint")?.parse().map_err(|_| "--export-blueprint N OUT.glb: bad car number")?;
+                a.export_blueprint = Some((car, val("--export-blueprint")?.into()));
+            }
+            "--check-model" => a.check_model = Some(val("--check-model")?.parse().map_err(|_| "--check-model N: bad car number")?),
+            // REMASTER (#478): which body the cars show (procgen/carmodel.rs `CarSource`)
+            "--car-source" => {
+                let v = val("--car-source")?;
+                motorview::procgen::carmodel::set_source(motorview::procgen::carmodel::CarSource::parse(&v).ok_or("--car-source imported|generated|original")?);
+            }
             "--cars-dir" => a.cars_dir = Some(val("--cars-dir")?.into()),
             "--seed" => a.fill_seed = val("--seed")?.parse().map_err(|_| "bad --seed")?,
             "--force" => a.force = true,
@@ -309,6 +408,11 @@ fn parse_args() -> Result<Args, String> {
                 let style = it.next_if(|v| !v.starts_with("--")).map(|v| WireStyle::parse(&v).filter(|w| w.on()).ok_or(format!("unknown wire style {v}"))).transpose()?;
                 a.wireframe = style.unwrap_or(WireStyle::Lines);
             }
+            "--sky-lines" => {
+                let v = val("--sky-lines")?;
+                a.sky_lines = v.parse().ok().filter(|n: &f32| *n > 0.0).ok_or(format!("bad --sky-lines {v} (a line count above 0)"))?;
+            }
+            "--sky-stretch" => a.sky_stretch = true,
             "--backdrop" => {
                 let v = val("--backdrop")?;
                 let c: Vec<u8> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().map_err(|_| format!("bad --backdrop {v} (R,G,B 0..255)"))?;
@@ -325,8 +429,27 @@ fn parse_args() -> Result<Args, String> {
             "--confirm-exit" => {
                 a.confirm_exit = true;
                 // `--confirm-exit unsaved`: the three-way requester of a World Editor with unsaved edits
-                a.confirm_unsaved = it.next_if(|v| v == "unsaved").is_some();
+                // `changes`: the tuning changes of `--tune-set` and the rest are listed; `both`: with the fill
+                let what = it.next_if(|v| matches!(v.as_str(), "unsaved" | "changes" | "both"));
+                a.confirm_unsaved = matches!(what.as_deref(), Some("unsaved" | "both"));
+                a.confirm_changes = matches!(what.as_deref(), Some("changes" | "both"));
             }
+            "--confirm-switch" => {
+                // the car or track after the loaded one, with the tuning changes of `--tune-set`
+                a.confirm_switch = Some(match val("--confirm-switch")?.as_str() {
+                    "track" => true,
+                    "car" => false,
+                    v => return Err(format!("bad --confirm-switch {v} (track|car)")),
+                });
+            }
+            "--confirm-cine" => {
+                let v = val("--confirm-cine")?;
+                if !matches!(v.as_str(), "close" | "new" | "open" | "exit") {
+                    return Err(format!("bad --confirm-cine {v} (close|new|open|exit)"));
+                }
+                a.confirm_cine = Some(v);
+            }
+            "--confirm-world" => a.confirm_world = true,
             "--solid-ui" => a.solid_ui = true,
             "--debug" => a.layers = Layers::parse(&val("--debug")?)?,
             "--panel" => a.panel = true,
@@ -335,7 +458,14 @@ fn parse_args() -> Result<Args, String> {
                 a.shade = DebugShade::parse(&v).ok_or(format!("unknown debug view {v}"))?;
             }
             "--hide" => a.hide = Passes::hide(&val("--hide")?)?,
+            "--racing-line" => a.racing_line = true,
             "--flashlight" => a.flashlight = true,
+            // the game's view-distance option in percent (30..400; Classic caps it at 150), the track's own clip: `--shot`, `--cine`, the window
+            "--view-distance" => {
+                let p = val("--view-distance")?.parse::<u32>().map_err(|e| format!("--view-distance PERCENT: {e}"))?;
+                a.base.distance = p.clamp(30, (View::MAX_DISTANCE * 100.0) as u32) as f32 / 100.0;
+                a.limited = true;
+            }
             "--limited-distance" => a.limited = true,
             "--unlimited-distance" => a.limited = false,
             "--no-settings" => {}
@@ -349,8 +479,16 @@ fn parse_args() -> Result<Args, String> {
                 a.menu = Some(tab.unwrap_or(RTab::View));
             }
             "--ribbon-flyout" => a.ribbon_flyout = Some(val("--ribbon-flyout")?),
-            "--ribbon-pick" => a.ribbon_pick = Some(Pick::parse(&val("--ribbon-pick")?).ok_or("--ribbon-pick: car or track")?),
+            "--ribbon-pick" => a.ribbon_pick = Some(Pick::parse(&val("--ribbon-pick")?)),
             "--tune-search" => a.tune_search = Some(val("--tune-search")?),
+            "--command" => a.command = Some(it.next_if(|v| !v.starts_with("--")).unwrap_or_default()),
+            "--tune-set" => {
+                for kv in val("--tune-set")?.split(',') {
+                    let (k, v) = kv.split_once('=').ok_or(format!("bad --tune-set {kv} (KEY=VALUE)"))?;
+                    a.tune_set.push((k.trim().to_string(), v.trim().parse().map_err(|_| format!("bad --tune-set value {v}"))?));
+                }
+            }
+            "--changes" => a.changes = true,
             "--wgsl" => {
                 let v = val("--wgsl")?;
                 let (n, x) = v.split_once('=').ok_or("bad --wgsl (NAME=VALUE)")?;
@@ -379,7 +517,38 @@ fn parse_args() -> Result<Args, String> {
             }
             "--world-tool" => {
                 let v = val("--world-tool")?;
-                a.world_tool = Some(Kind::ALL.into_iter().find(|k| k.name() == v).ok_or("--world-tool ground|block|wall|hill|patch|skirt|water|plant")?);
+                a.world_tool = Some(Kind::ALL.into_iter().find(|k| k.name() == v).ok_or("--world-tool ground|block|wall|hill|patch|skirt|water|plant|cloud|object")?);
+                a.world_edit = true;
+            }
+            "--world-stamp" => {
+                a.world_stamp = Some(val("--world-stamp")?.parse().map_err(|_| "--world-stamp N")?);
+                a.world_edit = true;
+            }
+            "--world-water" => {
+                a.world_water = Some(val("--world-water")?.parse().map_err(|_| "--world-water N")?);
+                a.world_edit = true;
+            }
+            "--world-grass" => {
+                a.world_grass = Some(val("--world-grass")?.parse().map_err(|_| "--world-grass N")?);
+                a.world_edit = true;
+            }
+            "--world-holes" => {
+                a.world_holes = match val("--world-holes")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err("--world-holes off|on".into()),
+                };
+                a.world_edit = true;
+            }
+            "--world-select" => {
+                let v = val("--world-select")?;
+                a.world_select = Some(if v == "none" { None } else { Some(v.parse().map_err(|_| "--world-select N|none")?) });
+                a.world_edit = true;
+            }
+            "--paused" => a.paused = true,
+            "--world-capture" => {
+                let n = |v: String| v.parse::<f32>().map_err(|_| "--world-capture X Z");
+                a.world_capture = Some((n(val("--world-capture")?)?, n(val("--world-capture")?)?));
                 a.world_edit = true;
             }
             "--world-gizmo" | "--fill-gizmo" => {
@@ -515,6 +684,22 @@ fn parse_args() -> Result<Args, String> {
                 let p = (v.len() == 3).then(|| Vec3::new(v[0], v[1], v[2])).ok_or(format!("{x} X,Y,Z"))?;
                 if x == "--eye" { a.eye = Some(p) } else { a.at = Some(p) }
             }
+            "--cam-pose" => {
+                let v: Vec<f32> = val(&x)?.split(',').map(|c| c.trim().parse()).collect::<Result<_, _>>().map_err(|_| "bad --cam-pose")?;
+                if !(12..=13).contains(&v.len()) {
+                    return Err("--cam-pose X,Y,Z,M0..M8[,ZOOM]".into());
+                }
+                let row = |i: usize| Vec3::new(v[i], v[i + 1], v[i + 2]);
+                a.cam_pose = Some((row(0), glam::Mat3::from_cols(row(3), row(6), row(9)), v.get(12).copied().unwrap_or(1.0)));
+            }
+            "--lineup" => {
+                let v: Vec<u32> = val(&x)?.split(',').map(|c| c.trim().parse()).collect::<Result<_, _>>().map_err(|_| "bad --lineup N,N,..")?;
+                if v.is_empty() || v.iter().any(|&c| !(1..=10).contains(&c)) {
+                    return Err("--lineup: car numbers 1..10".into());
+                }
+                a.lineup = Some(v);
+            }
+            "--car-states" => a.car_states = Some(val(&x)?.into()),
             "--sim-toast" => a.sim_toast = Some(match val("--sim-toast")?.as_str() { "paused" => true, "running" => false, _ => return Err("--sim-toast: paused or running".into()) }),
             "--sim-seconds" => a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?,
             "--replay" => a.replay = Some(val("--replay")?.into()),
@@ -532,8 +717,16 @@ fn parse_args() -> Result<Args, String> {
             "--fps" => a.fps = Some(val("--fps")?.parse().map_err(|_| "bad --fps")?),
             "--at-time" => a.at_time = Some(val("--at-time")?.parse().map_err(|_| "bad --at-time")?),
             "--cine-edit" => a.cine_edit = true,
+            "--export-tv" => a.export_tv = true,
             "--cine-preview" => a.cine_preview = Preview::parse(&val("--cine-preview")?).ok_or("--cine-preview air|selected|off")?,
             "--cine-sel" => a.cine_sel = val("--cine-sel")?.parse().map_err(|_| "--cine-sel N")?,
+            "--cine-gizmo" => {
+                a.cine_gizmo = match val("--cine-gizmo")?.as_str() {
+                    "move" => fill_gizmo::Mode::Move,
+                    "rotate" => fill_gizmo::Mode::Rotate,
+                    _ => return Err("--cine-gizmo move|rotate".into()),
+                }
+            }
             "--no-audio" => a.no_audio = true,
             "--codec" => a.codec = motorview::cine_render::Codec::parse(&val("--codec")?).ok_or("--codec h264|hevc|nvenc|png")?,
             "-h" | "--help" => return Err(USAGE.into()),
@@ -547,14 +740,17 @@ fn parse_args() -> Result<Args, String> {
         warnings.iter().for_each(|w| eprintln!("--fog-tune: {w}"));
         a.remaster.fog_tune = Some(f);
     }
+    // the command search is drawn over the toolbar
+    if a.command.is_some() && a.menu.is_none() {
+        a.menu = Some(RTab::View);
+    }
     Ok(a)
 }
 
 /// Load the render scene and the race session; `player` = drive the last slot yourself, `paint`
 /// = CustomCarColours per car slot.
-fn load(root: &Path, track: u32, car: u32, player: bool, difficulty: Difficulty, paint: &[(usize, scene::CarPaint)]) -> Option<(scene::Scene, Option<Session>)> {
-    let cars = drive::lineup(car);
-    let s = match scene::load(root, track, &cars, paint) {
+fn load(root: &Path, track: u32, cars: &[u32], player: bool, difficulty: Difficulty, paint: &[(usize, scene::CarPaint)]) -> Option<(scene::Scene, Option<Session>)> {
+    let s = match scene::load(root, track, cars, paint) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("track {track}: {e}");
@@ -562,14 +758,14 @@ fn load(root: &Path, track: u32, car: u32, player: bool, difficulty: Difficulty,
         }
     };
     println!("{}", s.stats);
-    let sess = match Session::new(root, track, &cars, player.then_some(cars.len() - 1), difficulty) {
+    let sess = match Session::new(root, track, cars, player.then_some(cars.len() - 1), difficulty) {
         Ok(mut x) => {
             x.set_wheels(&s);
             // the viewer keeps its own cameras: no start fly-by
             x.fly_by = false;
             // design choice (#374): the game's fixed physics tick (a paused single step, `STEP_DT`, is one tick at 60 Hz)
             x.race.set_fixed_tick(Some(motor_sim::session::PHYSICS_HZ.get()));
-            x.setup = Some(run_setup(root, track, &cars, &x, difficulty));
+            x.setup = Some(run_setup(root, track, cars, &x, difficulty));
             Some(x)
         }
         Err(e) => {
@@ -610,7 +806,7 @@ fn run_setup(root: &Path, track: u32, cars: &[u32], sess: &Session, difficulty: 
 fn load_run(root: &Path, rec: &Recording) -> Result<(scene::Scene, Session, Vec<(usize, [[u8; 3]; 3])>), String> {
     let h = &rec.header;
     let mut sess = Session::for_recording(root, rec)?;
-    let paint: Vec<_> = sess.race.racers.iter().enumerate().filter(|(_, r)| !r.human).filter_map(|(i, r)| r.driver.car_colours.map(|c| (i, c))).collect();
+    let paint = sess.driver_paints();
     let gloss: Vec<_> = paint.iter().map(|&(i, c)| (i, scene::CarPaint::gloss(c))).collect();
     let s = scene::load(root, h.track, &h.cars, &gloss).map_err(|e| format!("track {}: {e}", h.track))?;
     println!("{}", s.stats);
@@ -644,8 +840,7 @@ const SPEED_RANGE: (f32, f32) = (0.05, 20.0);
 
 /// Picking range of the crosshair (m).
 const PICK_RANGE: f32 = 2000.0;
-/// Sim time multipliers (- / =) and the single-step length (.).
-const TIME_SCALES: [f32; 7] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0];
+/// The single-step length (.); the time multipliers (- / =) are `tune::TIME_SCALES`.
 const STEP_DT: f32 = 1.0 / 60.0;
 /// Forward runs this many sim steps per frame while held.
 const FORWARD_STEPS: usize = 4;
@@ -826,6 +1021,17 @@ fn mode_name(m: RenderMode) -> &'static str {
     }
 }
 
+/// The F5 rear mirror's rectangle in the window (x, y, w, h pixels): a strip at the top middle under the toolbar.
+fn mirror_rect(size: (u32, u32), bar_h: f32) -> [f32; 4] {
+    let (w, h) = (size.0 as f32 * 0.25, size.1 as f32 * 0.08);
+    [(size.0 as f32 - w) * 0.5, 8.0 + bar_h, w, h]
+}
+
+/// Gizmo labels hide beyond the main view's far distance, as the scene does (None with the debug unlimited distance).
+fn label_far(view_distance: f32, view: &View, cam: &Camera) -> Option<f32> {
+    (!view.debug.unlimited).then(|| far_distance(view_distance, view, cam))
+}
+
 fn telemetry(fps: Option<f32>, track: u32, cam: &Camera, picker: &Picker, hit: Option<Hit>, sess: Option<&Session>) -> Telem {
     let xyz = |v: Vec3| {
         let g = game(v);
@@ -936,6 +1142,7 @@ enum Act {
     /// car = index + 1 (menu only)
     Car,
     MenuBar,
+    Transport,
     /// View > Show > Solid: opaque panels, no scene frost (#395)
     SolidUi,
     /// ghost view window open / closed, next camera, camera `PoseCam::MODES[i]`, clear the ghost
@@ -956,14 +1163,25 @@ enum Act {
     WorldNew,
     /// REMASTER the cars rebuilt from their body recipes (#183)
     ReloadCars,
+    /// REMASTER (#292): the followed car's generated body to `Exports/carNN.obj`
+    ExportBody,
     /// the followed car drawn with the other model, original <-> generated
     SwapMesh,
     /// Cine editor (#152): a static camera / a path key at the free camera, the preview's next mode, a shot of the
     /// selected camera at the clock
     CineAddCam,
+    CineGizmo(fill_gizmo::Mode),
     CineAddKey,
     CinePreview,
+    CineSave,
     CineCut,
+    CineUndo,
+    CineRedo,
+    /// Ctrl+Z / Ctrl+Y: the dock's edits, or the Cine sequence's (`App::act`)
+    Undo,
+    Redo,
+    /// Space: the command search (#436, `command.rs`)
+    Command,
 }
 
 /// One key binding: the dispatch and the menu bar's shortcut texts both come from `BINDS`.
@@ -1032,6 +1250,7 @@ impl Bind {
             Act::Track => "track",
             Act::Car => "car",
             Act::MenuBar => "toolbar",
+            Act::Transport => "transport bar",
             Act::SolidUi => "solid panels",
             Act::GhostWindow => "ghost view window",
             Act::GhostCam => "ghost view: next camera",
@@ -1039,13 +1258,22 @@ impl Bind {
             Act::GhostFollow => "ghost view: follow",
             Act::GhostClear => "clear ghost",
             Act::CineAddCam => "cine: camera here",
+            Act::CineGizmo(fill_gizmo::Mode::Rotate) => "cine: rotate gizmo (the camera's own axes)",
+            Act::CineGizmo(_) => "cine: move gizmo",
             Act::CineAddKey => "cine: path key here",
             Act::CinePreview => "cine: preview off / on air / selected",
+            Act::CineSave => "cine: save the sequence",
             Act::CineCut => "cine: cut to the selected camera",
+            Act::CineUndo => "cine: undo",
+            Act::CineRedo => "cine: redo",
+            Act::Undo => "undo (the dock's edits, or the Cine sequence)",
+            Act::Redo => "redo",
+            Act::Command => "command search",
             Act::SaveRun => "save run",
             Act::OpenRun => "open run",
             Act::WorldToggle => "world editor",
             Act::ReloadCars => "reload car recipes",
+            Act::ExportBody => "export car body (.obj)",
             Act::SwapMesh => "swap mesh (original / generated)",
             Act::WorldNew => "new world piece",
             Act::World(c) => match c {
@@ -1143,9 +1371,11 @@ const BINDS: &[Bind] = &[
     bind_mod(SHIFT, &[K::F4], "Shift+F4", Ctx::Any, Act::WireframeBack),
     bind(&[K::F5], "F5", Ctx::Any, Act::Mirror),
     bind(&[K::Backslash], "\\", Ctx::Any, Act::MenuBar),
+    bind_mod(SHIFT, &[K::Backslash], "Shift+\\", Ctx::Any, Act::Transport),
     bind(&[K::KeyY], "Y", Ctx::Any, Act::GhostWindow),
     bind_mod(SHIFT, &[K::KeyY], "Shift+Y", Ctx::Any, Act::GhostCam),
     bind(&[K::Escape], "Esc", Ctx::Any, Act::Escape),
+    bind(&[K::Space], "Space", Ctx::Any, Act::Command),
     // fill editor (12-world-fill 12.5): Ctrl / Ctrl+Shift keep the single keys free
     bind_mod(CTRL, &[K::KeyE], "Ctrl+E", Ctx::Any, Act::WorldToggle),
     bind_mod(CTRL | SHIFT, &[K::KeyR], "Ctrl+Shift+R", Ctx::Any, Act::ReloadCars),
@@ -1153,6 +1383,14 @@ const BINDS: &[Bind] = &[
     bind_mod(CTRL, &[K::KeyK], "Ctrl+K", Ctx::Any, Act::CineAddCam),
     bind_mod(CTRL | SHIFT, &[K::KeyK], "Ctrl+Shift+K", Ctx::Any, Act::CineAddKey),
     bind_mod(CTRL, &[K::KeyP], "Ctrl+P", Ctx::Any, Act::CinePreview),
+    // the world editor's own Ctrl+S (Ctx::World) wins while it is open
+    bind_mod(CTRL, &[K::KeyS], "Ctrl+S", Ctx::Any, Act::CineSave),
+    // the world editor's own Ctrl+Z / Ctrl+Y (Ctx::World) win while it is open
+    bind_mod(CTRL, &[K::KeyZ], "Ctrl+Z", Ctx::Any, Act::Undo),
+    bind_mod(CTRL, &[K::KeyY], "Ctrl+Y", Ctx::Any, Act::Redo),
+    bind_mod(CTRL | SHIFT, &[K::KeyZ], "Ctrl+Shift+Z", Ctx::Any, Act::Redo),
+    bind_mod(CTRL, &[K::KeyW], "Ctrl+W", Ctx::Any, Act::CineGizmo(fill_gizmo::Mode::Move)),
+    bind_mod(CTRL, &[K::KeyT], "Ctrl+T", Ctx::Any, Act::CineGizmo(fill_gizmo::Mode::Rotate)),
     bind_mod(CTRL, &[K::KeyS], "Ctrl+S", Ctx::World, Act::World(Cmd::Save)),
     bind_mod(CTRL, &[K::KeyR], "Ctrl+R", Ctx::World, Act::World(Cmd::Reload)),
     bind_mod(CTRL, &[K::KeyZ], "Ctrl+Z", Ctx::World, Act::World(Cmd::Undo)),
@@ -1166,7 +1404,7 @@ const BINDS: &[Bind] = &[
     bind_mod(CTRL, &[K::KeyW], "Ctrl+W", Ctx::World, Act::World(Cmd::Gizmo(fill_gizmo::Mode::Move))),
     bind_mod(CTRL, &[K::KeyT], "Ctrl+T", Ctx::World, Act::World(Cmd::Gizmo(fill_gizmo::Mode::Rotate))),
     bind_mod(CTRL, &[K::KeyB], "Ctrl+B", Ctx::World, Act::World(Cmd::Gizmo(fill_gizmo::Mode::Scale))),
-    bind_mod(CTRL, &[K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6], "Ctrl+1-6", Ctx::World, Act::WorldNew),
+    bind_mod(CTRL, &[K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9, K::Digit0], "Ctrl+1-0", Ctx::World, Act::WorldNew),
     bind(&[K::Enter, K::NumpadEnter], "Enter", Ctx::World, Act::World(Cmd::Finish)),
     bind(&[K::Backspace], "Backspace", Ctx::World, Act::World(Cmd::Back)),
     bind_mod(CTRL, &[K::PageUp], "Ctrl+PgUp", Ctx::World, Act::World(Cmd::Step(-1))),
@@ -1247,12 +1485,38 @@ fn upload_preview(gpu: &Gpu, assets: &mut Assets, slot: Rect, s: &scene::Scene, 
     }
 }
 
+/// `--car-states FILE` (#275, `re-notes/tools/pixmatch.py`): one line per grid slot, `slot x y z m0..m8 vx vy vz wx wy wz
+/// ext0..ext3 steer` as a trace row of `orig_peek.py` (model origin, rotation rows, body-frame velocities, spring extensions);
+/// `#` starts a comment. Set after the shot's sim seconds, with no step afterwards.
+fn set_car_states(ss: &mut Session, path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("--car-states {}: {e}", path.display()))?;
+    for (ln, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bad = || format!("--car-states line {}: slot x y z m0..m8 vx vy vz wx wy wz ext0..ext3 steer", ln + 1);
+        let v: Vec<f32> = line.split_whitespace().map(|c| c.parse()).collect::<Result<_, _>>().map_err(|_| bad())?;
+        if v.len() != 24 {
+            return Err(bad());
+        }
+        let v3 = |i: usize| Vec3::new(v[i], v[i + 1], v[i + 2]);
+        let slot = v[0] as usize;
+        let r = ss.race.racers.get_mut(slot).ok_or_else(|| format!("--car-states line {}: no slot {slot}", ln + 1))?;
+        r.car.set_traced_pose(v3(1), glam::Mat3::from_cols(v3(4), v3(7), v3(10)), v3(13), v3(16), None);
+        r.car.wheel_ext = [v[19], v[20], v[21], v[22]];
+        r.car.steer_smooth = v[23];
+        ss.race.sync_view_pose(slot);
+    }
+    Ok(())
+}
+
 fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     // a ghost brings its own track and car along (its meshes draw it)
     let mut ghost = a.ghost.as_ref().map(|p| ViewerGhost::load(&a.root, p)).transpose()?;
     let run = a.replay.as_ref().map(|p| Recording::load(p)).transpose()?;
     // --cine FILE --cine-edit (#152): the sequence's race in the editor, its clock at --at-time
-    let cine_file = if a.cine_edit {
+    let mut cine_file = if a.cine_edit {
         let p = cine_edit::resolve(&a.root, a.cine.as_deref().ok_or("--cine-edit needs --cine FILE")?);
         let (q, warns) = cine_edit::open(&p)?;
         for w in &warns {
@@ -1262,6 +1526,8 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     } else {
         None
     };
+    // the sequence's race first: a `Recording` sets its track and cars (#423)
+    let mut cine_race = cine_file.as_mut().map(|(q, _)| motorview::cine_render::race(&a.root, &mut q.race, q.fps, a.view().mode == RenderMode::Remaster)).transpose()?;
     let (track, car) = match (&run, &ghost, &cine_file) {
         (_, _, Some((q, _))) => (q.race.track, q.race.cars.last().copied().unwrap_or(1)),
         (Some(r), _, _) => (r.header.track, run_car(r)),
@@ -1269,17 +1535,18 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         _ => (a.track, a.car),
     };
     // --paint: the followed car's slot (the last without --focus, `Session::with_field`)
-    let paint = a.paint.map(|c| (a.focus.unwrap_or(drive::lineup(car).len() - 1), scene::CarPaint { colours: c, finish: a.car_finish }));
+    let lineup = a.lineup.clone().unwrap_or_else(|| drive::lineup(car));
+    let paint = a.paint.map(|c| (a.focus.unwrap_or(lineup.len() - 1), scene::CarPaint { colours: c, finish: a.car_finish }));
     let (s, mut sess) = match (&run, &cine_file) {
-        (_, Some((q, _))) => {
-            let (s, ss) = motorview::cine_render::race(&a.root, &q.race, q.fps, a.view().mode == RenderMode::Remaster)?;
+        (_, Some(_)) => {
+            let (s, ss) = cine_race.take().ok_or("no cine race")?;
             (s, Some(ss))
         }
         (Some(r), _) => {
             let (s, ss, _) = load_run(&a.root, r)?;
             (s, Some(ss))
         }
-        (None, None) => load(&a.root, track, car, false, a.difficulty, paint.as_slice()).ok_or("could not load track")?,
+        (None, None) => load(&a.root, track, &lineup, false, a.difficulty, paint.as_slice()).ok_or("could not load track")?,
     };
     // a recorded run shows `--seek S` (else `--sim-seconds`); a fresh race is stepped that long
     let at = if run.is_some() { a.seek.unwrap_or(a.sim_seconds) } else { a.sim_seconds };
@@ -1291,9 +1558,14 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         ed.set(q, Some(p));
         ed.restart(race);
         ed.preview = a.cine_preview;
+        ed.gizmo = a.cine_gizmo;
         ed.sel = a.cine_sel.min(ed.seq.as_ref().map_or(0, |q| q.cameras.len().saturating_sub(1)));
         ed
     });
+    // `--menu cine` alone: the editor without a sequence, so its shelf (New / Open… / Save / Close, "no sequence") can be shot
+    if cine.is_none() && a.menu == Some(RTab::Cine) {
+        cine = Some(CineEdit::default());
+    }
     if let Some(ss) = sess.as_mut() {
         ss.cam = a.cam;
         if let Some(f) = a.focus.filter(|&f| f < ss.race.racers.len()) {
@@ -1302,8 +1574,11 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         ss.fx.remaster = a.view().mode == motorview::render::RenderMode::Remaster;
         let dt = 1.0 / 60.0;
         if let Some(ed) = cine.as_mut() {
-            // frame by frame from 0, as the render: the director's cameras have the same history
-            ss.record_timeline();
+            // frame by frame from 0, as the render: the director's cameras have the same history (a recording brings
+            // its own timeline, #423)
+            if !ss.replay {
+                ss.record_timeline();
+            }
             let step = 1.0 / ed.seq.as_ref().map_or(60, |q| q.fps.max(1)) as f32;
             // the editor's clock stops at the sequence's End
             let to = a.at_time.unwrap_or(0.0).min(ed.seq.as_ref().and_then(|q| q.end).unwrap_or(f32::MAX));
@@ -1326,6 +1601,9 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             }
             if let Some(to) = a.seek {
                 ss.seek(to as f64);
+            }
+            if let Some(p) = &a.car_states {
+                set_car_states(ss, p)?;
             }
         }
         println!("{}", ss.hud());
@@ -1365,6 +1643,8 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     };
     let side = fwd.cross(Vec3::Y);
     let cam = match (a.eye, a.at) {
+        // the original's camera block (#275); APPROX: the far plane stays ours (ViewDistance), not its cam_far
+        _ if a.cam_pose.is_some() => a.cam_pose.map(|(e, rot, zoom)| Camera::from_rot(e, rot, zoom, 1.0)).unwrap_or_else(|| Camera::new(Vec3::ZERO, 0.0, 0.0)),
         // game -> view space: negate z
         (Some(e), Some(t)) => {
             let d = ((t - e) * Vec3::new(1.0, 1.0, -1.0)).normalize_or(Vec3::NEG_Z);
@@ -1390,6 +1670,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
     let cam = preview.map_or(cam, |p| p.0);
     let mut dbg = DebugState::new(a.layers, a.panel);
     dbg.passes = a.hide;
+    dbg.paused = a.paused;
     // --menu / --tune: the menu bar and the F11 window over the shot (laid out before the
     // frame borrows the session)
     let mut tune = a.tune.or(a.world_edit.then_some(Page::World)).map_or_else(Tune::default, Tune::shown);
@@ -1397,30 +1678,78 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         tune.set_search(t);
     }
     tune.loaded(sess.as_ref());
+    if !a.tune_set.is_empty() {
+        let cur = Snap::now(sess.as_ref(), s.car_colours.clone());
+        let mut to = cur.clone();
+        let focus = sess.as_ref().map_or(0, |ss| ss.focus);
+        for (k, v) in &a.tune_set {
+            if !to.set_slug(focus, k, *v) {
+                eprintln!("--tune-set: no row {k}");
+            }
+        }
+        to.apply(&cur, sess.as_mut());
+    }
     let mut world = WorldEdit::default();
     if a.world_edit {
         world.begin(&a.root, track);
+        world.set_objects(&s);
         world.sel = (!world.file.pieces.is_empty()).then_some(0);
         if let Some((mode, n)) = a.fill_gizmo {
             world.mode = mode;
             world.sel = (!world.file.pieces.is_empty()).then(|| n.min(world.file.pieces.len() - 1));
         }
+        if let Some(sel) = a.world_select {
+            world.sel = sel.filter(|_| !world.file.pieces.is_empty()).map(|n| n.min(world.file.pieces.len() - 1));
+        }
+        if let Some((x, z)) = a.world_capture {
+            world.capture_top(&s, x, z);
+            world.refresh_capture(&s);
+        }
+        if let Some(n) = a.world_stamp {
+            world.select_stamp(Some(n));
+            world.refresh_capture(&s);
+        }
+        if let Some(n) = a.world_water {
+            world.select_water(Some(n));
+        }
+        if let Some(n) = a.world_grass {
+            world.select_grass(Some(n));
+        }
         let meshed = motorview::procgen::fill::mesh_pieces(&world.file, &s);
         world.skirt_base = meshed.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
         world.hill_crest = meshed.hills;
         let centre = sess.as_ref().map(|ss| TrackCache::new(&ss.race).centre).unwrap_or_default();
-        world.run(Cmd::Holes, &s, &centre);
+        if a.world_holes {
+            world.run(Cmd::Holes, &s, &centre);
+        }
         if let Some(k) = a.world_tool {
             world.run(Cmd::Start(k), &s, &centre);
         }
     }
     let mut base = a.view();
+    // #427: the preview shows the shot's own graphics mode
+    if let Some(m) = cine.as_ref().and_then(CineEdit::preview_mode) {
+        base.mode = m;
+        if let Some(ss) = sess.as_mut() {
+            ss.fx.remaster = m == RenderMode::Remaster;
+        }
+    }
     if a.world_edit {
         (base.mode, base.distance) = (RenderMode::Remaster, View::MAX_DISTANCE);
     }
-    let view = dbg.passes.view(&View { show_line: preview.is_none(), ..base });
+    let view = dbg.passes.view(&View { show_line: a.racing_line && preview.is_none(), ..base });
     gpu.update_local_light(&view);
     let local_status = gpu.local_status();
+    // #438: a dissolve on air: the outgoing camera's scene too, laid out with the session following its car (as the render)
+    let dis = cine.as_ref().and_then(CineEdit::preview_dissolve).and_then(|d| {
+        let dview = dbg.passes.view(&View { mode: d.mode.unwrap_or(a.view().mode), show_line: false, ..base });
+        let ss = sess.as_mut()?;
+        let keep = (ss.focus, ss.cam);
+        (ss.focus, ss.cam) = (d.slot, if d.hide { CamMode::InCar } else { CamMode::Chase });
+        let p = dbg.passes.parts(Some(ss), &d.cam, &dview);
+        (ss.focus, ss.cam) = keep;
+        Some((d, dview, p))
+    });
     let mut parts = dbg.passes.parts(sess.as_ref(), &cam, &view);
     if let (Some(g), Some(ss)) = (&ghost, &sess) {
         parts.ghost = g.models(ss);
@@ -1439,6 +1768,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         telem: a.overlay.then(|| telemetry(None, track, &cam, &picker, hit, sess.as_ref())),
         panel: dbg.panel(sess.as_ref()),
         labels: g.labels,
+        label_far: label_far(s.view_distance, &view, &cam),
         ..Default::default()
     };
     if a.wireframe.on() {
@@ -1466,35 +1796,65 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         text.right.push(lines);
         layer = layer.or(l);
     }
-    let mut gui = (a.tune.is_some() || a.sim_toast.is_some() || a.menu.is_some() || a.world_edit || a.confirm_exit || !text.is_empty()).then(|| Gui::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, None));
+    let mut gui = (a.tune.is_some() || a.command.is_some() || a.changes || a.sim_toast.is_some() || a.menu.is_some() || a.world_edit || a.confirm_exit || a.confirm_switch.is_some() || a.confirm_cine.is_some() || a.confirm_world || cine.as_ref().is_some_and(|c| c.preview_size().is_some()) || !text.is_empty()).then(|| Gui::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, None));
     let mut tview = a.view();
+    if let Some(m) = cine.as_ref().and_then(CineEdit::preview_mode) {
+        tview.mode = m;
+    }
     let mut bar_h = 0.0;
     let mut pane_w = 0.0;
     let mut left_w = 0.0;
     let mut status_h = 0.0;
     let mut shot_wire = a.wireframe;
+    let mut shot_changes: Vec<Change> = Vec::new();
+    let mut shot_cmd = a.command.as_deref().map(command::CommandBox::shot);
+    let mut shot_bar_rows = Vec::new();
+    // #438: the Cine preview's frame (window pixels), laid out with the panels
+    let mut shot_frame = None::<[f32; 4]>;
     let painted = gui.as_mut().map(|g| {
         g.run_headless(a.size, |ui| {
             glass_ui::begin(ui.ctx(), a.solid_ui);
-            if a.tune.is_some() || a.menu.is_some() || a.world_edit {
+            // first, so the panels and the toolbar lie over the preview's frame
+            let slots = cine.as_ref().and_then(CineEdit::preview_size).map(|_| overlay::frame_slots(ui.ctx()));
+            if a.tune.is_some() || a.menu.is_some() || a.world_edit || a.changes || a.confirm_changes || a.confirm_switch.is_some() {
             let mut st = RibbonState::default();
             if let Some(tab) = a.menu {
                 st.tab = tab;
-                st.pick = a.ribbon_pick;
+                st.pick = a.ribbon_pick.clone();
                 if let Some(name) = &a.ribbon_flyout {
                     if !st.open_flyout(name) {
                         eprintln!("--ribbon-flyout: no group {name} on the {} tab", tab.name());
                     }
                 }
-                let mut m = Ribbon { st: &mut st, tune: &mut tune, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, solid_ui: a.solid_ui, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
+                let mut m = Ribbon { st: &mut st, tune: &mut tune, shown: tview.mode, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, solid_ui: a.solid_ui, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
                 bar_h = m.bar(ui) * ui.ctx().pixels_per_point();
+                if shot_cmd.as_ref().is_some_and(command::CommandBox::wants_harvest) {
+                    shot_bar_rows = m.harvest(ui);
+                    tune.request_harvest();
+                }
             }
             let textures = &s.world_textures_sorted;
             let ppp = ui.ctx().pixels_per_point();
             // the World palette and options strip float under the toolbar
             let card_top = bar_h / ppp + 2.0;
-            let sb = status::StatusBar { hint: world.hint(a.world_edit, false, false), note: &world.note, tag: (a.world_edit && world.unsaved()).then(|| "unsaved".to_string()), fps: 0.0, paused: dbg.paused, speed: dbg.time_scale(), mode: mode_name(tview.mode), job: None };
-            status_h = sb.show(ui) * ui.ctx().pixels_per_point();
+            // #434: the tuning changes (the paint of `--paint` as drawn)
+            let own = s.car_colours.clone();
+            let mut drawn = own.clone();
+            if let Some((k, p)) = &paint {
+                if let Some(d) = drawn.get_mut(*k) {
+                    *d = p.colours;
+                }
+            }
+            let changes = tune.changes(&Snap::now(sess.as_ref(), drawn), &own, &tune_changes::groups(sess.as_ref()));
+            shot_changes.clone_from(&changes);
+            let sb = status::StatusBar { hint: world.hint(a.world_edit, false, false), note: &world.note, tag: (a.world_edit && world.unsaved()).then(|| "unsaved".to_string()), fps: 0.0, paused: dbg.paused, speed: dbg.time_scale(), mode: mode_name(tview.mode), job: None, changes: unsaved_count(&changes), changes_open: a.changes };
+            let shown_sb = sb.show(ui);
+            let strip_h = if !st.no_transport && transport::Transport::wanted(sess.as_ref(), cine.as_ref()) {
+                transport::Transport { dbg: &mut dbg, sess: sess.as_ref(), cine: cine.as_mut(), scrub: &mut 0, seek: &mut None, acts: &mut Vec::new() }.show(ui)
+            } else {
+                0.0
+            };
+            status_h = (shown_sb.h + strip_h) * ui.ctx().pixels_per_point();
             if a.world_edit {
                 left_w = palette::palette(ui, &mut world, card_top, status_h / ppp) * ppp;
             }
@@ -1515,7 +1875,10 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             };
             let focus = sess.as_ref().map(|ss| ss.focus);
             let paint = focus.and_then(|f| s.car_colours.get(f)).map(|&own| (paint.filter(|p| Some(p.0) == focus).map_or(own, |p| p.1.colours), own));
-            let w = tune.pane(ui, sess.as_mut(), Targets { view: &mut tview, track_fog: Some((track, s.look.fog)), track_sky: s.hdri.as_ref().map(|h| (track, h.dome())), paint, local_status, probe_gizmos: None, world_sub }, &mut page);
+            let w = tune.pane(ui, sess.as_mut(), Targets { shown: tview.mode, mode_key: key_name(Act::Mode), view: &mut tview, track_fog: Some((track, s.look.fog)), track_sky: s.hdri.as_ref().map(|h| (track, h.dome())), paint, model: focus.and_then(|f| s.car_models.get(f)).and_then(Option::as_ref), local_status, probe_gizmos: None, world_sub, time_scale: &mut dbg.scale }, &mut page);
+            if let (Some(c), Some(dock)) = (shot_cmd.as_mut(), tune.take_harvest()) {
+                c.harvest(&shot_bar_rows, &dock);
+            }
             pane_w = w * ui.ctx().pixels_per_point();
             if a.world_edit {
                 palette::options(ui, &mut world, textures, card_top, left_w / ppp, a.size.0 as f32 / ppp - left_w / ppp - pane_w / ppp - 12.0);
@@ -1523,15 +1886,53 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
             if let Some(paused) = a.sim_toast {
                 status::sim_toast(ui.ctx(), paused, 0.5, (left_w / ppp, a.size.0 as f32 / ppp - pane_w / ppp), bar_h / ppp + 10.0);
             }
+            if let (true, Some(chip)) = (a.changes, &shown_sb.chip) {
+                overlay::changes_card(ui.ctx(), &changes, changes_anchor(ui.ctx(), chip.rect, shown_sb.h));
             }
-            overlay::paint(ui.ctx(), a.size, &cam, view.fov_x, &text, a.overlay, (bar_h, pane_w, status_h, left_w));
-            if a.confirm_exit {
-                let file = (a.confirm_unsaved || (a.world_edit && world.unsaved())).then(|| format!("track {track}'s fill"));
-                overlay::exit_dialog(ui.ctx(), file.as_deref());
+            }
+            let mut pcam = cam;
+            if let (Some(ed), Some(slots)) = (cine.as_ref(), &slots) {
+                if let Some(video) = ed.preview_size() {
+                    let rect = motorview::cine::preview_frame((a.size.0 as f32, a.size.1 as f32), (bar_h, pane_w, status_h, left_w), video, overlay::FRAME_GAP * ui.ctx().pixels_per_point());
+                    overlay::preview_frame(ui.ctx(), slots, a.size, rect, ed.preview_letterbox(), ed.preview_fade());
+                    pcam = motorview::cine::preview_cam(pcam, rect, (a.size.0 as f32, a.size.1 as f32));
+                    shot_frame = Some(rect);
+                }
+            }
+            overlay::paint(ui.ctx(), a.size, &pcam, view.fov_x, &text, a.overlay, (bar_h, pane_w, status_h, left_w));
+            if let Some(c) = shot_cmd.as_mut() {
+                c.show(ui.ctx(), command::Now { free: false, world: a.world_edit });
+            }
+            if a.confirm_world {
+                overlay::requester(ui.ctx(), &make_ask(AskKind::WorldClose, Some(format!("track {track}'s fill")), None, &[]));
+            } else if a.confirm_cine.is_some() {
+                // the Cine sequence has unsaved edits: its file name, else the name a new one gets
+                let name = a.cine.as_ref().and_then(|p| p.file_name()).map_or_else(|| "track01.cine".to_string(), |n| n.to_string_lossy().into_owned());
+                let kind = match a.confirm_cine.as_deref() {
+                    Some("close") => AskKind::CineClose,
+                    Some("new") => AskKind::CineNew,
+                    Some("open") => AskKind::CineOpen(PathBuf::from("other.cine")),
+                    _ => AskKind::Exit,
+                };
+                overlay::requester(ui.ctx(), &make_ask(kind, None, Some(name), &[]));
+            } else if a.confirm_exit || a.confirm_switch.is_some() {
+                let fill = (a.confirm_unsaved || (a.world_edit && world.unsaved())).then(|| format!("track {track}'s fill"));
+                let (kind, fill) = match a.confirm_switch {
+                    Some(true) => (AskKind::Track(track % 8 + 1), None),
+                    Some(false) => (AskKind::Car(car % 10 + 1), None),
+                    None => (AskKind::Exit, fill),
+                };
+                let ask = make_ask(kind, fill, None, if a.confirm_changes || a.confirm_switch.is_some() { &shot_changes } else { &[] });
+                overlay::requester(ui.ctx(), &ask);
             }
         })
     });
+    // #438: zoomed out to the video's frame while previewing, the lens shifted to it (#441; the scene's detail levels were
+    // picked at the camera's own zoom [APPROX])
+    let win = (a.size.0 as f32, a.size.1 as f32);
+    let cam = shot_frame.map_or(cam, |r| motorview::cine::preview_cam(cam, r, win));
     let mut f = parts.frame();
+    f.dof = cine.as_ref().and_then(CineEdit::preview_dof);
     f.wire = a.wireframe;
     f.debug_lines = &g.lines;
     f.debug_xray = &g.xray;
@@ -1556,6 +1957,18 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         let ui = text.preview.then(|| overlay::preview(&assets, a.size, &text, status_h));
         gpu.offscreen(a.size.0, a.size.1, |g, enc, target, depth| {
             g.draw(enc, target, depth, a.size, &cam, &view, &f);
+            // #438: the dissolve on air, blended under the camera cut to (as `App::render`)
+            if let Some((d, dview, dparts)) = &dis {
+                g.queue.submit([std::mem::replace(enc, g.device.create_command_encoder(&Default::default())).finish()]);
+                g.select_view(PREVIEW_DISSOLVE_VIEW);
+                let (snap, sdepth) = (g.snapshot_target(a.size.0, a.size.1), g.depth_view(a.size.0, a.size.1));
+                let dcam = shot_frame.map_or(d.cam, |r| motorview::cine::preview_cam(d.cam, r, win));
+                let df = Frame { dof: d.dof, wire: a.wireframe, ..dparts.frame() };
+                g.draw(enc, &snap.view, &sdepth, a.size, &dcam, dview, &df);
+                g.queue.submit([std::mem::replace(enc, g.device.create_command_encoder(&Default::default())).finish()]);
+                g.select_view(0);
+                g.draw_dissolve(enc, target, &snap, f64::from(1.0 - d.k));
+            }
             if let Some((canvas, verts)) = &ui {
                 g.draw_ui(enc, target, a.size, *canvas, verts, None, None);
             }
@@ -1687,8 +2100,11 @@ struct App {
     mirror: bool,
     /// free camera owns the mouse (hidden, locked or confined to the window)
     grabbed: bool,
-    confirm_exit: bool,
-    /// the exit dialog's Exit button was clicked
+    /// the requester is up: exit, or a car / track switch that would lose tuning changes (#434)
+    ask: Option<Ask>,
+    /// Open…'s file dialog is up (#438): its answer comes here
+    cine_dialog: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    /// the requester's answer ends the viewer
     exit_now: bool,
     /// Solid panels (View > Show, `--solid-ui`): opaque glass, no scene frost
     solid_ui: bool,
@@ -1721,7 +2137,11 @@ struct App {
     preview: Option<usize>,
     /// F11 tuning window (egui) and its host
     tune: Tune,
+    /// the status bar's tuning Changes card is open (#434)
+    changes_open: bool,
     ribbon: RibbonState,
+    /// Space: the command search (#436)
+    command: command::CommandBox,
     inst: Option<wgpu::Instance>,
     adapter: Option<wgpu::Adapter>,
     ghost: Option<ViewerGhost>,
@@ -1731,6 +2151,11 @@ struct App {
     /// the camera a new ghost window starts with
     ghost_cam: CamMode,
     ghost_follow: Follow,
+    /// #438: the Cine preview's frame this egui pass laid out (window pixels; the view is zoomed out to it, `shown_cam`)
+    frame_rect: Option<[f32; 4]>,
+    /// #438: the camera the last preview dissolve frame came from, and the window-sized picture it was drawn into (with its depth)
+    dis_from: Option<usize>,
+    dis_snap: Option<(motorview::render::Snapshot, wgpu::TextureView)>,
     /// Rewind (-1) / Forward (1) held in the ribbon this frame
     scrub: i8,
     /// timeline slider position asked for this frame (sim seconds)
@@ -1774,7 +2199,43 @@ struct App {
     cine: CineEdit,
 }
 
+/// #438: the view slot (`Gpu::select_view`) the Cine preview's outgoing dissolve camera keeps its TAA and blur history in
+/// (0 = the window, 1 = the ghost window).
+const PREVIEW_DISSOLVE_VIEW: usize = 4;
+
 impl App {
+    /// The graphics view drawn: `self.view`, but while a cine camera is previewed the mode of the shot under the clock
+    /// wins when it has one (#427; F9 / the flags decide for shots without a `Mode`).
+    fn shown_view(&self) -> View {
+        View { mode: self.cine.preview_mode().unwrap_or(self.view.mode), ..self.view }
+    }
+
+    /// The camera the view is drawn, projected and picked with: `self.cam`, but while a Cine camera is previewed zoomed out
+    /// and its lens shifted so the video's frame fits beside the panels (#438, #441, `cine::preview_cam`). `self.cam` keeps the camera's own zoom (Add key reads it).
+    fn shown_cam(&self) -> Camera {
+        let win = self.config.as_ref().map_or((1.0, 1.0), |c| (c.width as f32, c.height as f32));
+        match self.frame_rect.filter(|_| self.cine.preview_cam().is_some()) {
+            Some(r) => motorview::cine::preview_cam(self.cam, r, win),
+            None => self.cam,
+        }
+    }
+
+    /// #438: the on-air preview's dissolve this frame: the outgoing camera (zoomed out as `shown_cam`), the view it is drawn in
+    /// (the graphics mode before the cut) and its scene, laid out with the session following its car as the render does.
+    fn preview_dissolve(&mut self, size: (u32, u32)) -> Option<(cine_edit::PreviewDissolve, Camera, View, FrameParts)> {
+        let d = self.cine.preview_dissolve()?;
+        let r = self.frame_rect?;
+        let cam = motorview::cine::preview_cam(d.cam, r, (size.0 as f32, size.1 as f32));
+        let mut view = self.dbg.passes.view(&View { mode: d.mode.unwrap_or(self.view.mode), ..self.view });
+        view.show_line = false;
+        let ss = self.sess.as_mut()?;
+        let keep = (ss.focus, ss.cam);
+        (ss.focus, ss.cam) = (d.slot, if d.hide { CamMode::InCar } else { CamMode::Chase });
+        let parts = self.dbg.passes.parts(Some(ss), &cam, &view);
+        (ss.focus, ss.cam) = keep;
+        Some((d, cam, view, parts))
+    }
+
     fn switch(&mut self, track: u32, car: u32) {
         if self.world.open && track != self.track && self.world.unsaved() {
             self.note("fill editor: Ctrl+S saves, Ctrl+R discards, before switching track");
@@ -1784,7 +2245,7 @@ impl App {
             self.paints.clear();
         }
         let paint: Vec<_> = self.paints.iter().map(|(&k, &c)| (k, scene::CarPaint { colours: c, finish: self.args.car_finish })).collect();
-        let Some((s, sess)) = load(&self.args.root, track, car, true, self.args.difficulty, &paint) else { return };
+        let Some((s, sess)) = load(&self.args.root, track, &drive::lineup(car), true, self.args.difficulty, &paint) else { return };
         self.install(track, car, drive::lineup(car), s, sess);
     }
 
@@ -1810,8 +2271,12 @@ impl App {
         self.body_watch = self
             .cars
             .iter()
-            .map(|&c| {
-                let p = motorview::procgen::bodyfile::path(&self.args.root, c);
+            // REMASTER (#478): the model file too, whether it exists yet or not
+            .flat_map(|&c| {
+                let [glb, gltf] = motorview::procgen::carmodel::candidates(&self.args.root, c);
+                [motorview::procgen::bodyfile::path(&self.args.root, c), motorview::procgen::bodyfix::path(&self.args.root, c), glb, gltf]
+            })
+            .map(|p| {
                 let m = mtime(&p);
                 (p, m)
             })
@@ -1845,9 +2310,27 @@ impl App {
         if let Some(n) = self.cine.poll_job() {
             self.note(n);
         }
+        self.poll_cine_dialog();
         let mut load = false;
         for req in std::mem::take(&mut self.cine.reqs) {
+            // #438 a step that drops the sequence asks first while it has unsaved edits (one question at a time)
+            if matches!(req, Req::New | Req::Open(_) | Req::Close) {
+                if self.ask.is_some() {
+                    break;
+                }
+                if let Some(name) = self.cine.unsaved_name() {
+                    let kind = match req {
+                        Req::New => AskKind::CineNew,
+                        Req::Open(p) => AskKind::CineOpen(p),
+                        _ => AskKind::CineClose,
+                    };
+                    self.ask = Some(make_ask(kind, None, Some(name), &[]));
+                    break;
+                }
+            }
             match req {
+                Req::Close => self.cine.close(),
+                Req::Pick => self.pick_cine(),
                 Req::Open(p) => match cine_edit::open(&p) {
                     Ok((seq, warns)) => {
                         for w in &warns {
@@ -1882,8 +2365,44 @@ impl App {
                 r => self.cine.edit(r, &self.cam, self.sess.as_ref()),
             }
         }
+        // #348 one undo step per finished edit (a drag with the pointer down waits for its release)
+        let held = self.gui.as_ref().is_some_and(|g| g.ctx.input(|i| i.pointer.any_down()));
+        self.cine.settle(held);
         if load {
             self.cine_race();
+        }
+    }
+
+    /// Open…: the system file dialog for a `.cine`, in the Cine folder. It runs on a thread so the viewer keeps drawing;
+    /// the picked file comes back through `poll_cine_dialog` as an `Open` request, which meets the unsaved guard.
+    fn pick_cine(&mut self) {
+        let Some(w) = self.window.clone() else { return };
+        if self.cine_dialog.is_some() {
+            return;
+        }
+        let dir = cine_edit::dir(&self.args.root);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut d = rfd::FileDialog::new().set_title("Open a Cine sequence").add_filter("Cine sequence (.cine)", &["cine", "CINE"]).set_parent(&*w);
+            if dir.is_dir() {
+                d = d.set_directory(&dir);
+            }
+            let _ = tx.send(d.pick_file());
+        });
+        self.cine_dialog = Some(rx);
+    }
+
+    /// The file dialog answered (or its thread ended): a picked file is opened.
+    fn poll_cine_dialog(&mut self) {
+        let Some(rx) = &self.cine_dialog else { return };
+        let p = match rx.try_recv() {
+            Ok(p) => p,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.cine_dialog = None;
+        if let Some(p) = p {
+            self.cine.reqs.push(Req::Open(p));
         }
     }
 
@@ -1891,14 +2410,21 @@ impl App {
     /// goes back to 0, paused, free camera. The camera stays where it is on the same track.
     fn cine_race(&mut self) {
         let Some(seq) = self.cine.seq.as_ref() else { return };
-        let (r, fps) = (seq.race.clone(), seq.fps);
-        if self.world.open && r.track != self.track && self.world.unsaved() {
+        let (mut r, fps) = (seq.race.clone(), seq.fps);
+        if self.world.open && r.track != self.track && self.world.unsaved() && r.recording.is_none() {
             return self.note("fill editor: Ctrl+S saves, Ctrl+R discards, before switching track");
         }
         let remaster = self.view.mode == motorview::render::RenderMode::Remaster;
-        match motorview::cine_render::race(&self.args.root, &r, fps, remaster) {
+        match motorview::cine_render::race(&self.args.root, &mut r, fps, remaster) {
             Ok((s, mut sess)) => {
-                sess.setup = Some(run_setup(&self.args.root, r.track, &r.cars, &sess, r.difficulty));
+                // a recording's frames do not start at the race load: no repro file of them (#423)
+                if !sess.replay {
+                    sess.setup = Some(run_setup(&self.args.root, r.track, &r.cars, &sess, r.difficulty));
+                } else if self.world.open && r.track != self.track && self.world.unsaved() {
+                    return self.note("fill editor: Ctrl+S saves, Ctrl+R discards, before switching track");
+                }
+                // the recorded track and cars show in the editor (and the race is the one loaded)
+                self.cine.set_race(r.clone());
                 let keep = (r.track == self.track).then(|| self.cine.saved.map_or(self.cam, |s| s.2));
                 self.paints.clear();
                 self.install(r.track, r.cars.last().copied().unwrap_or(1), r.cars.clone(), s, Some(sess));
@@ -1928,6 +2454,7 @@ impl App {
         let Some(sess) = self.sess.as_mut() else { return true };
         sess.fx.remaster = remaster;
         self.cine.frame(sess, play);
+        self.cine.listen(&self.args.root, self.args.sound_device.as_deref(), sess, play);
         match self.cine.preview_cam() {
             Some((cam, slot, hide)) => {
                 self.cine.saved.get_or_insert((sess.cam, sess.focus, self.cam));
@@ -2008,6 +2535,21 @@ impl App {
         }
     }
 
+    /// REMASTER (#292): the followed car's generated body, with the recipes as loaded now, to
+    /// `Exports/carNN.obj` in the settings folder (the same file each time: Blender re-imports it).
+    fn export_body(&mut self) {
+        let Some(dir) = ghost::export_dir() else { return self.note("no settings folder to export into") };
+        let car = self.sess.as_ref().and_then(|ss| self.cars.get(ss.focus).copied()).unwrap_or(self.car);
+        let path = dir.join(format!("car{car:02}.obj"));
+        match motorview::procgen::bodyobj::export(&self.args.root, self.track, car, &path) {
+            Ok(m) => {
+                println!("{m}");
+                self.note(m);
+            }
+            Err(e) => self.note(format!("body not exported: {e}")),
+        }
+    }
+
     /// Put the camera in front of a view-space point, `r` its size, looking down at it from
     /// the current heading (free camera, race paused).
     fn look_at(&mut self, c: Vec3, r: f32) {
@@ -2026,7 +2568,12 @@ impl App {
     /// camera; closing puts the view back (in `fill_update`).
     fn fill_toggle(&mut self) {
         if self.world.open {
-            self.world.open = false;
+            // #473: closing would drop the unsaved pieces (reopening reloads the file), so ask first
+            if let Some(fill) = self.unsaved_fill() {
+                self.ask = Some(make_ask(AskKind::WorldClose, Some(fill), None, &[]));
+            } else {
+                self.fill_close();
+            }
             return;
         }
         if self.scene.is_none() {
@@ -2041,6 +2588,17 @@ impl App {
         self.dbg.paused = true;
         self.grab(false);
         self.world.begin(&self.args.root, self.track);
+        if let Some(s) = &self.scene {
+            self.world.set_objects(s);
+        }
+    }
+
+    /// Close the World Editor and drop its dock page.
+    fn fill_close(&mut self) {
+        self.world.open = false;
+        if self.tune.page == Some(Page::World) {
+            self.tune.page = None;
+        }
     }
 
     /// The Sky page's 'save for track': write sky.cfg, then fold the F11 values into the loaded
@@ -2062,20 +2620,33 @@ impl App {
         }
     }
 
-    /// Ctrl+Shift+R or a changed recipe file: the cars rebuilt from their body recipes
-    /// (`bodyfile`, #183) by reloading the scene (0.6 s), the camera staying where it is. A
+    /// Ctrl+Shift+R or a changed recipe or `.fix` file: the cars rebuilt from their body recipes
+    /// (`bodyfile`, #183) and hand fixes (`bodyfix`, #292) by reloading the scene (0.6 s), the camera staying where it is. A
     /// recipe that does not parse is reported in the status bar and nothing changes.
     fn reload_cars(&mut self, manual: bool) {
         for (p, _) in &self.body_watch {
+            // REMASTER (#478): a model file is checked by loading it (one Blender is still writing does not load: the next save retries)
+            if p.extension().is_some_and(|e| e == "glb" || e == "gltf") {
+                if p.is_file() {
+                    if let Err(e) = motorview::procgen::carmodel::load(p) {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.note(format!("{name}: {e}"));
+                        return;
+                    }
+                }
+                continue;
+            }
             let Ok(text) = std::fs::read_to_string(p) else { continue };
-            if let Err(e) = motorview::procgen::bodyfile::from_text(&text) {
+            // REMASTER (#292): a `.fix` is checked with its own parser
+            let checked = if p.extension().is_some_and(|e| e == "fix") { motorview::procgen::bodyfix::parse(&text).map(drop) } else { motorview::procgen::bodyfile::from_text(&text).map(drop) };
+            if let Err(e) = checked {
                 let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 self.note(format!("{name}: {e}"));
                 return;
             }
         }
         self.switch_car(self.car);
-        self.note(if manual { "car recipes reloaded" } else { "car recipe changed: cars reloaded" });
+        self.note(if manual { "car recipes and models reloaded" } else { "car recipe or model changed: cars reloaded" });
     }
 
     /// Properties > Car > Paint: the render scene reloaded with `paints` (0.6 s); unlike `switch`
@@ -2099,6 +2670,9 @@ impl App {
         (self.scene, self.preview) = (Some(s), None);
         if self.world.open {
             self.world.scene_changed();
+            if let Some(s) = &self.scene {
+                self.world.set_objects(s);
+            }
         }
     }
 
@@ -2149,34 +2723,47 @@ impl App {
             for c in cmds {
                 self.world.run(c, s, &centre);
             }
+            // the selected stamp's cut triangles (re-cut only when its box changed)
+            self.world.refresh_capture(s);
         }
         // meshing walks every world vertex: while dragging, at most ~7 times a second
         let ready = (self.world.drag.is_none() && !self.world.piece_dragging() && !self.world.painting()) || self.last_mesh.elapsed().as_millis() > 150;
-        if let (true, true, Some(g), Some(s)) = (self.world.dirty_mesh, ready, self.gpu.as_mut(), &self.scene) {
-            let fill = motorview::procgen::fill::mesh_pieces(&self.world.file, s);
-            g.set_fill(&fill.verts);
-            // the viewport click picks the fill's pieces; the skirt gizmo needs the skirt's centre
-            if let Some(p) = &mut self.picker {
-                p.set_fill(&fill.verts, &fill.pieces);
-            }
-            self.world.skirt_base = fill.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
-            self.world.hill_crest = fill.hills;
-            if self.last_water != self.world.file.water {
-                g.set_water(s, &motorview::procgen::water::build(&self.world.file.water, s));
-                self.last_water = self.world.file.water.clone();
-            }
-            // the grass follows the fill's ground pieces too, so every fill edit re-meshes it
-            g.set_grass(&motorview::procgen::grass::build(&motorview::procgen::grass::track_bodies(&self.world.file, &s.world_textures), s, &fill.verts));
-            self.world.dirty_mesh = false;
-            self.last_mesh = Instant::now();
+        if self.world.dirty_mesh && ready {
+            self.fill_remesh();
         }
+    }
+
+    /// Rebuild what the fill draws (pieces, clouds, picking, water, grass) from the editor's file.
+    fn fill_remesh(&mut self) {
+        let (Some(g), Some(s)) = (self.gpu.as_mut(), &self.scene) else { return };
+        let fill = motorview::procgen::fill::mesh_pieces(&self.world.file, s);
+        // pieces hidden by an eye or a layer are not drawn, picked or grown over with grass (#477); the skirt centre and
+        // the hill crests stay from the whole file: the gizmos of the pieces that show need them
+        let w = &self.world;
+        let (verts, pieces) = motorview::procgen::fill::without_hidden(&fill, &|i| w.piece_hidden(i));
+        g.set_fill(&verts);
+        g.set_clouds(&motorview::procgen::fill::clouds_where(&w.file, &|i| !w.piece_hidden(i)));
+        // the viewport click picks the fill's pieces; the skirt gizmo needs the skirt's centre
+        if let Some(p) = &mut self.picker {
+            p.set_fill(&verts, &pieces);
+        }
+        self.world.skirt_base = fill.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
+        self.world.hill_crest = fill.hills;
+        if self.last_water != self.world.file.water {
+            g.set_water(s, &motorview::procgen::water::build(&self.world.file.water, s));
+            self.last_water = self.world.file.water.clone();
+        }
+        // the grass follows the fill's ground pieces too, so every fill edit re-meshes it
+        g.set_grass(&motorview::procgen::grass::build(&motorview::procgen::grass::track_bodies(&self.world.file, &s.world_textures), s, &verts));
+        self.world.dirty_mesh = false;
+        self.last_mesh = Instant::now();
     }
 
     /// The point under the mouse in game space: the world surface (Shift: its nearest triangle
     /// vertex), else the working-height plane.
     fn fill_cast(&self) -> Option<Vec3> {
         let c = self.config.as_ref()?;
-        let dir = debug::cursor_ray(&self.cam, (c.width, c.height), self.view.fov_x, self.cursor);
+        let dir = debug::cursor_ray(&self.shown_cam(), (c.width, c.height), self.view.fov_x, self.cursor);
         let pk = self.picker.as_ref()?;
         let world = pk.cast(self.cam.pos, dir, 3000.0, &[], &[]);
         // ground the user added (fill pieces) counts as well as the original world
@@ -2202,6 +2789,14 @@ impl App {
     fn fill_press(&mut self) {
         if self.world.drawing() {
             if let (Some(p), Some(s), Some(pk)) = (self.fill_cast(), &self.scene, &self.picker) {
+                if self.world.capture {
+                    // "New stamp": the building under the cursor (the ray's own triangle, not the snapped point's)
+                    let tri = self.config.as_ref().and_then(|c| {
+                        let dir = debug::cursor_ray(&self.shown_cam(), (c.width, c.height), self.view.fov_x, self.cursor);
+                        pk.cast(self.cam.pos, dir, 3000.0, &[], &[]).filter(|h| matches!(h.target, Target::World { .. })).map(|h| h.tri)
+                    });
+                    self.world.set_capture_fit(s, tri);
+                }
                 let skip = self.world.ground_skip(None);
                 self.world.add_point(p, s, &|q| ground_below(pk, q, &skip));
             }
@@ -2212,13 +2807,20 @@ impl App {
         }
         let Some(c) = &self.config else { return };
         let size = (c.width, c.height);
+        let cam = self.shown_cam();
         let near = |(i, h): (usize, Vec3)| {
-            let (x, y) = debug::project(&self.cam, size, self.view.fov_x, h * world_edit::FLIP)?;
+            let (x, y) = debug::project(&cam, size, self.view.fov_x, h * world_edit::FLIP)?;
             let d = (x - self.cursor.0).hypot(y - self.cursor.1);
             (d <= world_edit::PICK_PX).then_some((i, d))
         };
         if let Some((i, _)) = self.world.sel_handles().into_iter().enumerate().filter_map(near).min_by(|a, b| a.1.total_cmp(&b.1)) {
             self.world.begin_drag(i);
+            return;
+        }
+        // REMASTER clouds (#470): a click on a cloud's centre marker selects it (and a drag moves it)
+        let marker = self.world.cloud_markers().into_iter().filter_map(|(i, h)| near((i, h)).map(|(i, d)| (i, h, d))).min_by(|a, b| a.2.total_cmp(&b.2));
+        if let Some((i, h, _)) = marker {
+            self.world.piece_press(i, h, self.cursor);
             return;
         }
         // a click on a fill piece selects it (and a drag moves it); on bare world or sky the piece stays
@@ -2253,7 +2855,7 @@ impl App {
     /// The mouse ray in game space: origin, direction.
     fn fill_ray(&self) -> Option<(Vec3, Vec3)> {
         let c = self.config.as_ref()?;
-        Some((self.cam.pos * world_edit::FLIP, debug::cursor_ray(&self.cam, (c.width, c.height), self.view.fov_x, self.cursor) * world_edit::FLIP))
+        Some((self.cam.pos * world_edit::FLIP, debug::cursor_ray(&self.shown_cam(), (c.width, c.height), self.view.fov_x, self.cursor) * world_edit::FLIP))
     }
 
     /// Hover highlight of the transform gizmo's axes, or the held axis following the mouse.
@@ -2263,14 +2865,14 @@ impl App {
             self.world.gizmo_drag(ray);
             return;
         }
-        let (cam, size, fov) = (&self.cam, (c.width, c.height), self.view.fov_x);
+        let (cam, size, fov) = (&self.shown_cam(), (c.width, c.height), self.view.fov_x);
         self.world.gizmo_hover(ray.0, &|p| debug::project(cam, size, fov, p * world_edit::FLIP), self.cursor);
     }
 
     /// LMB on a gizmo axis starts a move or rotation.
     fn fill_gizmo_press(&mut self) -> bool {
         let (Some(c), Some(ray)) = (&self.config, self.fill_ray()) else { return false };
-        let (cam, size, fov) = (&self.cam, (c.width, c.height), self.view.fov_x);
+        let (cam, size, fov) = (&self.shown_cam(), (c.width, c.height), self.view.fov_x);
         self.world.gizmo_press(ray.0, &|p| debug::project(cam, size, fov, p * world_edit::FLIP), self.cursor, ray)
     }
 
@@ -2288,14 +2890,14 @@ impl App {
     /// LMB in the Cine editor: a gizmo arrow, else pick a camera, key or aim point.
     fn cine_press(&mut self) {
         let (Some(c), Some(ray)) = (&self.config, self.fill_ray()) else { return };
-        let (cam, size, fov) = (&self.cam, (c.width, c.height), self.view.fov_x);
+        let (cam, size, fov) = (&self.shown_cam(), (c.width, c.height), self.view.fov_x);
         self.cine.press(&|p| debug::project(cam, size, fov, p * world_edit::FLIP), self.cursor, ray, self.sess.as_ref().map(|s| &s.race));
     }
 
     /// The mouse moved in the Cine editor: the held point follows it, else the arrows light up under it.
     fn cine_move(&mut self) {
         let (Some(c), Some(ray)) = (&self.config, self.fill_ray()) else { return };
-        let (cam, size, fov) = (&self.cam, (c.width, c.height), self.view.fov_x);
+        let (cam, size, fov) = (&self.shown_cam(), (c.width, c.height), self.view.fov_x);
         self.cine.mouse_move(&|p| debug::project(cam, size, fov, p * world_edit::FLIP), self.cursor, ray, self.sess.as_ref().map(|s| &s.race));
     }
 
@@ -2389,7 +2991,8 @@ impl App {
         if let (Some(Hit { target: Target::Car { slot, .. }, .. }), Some(s)) = (self.target(), self.sess.as_mut()) {
             s.focus = slot;
             self.dbg.panel = self.dbg.panel.max(1);
-            self.note(format!("following car #{slot}"));
+            let msg = format!("following {}", s.racer_label(slot));
+            self.note(msg);
             return;
         }
         let hit = self.target();
@@ -2551,8 +3154,9 @@ impl App {
             }
             return;
         }
-        // the editor closed while previewing: the viewer's camera back
+        // the editor closed while previewing: the viewer's camera back, its sound off
         self.cine_unpreview();
+        self.cine.hush();
         // Rewind / Forward act only while held (ribbon buttons, `,` and `/`); the sim then goes back
         // to what it was doing, playing or paused
         let held = std::mem::take(&mut self.scrub);
@@ -2591,13 +3195,14 @@ impl App {
                 }
             }
         }
+        let view_mode = self.shown_view().mode;
         if self.free {
             // #60: with hand driving the arrows steer, accelerate and brake the followed car (the
             // WASD keys keep flying the camera)
             let driving = self.drive_free && self.sess.is_some();
             let input = if driving { self.key_input(false, sim_dt.unwrap_or(0.0)) } else { Input::default() };
             if let (Some(sess), Some(dt)) = (self.sess.as_mut(), sim_dt) {
-                sess.fx.remaster = self.view.mode == motorview::render::RenderMode::Remaster;
+                sess.fx.remaster = view_mode == motorview::render::RenderMode::Remaster;
                 let hand = if driving { sess.hand_slot() } else { None };
                 for _ in 0..reps {
                     sess.step_as(dt, input, hand);
@@ -2608,7 +3213,7 @@ impl App {
             let look_back = self.keys.contains(&KeyCode::KeyB);
             let Some(sess) = self.sess.as_mut() else { return };
             sess.look_back = look_back;
-            sess.fx.remaster = self.view.mode == motorview::render::RenderMode::Remaster;
+            sess.fx.remaster = view_mode == motorview::render::RenderMode::Remaster;
             if let Some(dt) = sim_dt {
                 for _ in 0..reps {
                     sess.step(dt, input);
@@ -2652,19 +3257,23 @@ impl App {
 
     /// Draw the scene, rear mirror and overlay of this frame into `target`.
     fn render(&mut self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32)) {
+        let dis = self.preview_dissolve(size);
         let sess = self.sess.as_ref();
-        let mut view = self.dbg.passes.view(&self.view);
+        let mut view = self.dbg.passes.view(&self.shown_view());
         // looking through a cine camera: the video's picture, no AI racing line (as `cine_render`)
-        if self.cine.preview_cam().is_some() {
+        let previewing = self.cine.preview_cam().is_some();
+        if previewing {
             view.show_line = false;
         }
-        let mut parts = self.dbg.passes.parts(sess, &self.cam, &view);
+        // #438: zoomed out to the video's frame while previewing
+        let cam = self.shown_cam();
+        let mut parts = self.dbg.passes.parts(sess, &cam, &view);
         if let (Some(g), Some(s)) = (self.ghost.as_ref().filter(|g| g.show_main), sess) {
             parts.ghost = g.models(s);
         }
         let hit = self.picker.as_ref().and_then(|p| p.cast(self.cam.pos, self.cam.forward(), PICK_RANGE, &parts.cars, &parts.props));
         let face = sess.and_then(|s| col_hit(s, &self.cam, hit)).map(|c| c.face as usize);
-        let mut g = sess.map(|s| self.dbg.gizmos(s, &view, &self.cam, face, self.scene.as_ref().zip(self.picker.as_ref()), &parts, hit)).unwrap_or_default();
+        let mut g = sess.map(|s| self.dbg.gizmos(s, &view, &cam, face, self.scene.as_ref().zip(self.picker.as_ref()), &parts, hit)).unwrap_or_default();
         if self.world.open {
             self.world.gizmos(&mut g, self.cam.pos * world_edit::FLIP);
         }
@@ -2672,18 +3281,43 @@ impl App {
             self.cine.gizmos(&mut g, self.cam.pos * world_edit::FLIP, self.view.fov_x, sess.map(|s| &s.race));
         }
         let mut f = parts.frame();
+        f.dof = self.cine.preview_dof();
         f.wire = self.wireframe;
         f.debug_lines = &g.lines;
         f.debug_xray = &g.xray;
         f.debug_xray_tris = &g.xray_tris;
         // the scene blurred behind the glass panels, never in an F12 shot (#395)
         f.frost = self.glass.filter(|_| !self.clean);
-        gpu.draw(enc, target, depth, size, &self.cam, &view, &f);
-        if let (true, Some(ss)) = (self.mirror, sess.filter(|s| !s.look_back)) {
+        gpu.draw(enc, target, depth, size, &cam, &view, &f);
+        // #438: a dissolve on air, blended under the camera cut to (as the render, `cine_render`)
+        match dis {
+            Some((d, dcam, dview, dparts)) => {
+                // the outgoing camera is a second scene pass: the shared uniforms take their values at submit
+                gpu.queue.submit([std::mem::replace(enc, gpu.device.create_command_encoder(&Default::default())).finish()]);
+                gpu.select_view(PREVIEW_DISSOLVE_VIEW);
+                if self.dis_from != Some(d.from) {
+                    gpu.cut();
+                }
+                if self.dis_snap.as_ref().is_none_or(|(s, _)| s.size != size) {
+                    self.dis_snap = Some((gpu.snapshot_target(size.0, size.1), gpu.depth_view(size.0, size.1)));
+                }
+                if let Some((snap, sdepth)) = &self.dis_snap {
+                    let df = Frame { dof: d.dof, wire: self.wireframe, ..dparts.frame() };
+                    gpu.draw(enc, &snap.view, sdepth, size, &dcam, &dview, &df);
+                    gpu.queue.submit([std::mem::replace(enc, gpu.device.create_command_encoder(&Default::default())).finish()]);
+                    gpu.select_view(0);
+                    gpu.draw_dissolve(enc, target, snap, f64::from(1.0 - d.k));
+                }
+                gpu.select_view(0);
+                self.dis_from = Some(d.from);
+            }
+            None => self.dis_from = None,
+        }
+        // no mirror over a cine camera's picture (as the render)
+        if let (true, false, Some(ss)) = (self.mirror, previewing, sess.filter(|s| !s.look_back)) {
             // the mirror is a second scene pass: the shared uniforms take their values at submit
             gpu.queue.submit([std::mem::replace(enc, gpu.device.create_command_encoder(&Default::default())).finish()]);
-            let (w, h, top) = (size.0 as f32 * 0.25, size.1 as f32 * 0.08, 8.0 + self.bar_h);
-            let x = (size.0 as f32 - w) * 0.5;
+            let [x, top, w, h] = mirror_rect(size, self.bar_h);
             let (eye, at) = ss.mirror_view();
             let look = (at - eye).normalize_or(Vec3::Z);
             let cam = Camera::new(eye, look.x.atan2(-look.z), look.y.asin());
@@ -2693,6 +3327,8 @@ impl App {
             mf.props = &parts.props;
             mf.prop_glow = &parts.glows;
             mf.car_brake = &parts.brakes;
+            mf.car_tint = &parts.car_tints;
+            mf.prop_tint = &parts.prop_tints;
             mf.car_spin = &parts.spins;
             mf.light_cars = &mhidden;
             mf.sprites = &parts.sprites;
@@ -2710,7 +3346,14 @@ impl App {
             self.preview = want;
         }
         let sess = self.sess.as_ref();
-        let mut text = OverlayText { panel: self.dbg.panel(sess), labels: g.labels, preview: want.is_some(), ..Default::default() };
+        let mut text = OverlayText {
+            panel: self.dbg.panel(sess),
+            labels: g.labels,
+            preview: want.is_some(),
+            label_far: self.scene.as_ref().and_then(|s| label_far(s.view_distance, &self.view, &self.cam)),
+            label_hide: (self.mirror && sess.is_some_and(|s| !s.look_back)).then(|| mirror_rect(size, self.bar_h)),
+            ..Default::default()
+        };
         if let (Some(s), Some(c)) = (&self.scene, &self.dbg.catalog) {
             text.right.push(self.dbg.browser.lines(s, c, sess));
         }
@@ -2752,7 +3395,7 @@ impl App {
     fn frame(&mut self) {
         let (Some(surface), Some(mut gpu), Some(depth), Some(cfg)) = (self.surface.take(), self.gpu.take(), self.depth.take(), self.config.clone()) else { return };
         gpu.set_car_swap(self.sess.as_ref().filter(|_| self.mesh_swap).map(|s| s.focus));
-        gpu.update_local_light(&self.view);
+        gpu.update_local_light(&self.shown_view());
         self.local_status = gpu.local_status();
         self.frame_with(&surface, &gpu, &depth, &cfg);
         (self.surface, self.gpu, self.depth) = (Some(surface), Some(gpu), Some(depth));
@@ -2769,27 +3412,156 @@ impl App {
         self.ghost_frame();
     }
 
+    /// The dock's tuning now (#434): the state (`Snap`, the paints as drawn), the racers' own paints and the changes.
+    fn tuning(&self) -> (Snap, Vec<tune::Paint>, Vec<Change>) {
+        let own = self.scene.as_ref().map_or_else(Vec::new, |s| s.car_colours.clone());
+        let mut drawn = own.clone();
+        for (&k, &c) in self.paints.iter().chain(self.tune.paint_req.as_ref().map(|(k, c)| (k, c))) {
+            if let Some(d) = drawn.get_mut(k) {
+                *d = c;
+            }
+        }
+        let now = Snap::now(self.sess.as_ref(), drawn);
+        let changes = self.tune.changes(&now, &own, &tune_changes::groups(self.sess.as_ref()));
+        (now, own, changes)
+    }
+
+    /// The Changes card's button: Copy as Markdown, a row's reset, close.
+    fn changes_act(&mut self, act: overlay::CardAct, now: &Snap, own: &[tune::Paint]) {
+        match act {
+            overlay::CardAct::Close => self.changes_open = false,
+            overlay::CardAct::Copy => self.copy_changes(),
+            overlay::CardAct::Reset(key) => {
+                let mut to = now.clone();
+                tune_changes::reset(key, &mut to, &self.tune.orig_snap(own));
+                self.put_snap(&to, now, own);
+            }
+        }
+    }
+
+    /// Put the tuning state `to` in place where it differs from `now` (a reset, an undo): the racers, gravity and
+    /// camera values at once, the paints through a scene reload after the frame. `own` = the racers' own paints.
+    fn put_snap(&mut self, to: &Snap, now: &Snap, own: &[tune::Paint]) {
+        for (slot, c) in to.apply(now, self.sess.as_mut()) {
+            if own.get(slot) == Some(&c) {
+                self.paints.remove(&slot);
+            } else {
+                self.paints.insert(slot, c);
+            }
+            self.repaint_due = true;
+        }
+    }
+
+    /// Ctrl+Z / Ctrl+Y on the dock's edits (#434).
+    fn tune_undo(&mut self, back: bool) {
+        let (now, own, _) = self.tuning();
+        match self.tune.undo.step(&now, back) {
+            Some(to) => {
+                self.put_snap(&to, &now, &own);
+                self.note(if back { "undo" } else { "redo" });
+            }
+            None => self.note(if back { "nothing to undo" } else { "nothing to redo" }),
+        }
+    }
+
     /// The World Editor's fill file name while it holds edits that are not saved (the exit requester's three-way ask).
     fn unsaved_fill(&self) -> Option<String> {
         (self.world.open && self.world.unsaved()).then(|| format!("track {}'s fill", self.track))
     }
 
-    /// The exit requester was answered: Save writes the fill first and exits only when that worked.
-    fn exit_choice(&mut self, c: overlay::Exit) {
-        match c {
-            overlay::Exit::Save => {
+    /// The requester is up: keys and the mouse belong to it.
+    fn asking(&self) -> bool {
+        self.ask.is_some()
+    }
+
+    /// Escape / the window's close button: the exit requester, or straight out when nothing would be lost.
+    fn ask_exit(&mut self) {
+        let (_, _, changes) = self.tuning();
+        let ask = make_ask(AskKind::Exit, self.unsaved_fill(), self.cine.unsaved_name(), &changes);
+        if ask.has_loss() {
+            self.ask = Some(ask);
+        } else {
+            self.exit_now = true;
+        }
+    }
+
+    /// A car or track switch (#434): asks first when a tuning change would be lost. True = the requester is up and the
+    /// switch waits for the answer. A different track with an unsaved fill is refused by `switch` itself.
+    fn guard_switch(&mut self, kind: AskKind) -> bool {
+        let differs = match kind {
+            AskKind::Track(t) => t != self.track,
+            AskKind::Car(c) => c != self.car,
+            _ => false,
+        };
+        if !differs || (matches!(kind, AskKind::Track(_)) && self.world.open && self.world.unsaved()) {
+            return false;
+        }
+        let (_, _, changes) = self.tuning();
+        let ask = make_ask(kind, None, None, &changes);
+        if !ask.has_loss() {
+            return false;
+        }
+        self.ask = Some(ask);
+        true
+    }
+
+    /// The tuning changes copied as Markdown (the Changes card's Copy).
+    fn copy_changes(&mut self) {
+        let (_, _, changes) = self.tuning();
+        let car = self.sess.as_ref().and_then(|ss| ss.race.racers.iter().find(|r| r.human)).map_or_else(|| format!("{:02}", self.car), |r| scene::car_label(r.car_id, &r.car.p.name));
+        let md = tune_changes::markdown(&changes, self.track, &car);
+        self.copy_text(md);
+    }
+
+    /// The requester was answered. Copy puts the tuning changes on the clipboard first, then the step goes on; Save
+    /// writes the fill first (and copies the changes too) and goes on only when that worked.
+    fn ask_choice(&mut self, c: overlay::Exit) {
+        let Some(ask) = self.ask.take() else { return };
+        if c == overlay::Exit::Cancel {
+            return;
+        }
+        if c == overlay::Exit::Save {
+            if ask.fill.is_some() {
                 if let Some(s) = &self.scene {
                     self.world.run(Cmd::Save, s, &[]);
                 }
                 if self.world.unsaved() {
                     // the save failed: stay, the editor's note says why
-                    self.confirm_exit = false;
-                } else {
-                    self.exit_now = true;
+                    return;
                 }
             }
-            overlay::Exit::Discard => self.exit_now = true,
-            overlay::Exit::Cancel => self.confirm_exit = false,
+            if ask.seq.is_some() {
+                self.cine.save_msg();
+                if self.cine.dirty {
+                    // the save failed: stay, the editor's message says why
+                    let m = self.cine.msg.clone();
+                    self.note(m);
+                    return;
+                }
+            }
+        }
+        if c == overlay::Exit::Discard && ask.kind == AskKind::WorldClose {
+            // back to the file on disk, and drawn so: `fill_update` no longer meshes once the editor is closed
+            if let Some(s) = &self.scene {
+                self.world.run(Cmd::Reload, s, &[]);
+            }
+            self.fill_remesh();
+        }
+        if c == overlay::Exit::Discard && ask.kind.is_cine() {
+            // the guard lets the step through once the edits are given up
+            self.cine.dirty = false;
+        }
+        if matches!(c, overlay::Exit::Copy | overlay::Exit::Save) && ask.changes > 0 {
+            self.copy_changes();
+        }
+        match ask.kind {
+            AskKind::Exit => self.exit_now = true,
+            AskKind::Track(t) => self.switch(t, self.car),
+            AskKind::Car(n) => self.switch_car(n),
+            AskKind::WorldClose => self.fill_close(),
+            AskKind::CineClose => self.cine.close(),
+            AskKind::CineNew => self.cine.reqs.push(Req::New),
+            AskKind::CineOpen(p) => self.cine.reqs.push(Req::Open(p)),
         }
     }
 
@@ -2800,21 +3572,27 @@ impl App {
         self.status_h = 0.0;
         self.pane_w = 0.0;
         self.left_w = 0.0;
+        // #438: the Cine preview's frame takes its place first, so the panels and the toolbar lie over it
+        let slots = self.cine.preview_size().map(|_| overlay::frame_slots(ui.ctx()));
         if self.egui_shown() {
             self.panels(ui);
         }
+        let size = self.config.as_ref().map_or((1, 1), |c| (c.width, c.height));
+        self.frame_rect = self.cine.preview_size().zip(slots).map(|(video, slots)| {
+            let ppp = ui.ctx().pixels_per_point();
+            let rect = motorview::cine::preview_frame((size.0 as f32, size.1 as f32), (self.bar_h, self.pane_w, self.status_h, self.left_w), video, overlay::FRAME_GAP * ppp);
+            overlay::preview_frame(ui.ctx(), &slots, size, rect, self.cine.preview_letterbox(), self.cine.preview_fade());
+            rect
+        });
         if let Some((text, crosshair)) = &self.ov {
             let size = self.config.as_ref().map_or((1, 1), |c| (c.width, c.height));
-            if overlay::paint(ui.ctx(), size, &self.cam, self.view.fov_x, text, *crosshair, (self.bar_h, self.pane_w, self.status_h, self.left_w)) {
+            if overlay::paint(ui.ctx(), size, &self.shown_cam(), self.view.fov_x, text, *crosshair, (self.bar_h, self.pane_w, self.status_h, self.left_w)) {
                 let md = text.copy_md.clone();
                 self.copy_text(md);
             }
         }
-        if self.confirm_exit {
-            let file = self.unsaved_fill();
-            if let Some(c) = overlay::exit_dialog(ui.ctx(), file.as_deref()) {
-                self.exit_choice(c);
-            }
+        if let Some(c) = self.ask.as_ref().and_then(|ask| overlay::requester(ui.ctx(), ask)) {
+            self.ask_choice(c);
         }
         self.glass = glass_ui::frost(ui.ctx());
     }
@@ -2826,11 +3604,15 @@ impl App {
             self.look_at(c * world_edit::FLIP, r);
         }
         let ppp = ui.ctx().pixels_per_point();
+        let harvest = self.command.wants_harvest();
+        let mut bar_rows = Vec::new();
         {
+            let shown = self.shown_view().mode;
             let mut m = Ribbon {
                 st: &mut self.ribbon,
                 tune: &mut self.tune,
                 view: &mut self.view,
+                shown,
                 dbg: &mut self.dbg,
                 sess: self.sess.as_mut(),
                 free: self.free,
@@ -2853,6 +3635,10 @@ impl App {
                 acts: Vec::new(),
             };
             self.bar_h = m.bar(ui) * ppp;
+            // the command search opened: its toolbar rows (the dock's come from the pane below)
+            if harvest {
+                bar_rows = m.harvest(ui);
+            }
             self.pending.extend(m.acts);
         }
         let textures: &[String] = self.scene.as_ref().map_or(&[], |s| &s.world_textures_sorted);
@@ -2862,9 +3648,28 @@ impl App {
         let note = if note.is_empty() { self.world.note.as_str() } else { note };
         let hint = if self.cine_mouse() { glass_ui::hint(cine_edit::HINT) } else { self.world.hint(self.world.open, self.free, self.sess.is_some()) };
         let tag = (self.world.open && self.world.unsaved()).then(|| "unsaved".to_string());
-        let sb = status::StatusBar { hint, note, tag, fps: self.fps.0, paused: self.dbg.paused, speed: self.dbg.time_scale(), mode: mode_name(self.view.mode), job: self.cine.job_status() };
-        self.status_h = sb.show(ui) * ppp;
+        let (snap, own, changes) = self.tuning();
+        let unsaved = unsaved_count(&changes);
+        let held = ui.ctx().input(|i| i.pointer.any_down());
+        self.tune.undo.settle(&snap, held);
+        self.changes_open &= unsaved > 0;
+        let sb = status::StatusBar { hint, note, tag, fps: self.fps.0, paused: self.dbg.paused, speed: self.dbg.time_scale(), mode: mode_name(self.shown_view().mode), job: self.cine.job_status(), changes: unsaved, changes_open: self.changes_open };
+        let shown_sb = sb.show(ui);
+        // the transport strip (#435) sits above the status bar and counts into its height
+        let strip_h = if !self.ribbon.no_transport && transport::Transport::wanted(self.sess.as_ref(), Some(&self.cine)) {
+            let mut acts = Vec::new();
+            let h = transport::Transport { dbg: &mut self.dbg, sess: self.sess.as_ref(), cine: Some(&mut self.cine), scrub: &mut self.scrub, seek: &mut self.seek, acts: &mut acts }.show(ui);
+            self.pending.extend(acts);
+            h
+        } else {
+            0.0
+        };
+        self.status_h = (shown_sb.h + strip_h) * ppp;
+        if shown_sb.chip.as_ref().is_some_and(egui::Response::clicked) {
+            self.changes_open ^= true;
+        }
         self.left_w = if self.world.open { palette::palette(ui, &mut self.world, card_top, self.status_h / ppp) * ppp } else { 0.0 };
+        let shown = self.shown_view().mode;
         let track_fog = self.scene.as_ref().map(|s| (self.track, s.look.fog));
         let track_sky = self.scene.as_ref().and_then(|s| s.hdri.as_ref()).map(|h| (self.track, h.dome()));
         if self.tune.page == Some(Page::Ghost) {
@@ -2883,7 +3688,17 @@ impl App {
             let own = *self.scene.as_ref()?.car_colours.get(ss.focus)?;
             Some((self.paints.get(&ss.focus).copied().unwrap_or(own), own))
         });
-        self.pane_w = self.tune.pane(ui, self.sess.as_mut(), Targets { view: &mut self.view, track_fog, track_sky, paint, local_status: self.local_status, probe_gizmos: Some(&mut self.dbg.layers.probes), world_sub }, &mut page) * ppp;
+        // REMASTER (#478): the followed car's model file check
+        let model = self.sess.as_ref().and_then(|ss| self.scene.as_ref()?.car_models.get(ss.focus)).and_then(Option::as_ref);
+        if harvest {
+            self.tune.request_harvest();
+        }
+        self.pane_w = self.tune.pane(ui, self.sess.as_mut(), Targets { shown, mode_key: key_name(Act::Mode), view: &mut self.view, track_fog, track_sky, paint, model, local_status: self.local_status, probe_gizmos: Some(&mut self.dbg.layers.probes), world_sub, time_scale: &mut self.dbg.scale }, &mut page) * ppp;
+        if let Some(dock) = self.tune.take_harvest() {
+            self.command.harvest(&bar_rows, &dock);
+        }
+        // applied after the World palette (it borrows the scene's texture names)
+        let card_act = shown_sb.chip.as_ref().filter(|_| self.changes_open).and_then(|chip| overlay::changes_card(ui.ctx(), &changes, changes_anchor(ui.ctx(), chip.rect, shown_sb.h)));
         // the sim was paused or resumed (by any writer of `dbg.paused`): a toast at the top middle of the viewport
         if self.dbg.paused != self.sim_state {
             self.sim_state = self.dbg.paused;
@@ -2898,6 +3713,9 @@ impl App {
         if self.world.open {
             let room = ui.ctx().content_rect().width() - self.left_w / ppp - self.pane_w / ppp - 12.0;
             palette::options(ui, &mut self.world, textures, card_top, self.left_w / ppp, room);
+        }
+        if let Some(act) = card_act {
+            self.changes_act(act, &snap, &own);
         }
         // a picker drag reloads the scene once, when the button is let go
         if self.tune.paint_req.is_some() && !ui.ctx().input(|i| i.pointer.any_down()) {
@@ -2935,6 +3753,35 @@ impl App {
                     }
                 }
                 Err(e) => eprintln!("fog not saved: {e}"),
+            }
+        }
+        // last: the command search lies over every panel (#436)
+        if let Some((run, why)) = self.command.show(ui.ctx(), command::Now { free: self.free, world: self.world.open }) {
+            match why {
+                Some(n) => self.note(n),
+                None => self.command_run(run),
+            }
+        }
+    }
+
+    /// Run a row of the command search (#436): an action after the pass, else open its toolbar group or dock page.
+    fn command_run(&mut self, run: command::Run) {
+        use command::Run;
+        match run {
+            Run::Act(a, i) => self.pending.push((a, i)),
+            Run::Held => {}
+            Run::Toolbar(tab, gi) => {
+                self.ribbon.tab = tab;
+                self.ribbon.minimised = false;
+                self.ribbon.fly = ribbon::groups(tab)[gi].fly.then_some(gi);
+            }
+            Run::Dock(page, text) => {
+                self.tune.page = Some(page);
+                self.tune.set_search(&text);
+            }
+            Run::Const(name) => {
+                self.tune.page = Some(Page::Constants);
+                self.tune.set_search(name);
             }
         }
     }
@@ -3028,18 +3875,25 @@ impl App {
     /// menu's choice (track, car).
     fn act(&mut self, act: Act, i: usize) {
         match act {
+            Act::Escape if self.command.open => self.command.close(),
             Act::Escape if self.grabbed => self.grab(false),
             // a dropdown or combo list is open: egui closes it on this Esc
             Act::Escape if self.gui.as_ref().is_some_and(|g| g.popup_open()) => {}
             // a flyout of the shelf is up: Esc closes it first
             Act::Escape if self.ribbon.fly.take().is_some() => {}
             Act::Escape if self.world.open && self.world.cancel() => self.note("piece cancelled"),
-            Act::Escape => self.confirm_exit = true,
+            Act::Escape => self.ask_exit(),
             Act::FreeCam => {
                 self.free ^= true;
                 // the race pauses in free camera and runs again in the race camera
                 self.dbg.paused = self.free;
                 self.grab(self.free);
+            }
+            Act::Command => {
+                self.command.toggle();
+                if self.command.open && self.grabbed {
+                    self.grab(false);
+                }
             }
             Act::Overlay => self.overlay ^= true,
             Act::Cross => self.cross ^= true,
@@ -3056,7 +3910,7 @@ impl App {
             Act::Focus => {
                 if let Some(s) = self.sess.as_mut() {
                     s.cycle_focus();
-                    let msg = format!("following car #{}", s.focus);
+                    let msg = format!("following {}", s.racer_label(s.focus));
                     self.note(msg);
                 }
             }
@@ -3100,10 +3954,24 @@ impl App {
             }
             Act::Screenshot => self.screenshot = true,
             Act::ReloadCars => self.reload_cars(true),
-            Act::CineAddCam | Act::CineAddKey | Act::CinePreview | Act::CineCut if !self.cine.active() => self.note("Cine: open or start a sequence first (toolbar Cine tab)"),
+            Act::ExportBody => self.export_body(),
+            Act::CineAddCam | Act::CineAddKey | Act::CinePreview | Act::CineSave | Act::CineCut | Act::CineUndo | Act::CineRedo | Act::CineGizmo(_) if !self.cine.active() => self.note("Cine: open or start a sequence first (toolbar Cine tab)"),
             Act::CineAddCam => self.cine.reqs.push(Req::AddStatic),
             Act::CineAddKey => self.cine.reqs.push(Req::AddKey),
+            Act::CineSave => self.cine.save_msg(),
+            Act::CineGizmo(m) => self.cine.gizmo = m,
             Act::CineCut => self.cine.reqs.push(Req::Cut),
+            Act::CineUndo => self.cine.undo(),
+            Act::CineRedo => self.cine.redo(),
+            // the dock's edits when it shows Car or Camera or no Cine sequence is open, else the sequence's
+            Act::Undo | Act::Redo => {
+                let back = act == Act::Undo;
+                if self.cine.active() && !matches!(self.tune.page, Some(Page::Car | Page::Camera)) {
+                    if back { self.cine.undo() } else { self.cine.redo() }
+                } else {
+                    self.tune_undo(back);
+                }
+            }
             Act::CinePreview => {
                 self.cine.preview = self.cine.preview.next();
                 self.note(format!("cine preview: {}", self.cine.preview.name()));
@@ -3156,7 +4024,7 @@ impl App {
                 if self.drive_free {
                     // the race runs while the arrows drive
                     self.dbg.paused = false;
-                    let msg = format!("driving car #{} by hand (arrows)", self.sess.as_ref().map_or(0, |s| s.focus));
+                    let msg = format!("driving {} by hand (arrows)", self.sess.as_ref().map_or(String::new(), |s| s.racer_label(s.focus)));
                     self.note(msg);
                 } else {
                     self.note("hand driving off");
@@ -3170,9 +4038,18 @@ impl App {
             }
             Act::Darker => self.view.brightness = (self.view.brightness - 0.1).max(0.1),
             Act::Brighter => self.view.brightness += 0.1,
-            Act::NextCar => self.switch_car(self.car % 10 + 1),
-            Act::Track => self.switch(i as u32 + 1, self.car),
-            Act::Car => self.switch_car(i as u32 + 1),
+            Act::NextCar | Act::Car => {
+                let car = if act == Act::NextCar { self.car % 10 + 1 } else { i as u32 + 1 };
+                if !self.guard_switch(AskKind::Car(car)) {
+                    self.switch_car(car);
+                }
+            }
+            Act::Track => {
+                let track = i as u32 + 1;
+                if !self.guard_switch(AskKind::Track(track)) {
+                    self.switch(track, self.car);
+                }
+            }
             Act::GhostWindow if self.ghost_win.is_some() => self.ghost_win = None,
             Act::GhostWindow if self.sess.is_some() => self.ghost_open = true,
             Act::GhostWindow => self.note("no race loaded"),
@@ -3218,19 +4095,19 @@ impl App {
             }
             Act::WorldToggle => {
                 self.fill_toggle();
-                // the editor's controls are the pane's World page
+                // the editor's controls are the pane's World page (a close that asks keeps the editor open)
                 if self.world.open {
                     self.tune.page = Some(Page::World);
-                } else if self.tune.page == Some(Page::World) {
-                    self.tune.page = None;
                 }
             }
             Act::World(c) if self.world.open => self.world.cmds.push(c),
-            Act::WorldNew if self.world.open => self.world.cmds.push(Cmd::Start(Kind::ALL[i.min(5)])),
+            Act::WorldNew if self.world.open => self.world.cmds.push(Cmd::Start(Kind::ALL[i.min(Kind::ALL.len() - 1)])),
             Act::World(_) | Act::WorldNew => {}
             Act::SolidUi => self.solid_ui ^= true,
             // the shelf under the top bar (the bar itself stays)
             Act::MenuBar => self.ribbon.minimised ^= true,
+            // the transport strip above the status bar (#435)
+            Act::Transport => self.ribbon.no_transport ^= true,
         }
     }
 }
@@ -3314,7 +4191,7 @@ impl ApplicationHandler for App {
             }
         }
         match ev {
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => self.ask_exit(),
             WindowEvent::Resized(s) => self.resize(s.width, s.height),
             WindowEvent::MouseInput { state, button: MouseButton::Right, .. } => self.look_grab(state == ElementState::Pressed),
             WindowEvent::CursorMoved { position, .. } => {
@@ -3335,7 +4212,7 @@ impl ApplicationHandler for App {
                     self.cine_move();
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if self.world.open && !self.confirm_exit => {
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if self.world.open && !self.asking() => {
                 if state == ElementState::Pressed {
                     self.fill_press();
                 } else {
@@ -3345,14 +4222,14 @@ impl ApplicationHandler for App {
                 }
             }
             // the Cine tab: LMB picks and drags (a miss does nothing: RMB drag looks, as in the World editor)
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if (self.cine_mouse() || self.cine.dragging()) && !self.confirm_exit => {
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if (self.cine_mouse() || self.cine.dragging()) && !self.asking() => {
                 if state == ElementState::Pressed {
                     self.cine_press();
                 } else {
                     self.cine.release(self.sess.as_ref().map(|s| &s.race));
                 }
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } if !self.confirm_exit => {
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } if !self.asking() => {
                 if self.free && !self.grabbed {
                     self.grab(true);
                 }
@@ -3382,23 +4259,29 @@ impl ApplicationHandler for App {
                     self.keys.remove(&code);
                     return;
                 }
+                // the command search has the keys: egui took what it uses, Esc closes it
+                if self.command.open {
+                    if code == KeyCode::Escape && !event.repeat {
+                        self.command.close();
+                    }
+                    return;
+                }
                 if event.repeat {
                     // held . steps the sim frame by frame, held PgUp / PgDn scroll the browser
-                    if code == KeyCode::Period && !self.confirm_exit {
+                    if code == KeyCode::Period && !self.asking() {
                         self.dbg.steps += 1;
                     }
-                    if matches!(code, KeyCode::PageUp | KeyCode::PageDown) && !self.confirm_exit {
+                    if matches!(code, KeyCode::PageUp | KeyCode::PageDown) && !self.asking() {
                         self.press(code);
                     }
                     return;
                 }
                 self.keys.insert(code);
-                if self.confirm_exit {
-                    let unsaved = self.unsaved_fill().is_some();
+                if let Some(ask) = self.ask.clone() {
                     match code {
-                        KeyCode::KeyY | KeyCode::Enter | KeyCode::NumpadEnter => self.exit_choice(if unsaved { overlay::Exit::Save } else { overlay::Exit::Discard }),
-                        KeyCode::KeyD if unsaved => self.exit_choice(overlay::Exit::Discard),
-                        KeyCode::KeyN | KeyCode::Escape => self.exit_choice(overlay::Exit::Cancel),
+                        KeyCode::KeyY | KeyCode::Enter | KeyCode::NumpadEnter => self.ask_choice(ask.default_choice()),
+                        KeyCode::KeyD if ask.has_loss() => self.ask_choice(overlay::Exit::Discard),
+                        KeyCode::KeyN | KeyCode::Escape => self.ask_choice(overlay::Exit::Cancel),
                         _ => {}
                     }
                     if self.exit_now {
@@ -3444,7 +4327,7 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, ev: DeviceEvent) {
-        if let (DeviceEvent::MouseMotion { delta }, true, true) = (ev, self.looking || self.grabbed, self.free && !self.confirm_exit) {
+        if let (DeviceEvent::MouseMotion { delta }, true, true) = (ev, self.looking || self.grabbed, self.free && !self.asking()) {
             self.cam.yaw += delta.0 as f32 * 0.003;
             self.cam.pitch = (self.cam.pitch - delta.1 as f32 * 0.003).clamp(-1.5, 1.5);
         }
@@ -3470,6 +4353,10 @@ fn cine(a: &Args) -> Result<(), String> {
     let (seq, warnings) = motorview::cine::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     for w in &warnings {
         eprintln!("{}: {w}", path.display());
+    }
+    if a.export_tv {
+        println!("{}", motorview::cine::export_tv(&a.root, &seq)?);
+        return Ok(());
     }
     // CLASSIC or REMASTER as in `--shot`; the AI racing line is never drawn
     let view = View { show_line: false, ..a.view() };
@@ -3537,6 +4424,47 @@ fn main() {
             }
         }
         std::process::exit(failed as i32);
+    }
+    if let Some((car, out)) = &args.export_body {
+        // REMASTER (#292): the generated body for Blender (procgen/bodyobj.rs)
+        match motorview::procgen::bodyobj::export(&args.root, args.track, *car, out) {
+            Ok(m) => println!("{m}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some((car, out)) = &args.export_blueprint {
+        // REMASTER (#478): the car as a model-file blueprint for Blender (procgen/blueprint.rs)
+        match motorview::procgen::blueprint::export(&args.root, args.track, *car, out) {
+            Ok(m) => println!("{m}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if let Some(car) = args.check_model {
+        // REMASTER (#478): the loader's report on car N's model file, the same one the Car page shows
+        match scene::load_showroom(&args.root, args.track, car) {
+            Ok(c) => match &c.model {
+                Some(m) => {
+                    m.lines().iter().for_each(|l| println!("{l}"));
+                    std::process::exit(m.error.is_some() as i32);
+                }
+                None => {
+                    println!("car {car}: no model file ({})", motorview::procgen::carmodel::candidates(&args.root, car)[0].display());
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
     if args.probes_stats {
         // REMASTER irradiance probes (probes.rs, #83): bake the road's bricks, print what it took
@@ -3615,7 +4543,8 @@ fn main() {
         mirror: false,
         cross: true,
         grabbed: false,
-        confirm_exit: false,
+        ask: None,
+        cine_dialog: None,
         exit_now: false,
         ov: None,
         fps: (0.0, 0, Instant::now()),
@@ -3631,8 +4560,15 @@ fn main() {
         scene: None,
         preview_slot: None,
         preview: None,
-        tune: Tune::default(),
+        tune: {
+            // the camera values tune.cfg holds: what start-up loaded (#434)
+            let mut t = Tune::default();
+            t.cam_saved = motorview::drive::CamTune::live();
+            t
+        },
+        changes_open: false,
         ribbon: RibbonState::default(),
+        command: command::CommandBox::default(),
         inst: None,
         adapter: None,
         ghost: None,
@@ -3640,6 +4576,9 @@ fn main() {
         ghost_open: false,
         ghost_cam: CamMode::Chase,
         ghost_follow: Follow::Ghost,
+        frame_rect: None,
+        dis_from: None,
+        dis_snap: None,
         scrub: 0,
         seek: None,
         ghost_path: String::new(),
@@ -3669,6 +4608,29 @@ fn main() {
     el.run_app(&mut app).expect("event loop");
 }
 
+/// The changes an exit would lose (camera values that tune.cfg holds are kept): the status bar chip's count (#434).
+/// The question of the requester: what `kind` loses of `changes` (an exit: every change not in tune.cfg; a switch: the
+/// physics, gravity and paint ones, the camera values stay live) and the unsaved fill.
+fn make_ask(kind: AskKind, fill: Option<String>, seq: Option<String>, changes: &[Change]) -> Ask {
+    let n = match kind {
+        AskKind::Exit => unsaved_count(changes),
+        AskKind::Track(_) | AskKind::Car(_) => changes.iter().filter(|c| c.on_switch()).count(),
+        // the Cine and World Editor steps keep the race and the tuning
+        _ => 0,
+    };
+    Ask { kind, fill, seq, changes: n }
+}
+
+fn unsaved_count(changes: &[Change]) -> usize {
+    changes.iter().filter(|c| !c.saved).count()
+}
+
+/// Where the Changes card's bottom left goes: over the status bar, from the chip's left, kept on screen.
+fn changes_anchor(ctx: &egui::Context, chip: egui::Rect, status_h: f32) -> egui::Pos2 {
+    let screen = ctx.content_rect();
+    egui::pos2((chip.left() - 14.0).min(screen.right() - 472.0).max(12.0), screen.bottom() - status_h + 2.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3686,3 +4648,4 @@ mod tests {
         }
     }
 }
+

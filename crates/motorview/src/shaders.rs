@@ -6,10 +6,11 @@
 use std::borrow::Cow;
 
 /// Every shader file, by name.
-const FILES: [(&str, &str); 21] = [
+const FILES: [(&str, &str); 22] = [
     ("aa.wgsl", include_str!("aa.wgsl")),
     ("bloom.wgsl", include_str!("bloom.wgsl")),
     ("blur.wgsl", include_str!("blur.wgsl")),
+    ("dof.wgsl", include_str!("dof.wgsl")),
     ("flarevis.wgsl", include_str!("flarevis.wgsl")),
     ("glow.wgsl", include_str!("glow.wgsl")),
     ("grass.wgsl", include_str!("grass.wgsl")),

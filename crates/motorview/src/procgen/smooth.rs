@@ -35,8 +35,34 @@ pub struct Smooth {
     pub loose: bool,
     /// the length (m) over which a fold is rounded: each point is held to the original facets by
     /// a spring, so the plate follows their shape (the fenders' bulge) beyond that distance; 0 =
-    /// no springs, the least bending surface through the outline alone (the Titan)
-    pub round: f32,
+    /// no springs, the least bending surface through the outline alone (the Titan). One value
+    /// for the zone, or one per box (the Kobra X3: a soft bonnet dome and stiff fenders in one
+    /// plate, so no crease between them); a point on faces of two boxes takes the stiffer spring.
+    pub round: Vec<f32>,
+    /// tags whose level edges to faces of other tags keep their height (#464, the Serpent's tail
+    /// band: the lamps and the grille between them): the edge's points slide only across and
+    /// along the car while the plate rounds the fold, so the outline stays a level line instead
+    /// of sagging by however much each fold rounds. An edge is level when its ends are within
+    /// `LEVEL_TOL` in height; empty = none
+    pub level: Vec<[u8; 3]>,
+    /// `max_deg` per box (#465, the ASC's scoop lips: the folds behind a `Slice` round where the
+    /// same folds ahead of it stay creases); a fold rounds when it is within the larger of its two
+    /// faces' limits, and the shading follows each face's; empty = `max_deg` everywhere
+    pub max_degs: Vec<f32>,
+}
+
+/// how far apart (m) in height an edge's ends may be and still count as level (`Smooth::level`)
+const LEVEL_TOL: f32 = 0.002;
+
+impl Smooth {
+    /// the `round` of a face in box `i` (the zone's one value, or box `i`'s)
+    pub fn round_of(&self, i: usize) -> f32 {
+        self.round.get(i).or(self.round.first()).copied().unwrap_or(0.0)
+    }
+    /// the `max_deg` of a face in box `i` (the zone's, or box `i`'s)
+    pub fn max_deg_of(&self, i: usize) -> f32 {
+        self.max_degs.get(i).copied().unwrap_or(self.max_deg)
+    }
 }
 
 /// Curve the zones of `st` (game space, after `round_arches`; `hubs` and `radius` as there, so
@@ -54,12 +80,16 @@ pub fn smooth(faces: &mut Vec<Face>, hubs: &[[f32; 3]], radius: f32, st: &BodySt
     };
     for z in &st.smooths {
         let boxes: Vec<(Vec3, Vec3)> = z.lo.iter().zip(&z.hi).map(|(&lo, &hi)| (Vec3::from(lo), Vec3::from(hi))).collect();
-        let (members, rest): (Vec<Face>, Vec<Face>) = faces.drain(..).partition(|f| {
+        // the first box holding the face's centroid
+        let box_of = |f: &Face| {
             let c = f.pts.iter().map(|&p| Vec3::from(p)).sum::<Vec3>() / f.pts.len() as f32;
             let c = Vec3::new(c.x.abs(), c.y, c.z);
-            z.from.contains(&f.rgb) && f.smooth_deg == 0.0 && boxes.iter().any(|&(lo, hi)| c.cmpge(lo).all() && c.cmple(hi).all()) && !on_lip(f)
-        });
-        let (curved, outline) = curve(&members, z);
+            boxes.iter().position(|&(lo, hi)| c.cmpge(lo).all() && c.cmple(hi).all())
+        };
+        let (members, rest): (Vec<Face>, Vec<Face>) = faces.drain(..).partition(|f| z.from.contains(&f.rgb) && f.smooth_deg == 0.0 && box_of(f).is_some() && !on_lip(f));
+        let rounds: Vec<f32> = members.iter().map(|f| z.round_of(box_of(f).unwrap_or(0))).collect();
+        let degs: Vec<f32> = members.iter().map(|f| z.max_deg_of(box_of(f).unwrap_or(0))).collect();
+        let (curved, outline) = curve(&members, &rounds, &degs, z);
         *faces = rest.into_iter().map(|f| split_edges(f, &outline, z.step)).collect();
         faces.extend(curved);
     }
@@ -115,8 +145,9 @@ impl Poly {
     }
 }
 
-/// per poly and edge: whether it is a fold to round (a twin in the zone at most `acos(cos)` off)
-fn fold_flags(polys: &[Poly], cos: f32) -> Vec<Vec<bool>> {
+/// per poly and edge: whether it is a fold to round (a twin in the zone at most `acos(cos)` off,
+/// `cos` per poly: the flatter limit of the two wins)
+fn fold_flags(polys: &[Poly], cos: &[f32]) -> Vec<Vec<bool>> {
     let mut directed: HashMap<EdgeKey, usize> = HashMap::new();
     for (f, q) in polys.iter().enumerate() {
         for k in 0..q.p.len() {
@@ -128,7 +159,32 @@ fn fold_flags(polys: &[Poly], cos: f32) -> Vec<Vec<bool>> {
         .enumerate()
         .map(|(f, q)| {
             let m = q.p.len();
-            (0..m).map(|k| directed.get(&(q.key[(k + 1) % m], q.key[k])).is_some_and(|&g| g != f && q.n.dot(polys[g].n) >= cos)).collect()
+            (0..m).map(|k| directed.get(&(q.key[(k + 1) % m], q.key[k])).is_some_and(|&g| g != f && q.n.dot(polys[g].n) >= cos[f].min(cos[g]))).collect()
+        })
+        .collect()
+}
+
+/// per poly and edge: whether its points keep their height (`Smooth::level`): an edge of a
+/// `level` face to a zone face of a tag not in `level`, its ends within `LEVEL_TOL` in height
+fn level_flags(polys: &[Poly], faces: &[Face], level: &[[u8; 3]]) -> Vec<Vec<bool>> {
+    let mut directed: HashMap<EdgeKey, usize> = HashMap::new();
+    for (f, q) in polys.iter().enumerate() {
+        for k in 0..q.p.len() {
+            directed.insert((q.key[k], q.key[(k + 1) % q.p.len()]), f);
+        }
+    }
+    polys
+        .iter()
+        .enumerate()
+        .map(|(f, q)| {
+            let m = q.p.len();
+            let banded = level.contains(&faces[f].rgb);
+            (0..m)
+                .map(|k| {
+                    let k1 = (k + 1) % m;
+                    banded && (q.p[k].y - q.p[k1].y).abs() <= LEVEL_TOL && directed.get(&(q.key[k1], q.key[k])).is_some_and(|&g| !level.contains(&faces[g].rgb))
+                })
+                .collect()
         })
         .collect()
 }
@@ -183,17 +239,23 @@ fn edge_point(a: Vec3, b: Vec3, i: usize, n: usize) -> Vec3 {
     if weld_key(a.to_array()) <= weld_key(b.to_array()) { a.lerp(b, i as f32 / n as f32) } else { b.lerp(a, (n - i) as f32 / n as f32) }
 }
 
-/// The cut and faired triangles of `faces`, and the zone's outline (corner keys, CCW).
-fn curve(faces: &[Face], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
+/// The cut and faired triangles of `faces`, and the zone's outline (corner keys, CCW);
+/// `rounds`: per face, its `round` (`Smooth::round_of`); `degs`: per face, its `max_deg`
+/// (`Smooth::max_deg_of`).
+fn curve(faces: &[Face], rounds: &[f32], degs: &[f32], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
+    // one face out per face in, so `rounds` still lines up
     let faces = &t_junctions(faces, false);
     let polys: Vec<Poly> = faces.iter().map(Poly::new).collect();
     // a fold up to max_deg rounds; steeper ones and edges to other faces stay
-    let cos = z.max_deg.to_radians().cos();
-    let curved = fold_flags(&polys, cos);
+    let cos: Vec<f32> = (0..polys.len()).map(|f| degs.get(f).copied().unwrap_or(z.max_deg).to_radians().cos()).collect();
+    let curved = fold_flags(&polys, &cos);
+    let level = level_flags(&polys, faces, &z.level);
     let mut outline = HashSet::new();
     let mut out = Vec::new();
     // cut points on straight edges: they stay where they are when the cuts are faired
     let mut fixed: HashSet<[i32; 3]> = HashSet::new();
+    // cut points on level edges (`Smooth::level`): they keep their height
+    let mut pinned_y: HashSet<[i32; 3]> = HashSet::new();
     let h = z.step;
     // a face on the left whose mirror image is in the zone takes that face's mesh, mirrored: the
     // two sides then fair alike (Delaunay ties flip a few edges differently, and the stiff
@@ -209,10 +271,14 @@ fn curve(faces: &[Face], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
     let twin: Vec<Option<usize>> = polys.iter().map(|q| if left(q) { right.get(&shape(q, true)).copied() } else { None }).collect();
     let order: Vec<usize> = (0..polys.len()).filter(|&f| twin[f].is_none()).chain((0..polys.len()).filter(|&f| twin[f].is_some())).collect();
     let mut meshes: HashMap<usize, (Vec<Vec3>, Vec<[usize; 3]>)> = HashMap::new();
+    // per triangle of `out`, its face's spring stiffness for a decay length `round` (see `fair`)
+    let mut lambda: Vec<f64> = Vec::new();
     for f in order {
         let q = &polys[f];
         let m = q.p.len();
-        if m < 3 {
+        // a face of no area (the ASC's bonnet channel walls, collapsed onto the bonnet's edge by a
+        // `Push`, #465) has no plane to mesh in and would draw nothing; it goes
+        if m < 3 || (0..m).map(|i| q.p[i].cross(q.p[(i + 1) % m])).sum::<Vec3>().length() < 2e-6 {
             continue;
         }
         let face = &faces[f];
@@ -231,8 +297,12 @@ fn curve(faces: &[Face], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
                 p2.push(flat[k].lerp(flat[k1], s));
                 p3.push(edge_point(q.p[k], q.p[k1], i, n));
                 let edges = if i == 0 { vec![k, (k + m - 1) % m] } else { vec![k] };
-                if edges.into_iter().any(|e| !curved[f][e]) {
-                    fixed.insert(weld_key(p3[p3.len() - 1].to_array()));
+                let key = weld_key(p3[p3.len() - 1].to_array());
+                if edges.iter().any(|&e| !curved[f][e]) {
+                    fixed.insert(key);
+                }
+                if edges.iter().any(|&e| level[f][e]) {
+                    pinned_y.insert(key);
                 }
             }
         }
@@ -275,15 +345,16 @@ fn curve(faces: &[Face], z: &Smooth) -> (Vec<Face>, HashSet<EdgeKey>) {
             let uv: [f32; 2] = std::array::from_fn(|x| (0..3).map(|i| face.uv[q.src[tri[i]]][x] * w[i]).sum());
             (colour, uv)
         };
+        let round = rounds.get(f).copied().unwrap_or(0.0);
+        let lam = if round > 0.0 { (h / round).powi(4) as f64 / 4.0 } else { 0.0 };
         for tri in &tris {
             let a = tri.map(|i| attr(p2[i]));
-            out.push(Face { pts: tri.map(|i| p3[i].to_array()).to_vec(), normal: q.n.to_array(), colour: a.map(|x| x.0).to_vec(), uv: a.map(|x| x.1).to_vec(), smooth_deg: z.max_deg, remesh: 0.0, ..face.clone() });
+            out.push(Face { pts: tri.map(|i| p3[i].to_array()).to_vec(), normal: q.n.to_array(), colour: a.map(|x| x.0).to_vec(), uv: a.map(|x| x.1).to_vec(), smooth_deg: degs.get(f).copied().unwrap_or(z.max_deg), remesh: 0.0, ..face.clone() });
+            lambda.push(lam);
         }
         meshes.insert(f, (p3, tris));
     }
-    // the springs' stiffness for a decay length `round` (see `fair`)
-    let lambda = if z.round > 0.0 { (h / z.round).powi(4) as f64 / 4.0 } else { 0.0 };
-    fair(&mut out, &fixed, lambda);
+    fair(&mut out, &fixed, &pinned_y, &lambda);
     (out, outline)
 }
 
@@ -504,8 +575,8 @@ impl<'a> Cdt<'a> {
 /// the plate follows the facets beyond it, so their bulge stays (the Titan's zones have no
 /// springs: the plate through the outline alone, #171 phase 4; the R-Build 2's lost its fenders'
 /// bulge that way). The outline keeps its place; inside, no fold is left. Ordered maps: the same
-/// mesh every run.
-fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, lambda: f64) {
+/// mesh every run. `tri_lambda`: λ per triangle; a point takes the largest of its triangles'.
+fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, pinned_y: &HashSet<[i32; 3]>, tri_lambda: &[f64]) {
     let mut id: BTreeMap<[i32; 3], usize> = BTreeMap::new();
     for t in tris.iter() {
         for &p in &t.pts {
@@ -524,9 +595,21 @@ fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, lambda: f64) {
     }
     let nbr: Vec<Vec<usize>> = nbr.into_iter().map(|s| s.into_iter().collect()).collect();
     let mut is_fixed = vec![false; id.len()];
+    // free across and along the car, held in height (`Smooth::level`): the axes are solved
+    // apart (the CG runs per component), so such a point is an unknown in x and z only
+    let mut pin_y = vec![false; id.len()];
     for (k, &i) in &id {
         is_fixed[i] = fixed.contains(k);
+        pin_y[i] = !is_fixed[i] && pinned_y.contains(k);
     }
+    let mut lambda = vec![0.0f64; id.len()];
+    for (t, &l) in tris.iter().zip(tri_lambda) {
+        for &p in &t.pts {
+            let i = id[&weld_key(p)];
+            lambda[i] = lambda[i].max(l);
+        }
+    }
+    let springs = lambda.iter().any(|&l| l > 0.0);
     // rows and unknowns: every point off the outline (its first ring too: holding that ring in
     // the panels' planes, for their slopes, twisted the plate at every outline corner and
     // rippled it; #171 phase 4)
@@ -583,15 +666,17 @@ fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, lambda: f64) {
                 out[j] += y * w;
             }
         }
-        for (o, &f) in out.iter_mut().zip(&free) {
+        for ((o, &f), &py) in out.iter_mut().zip(&free).zip(&pin_y) {
             if !f {
                 *o = DVec3::ZERO;
+            } else if py {
+                o.y = 0.0;
             }
         }
     };
     let dot = |a: &[DVec3], b: &[DVec3]| a.iter().zip(b).fold(DVec3::ZERO, |s, (x, y)| s + *x * *y);
-    // CG on (LᵀL + λI) x = λ x₀ (the fixed points in the right-hand side too), the three axes at
-    // once, in f64 and to a tight residual: short edges make it stiff, and stopping early left
+    // CG on (LᵀL + Λ) x = Λ x₀ (Λ: the points' λ on the diagonal; the fixed points in the
+    // right-hand side too), the three axes at once, in f64 and to a tight residual: short edges make it stiff, and stopping early left
     // soft bumps. Starting from x₀ the residual is -LᵀL x₀ with or without the springs.
     // (A Jacobi preconditioner was tried: LᵀL's diagonal is near even, it saved no iterations.)
     let n = id.len();
@@ -608,10 +693,10 @@ fn fair(tris: &mut [Face], fixed: &HashSet<[i32; 3]>, lambda: f64) {
         }
         lap(&d, &mut tmp);
         lap_t(&tmp, &mut ad);
-        if lambda > 0.0 {
+        if springs {
             // d is zero on the fixed points, so this touches the unknowns only
-            for (a, d) in ad.iter_mut().zip(&d) {
-                *a += *d * lambda;
+            for ((a, d), &l) in ad.iter_mut().zip(&d).zip(&lambda) {
+                *a += *d * l;
             }
         }
         let alpha = rr / dot(&d, &ad).max(DVec3::splat(1e-300));
@@ -970,8 +1055,8 @@ mod tests {
             face(&[[-0.5, 0.0, 0.0], [-0.5, 0.0, 1.0], [-0.5 + c, s, 1.0], [-0.5 + c, s, 0.0]], [-s, c, 0.0]),
             face(&[[-0.5 + c, s, 0.0], [-0.5 + c, s, 1.0], [-0.5 + 2.0 * c, 0.0, 1.0], [-0.5 + 2.0 * c, 0.0, 0.0]], [s, c, 0.0]),
         ];
-        let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.1, loose: false, round: 0.0 };
-        let (tris, outline) = curve(&roof, &z);
+        let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.1, loose: false, round: vec![0.0], level: Vec::new(), max_degs: Vec::new() };
+        let (tris, outline) = curve(&roof, &vec![z.round_of(0); roof.len()], &vec![z.max_deg; roof.len()], &z);
         assert_eq!(outline.len(), 6);
         // the remesh covers both panels
         let area: f32 = tris.iter().map(|t| (Vec3::from(t.pts[1]) - Vec3::from(t.pts[0])).cross(Vec3::from(t.pts[2]) - Vec3::from(t.pts[0])).length() / 2.0).sum();
@@ -1006,8 +1091,8 @@ mod tests {
             face(&[[-0.5 + c, s, 0.0], [-0.5 + c, s, 1.0], [-0.5 + 2.0 * c, 0.0, 1.0], [-0.5 + 2.0 * c, 0.0, 0.0]], [s, c, 0.0]),
         ];
         let ridge = |loose: bool| {
-            let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.08, loose, round: 0.0 };
-            let (tris, _) = curve(&roof, &z);
+            let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.08, loose, round: vec![0.0], level: Vec::new(), max_degs: Vec::new() };
+            let (tris, _) = curve(&roof, &vec![z.round_of(0); roof.len()], &vec![z.max_deg; roof.len()], &z);
             tris.iter().flat_map(|t| t.pts.iter()).filter(|p| p[2] > 0.01 && p[2] < 0.2).fold(f32::MIN, |m, p| m.max(p[1]))
         };
         let (held, loose) = (ridge(false), ridge(true));
@@ -1025,8 +1110,8 @@ mod tests {
             face(&[[-0.5 + c, s, 0.0], [-0.5 + c, s, 1.0], [-0.5 + 2.0 * c, 0.0, 1.0], [-0.5 + 2.0 * c, 0.0, 0.0]], [s, c, 0.0]),
         ];
         let ridge = |round: f32| {
-            let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.08, loose: false, round };
-            let (tris, _) = curve(&roof, &z);
+            let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3]], hi: vec![[9.0; 3]], max_deg: 50.0, step: 0.08, loose: false, round: vec![round], level: Vec::new(), max_degs: Vec::new() };
+            let (tris, _) = curve(&roof, &vec![z.round_of(0); roof.len()], &vec![z.max_deg; roof.len()], &z);
             let pts: Vec<[f32; 3]> = tris.iter().flat_map(|t| t.pts.iter().copied()).collect();
             // the outline's corners stay
             assert!(pts.iter().any(|p| (Vec3::from(*p) - Vec3::new(-0.5 + c, s, 1.0)).length() < 1e-5));
@@ -1035,6 +1120,34 @@ mod tests {
         };
         let (free, held) = (ridge(0.0), ridge(0.15));
         assert!(held > free + 1e-3 && held < s - 1e-3, "{held} vs free {free}, ridge {s}");
+    }
+
+    /// `round` per box (the Kobra X3's soft bonnet beside stiff fenders): the same value in
+    /// every box fairs exactly as the one value; a stiffer side holds its facet closer, so the
+    /// roof's slope there stays nearer the facet's
+    #[test]
+    fn round_per_box() {
+        let (s, c) = (15f32.to_radians().sin() * 0.5, 15f32.to_radians().cos() * 0.5);
+        let roof = [
+            face(&[[-0.5, 0.0, 0.0], [-0.5, 0.0, 1.0], [-0.5 + c, s, 1.0], [-0.5 + c, s, 0.0]], [-s, c, 0.0]),
+            face(&[[-0.5 + c, s, 0.0], [-0.5 + c, s, 1.0], [-0.5 + 2.0 * c, 0.0, 1.0], [-0.5 + 2.0 * c, 0.0, 0.0]], [s, c, 0.0]),
+        ];
+        let run = |round: Vec<f32>| {
+            let z = Smooth { from: vec![[200; 3]], lo: vec![[-9.0; 3], [-9.0; 3]], hi: vec![[-0.5 + c, 9.0, 9.0], [9.0; 3]], max_deg: 50.0, step: 0.08, loose: false, round, level: Vec::new(), max_degs: Vec::new() };
+            let (tris, _) = curve(&roof, &[z.round_of(0), z.round_of(1)], &[z.max_deg; 2], &z);
+            tris.iter().flat_map(|t| t.pts.iter().copied()).collect::<Vec<[f32; 3]>>()
+        };
+        assert_eq!(run(vec![0.15]), run(vec![0.15, 0.15]));
+        // the height a quarter of the way across each side, mid-way along the ridge
+        let at = |pts: &[[f32; 3]], x: f32| pts.iter().filter(|p| (p[2] - 0.5).abs() < 0.05 && (p[0] - x).abs() < 0.03).fold(f32::MIN, |m, p| m.max(p[1]));
+        let (q0, q1) = (-0.5 + c * 0.5, -0.5 + c * 1.5);
+        let one = run(vec![0.3]);
+        let mixed = run(vec![0.3, 0.05]);
+        // the facets' height there is s / 2; the soft side bows off it more than the held one,
+        // and the held side lies nearer it than with the soft springs all over
+        let off = |pts: &[[f32; 3]], x: f32| (at(pts, x) - s * 0.5).abs();
+        let (soft, stiff, all_soft) = (off(&mixed, q0), off(&mixed, q1), off(&one, q1));
+        assert!(stiff < soft - 1e-3 && stiff < all_soft - 1e-3, "{soft} {stiff} {all_soft}");
     }
 
     /// a face across the centre line gets a lattice symmetric in x, with a row on the line (its

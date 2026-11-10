@@ -2152,7 +2152,7 @@ dependencies = [
 
 [[package]]
 name = "motor-audio"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "cpal",
  "symphonia",
@@ -2160,14 +2160,14 @@ dependencies = [
 
 [[package]]
 name = "motor-data"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "png 0.17.16",
 ]
 
 [[package]]
 name = "motor-sim"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "glam",
  "motor-data",
@@ -2176,18 +2176,18 @@ dependencies = [
 
 [[package]]
 name = "motor-tune"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "linkme",
 ]
 
 [[package]]
 name = "motor-version"
-version = "0.9.1-alpha"
+version = "0.9.2"
 
 [[package]]
 name = "motorinstall"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "eframe",
  "flacenc",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "motorview"
-version = "0.9.1-alpha"
+version = "0.9.2"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -2223,6 +2223,7 @@ dependencies = [
  "motor-version",
  "png 0.17.16",
  "pollster 1.0.1",
+ "rfd",
  "ttf-parser",
  "wgpu",
  "winit",

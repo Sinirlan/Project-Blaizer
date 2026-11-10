@@ -8,11 +8,12 @@
 //! row (`Look::Shelf`) and as the flyout's rows (`Look::Fly`); `It::hide` keeps an item out of the shelf. The game does
 //! not use any of it.
 
-use super::{key_name, Act, Ctx, DebugState, BINDS, HELD_FREE, HELD_RACE, TIME_SCALES};
+use super::{key_name, Act, DebugState, TIME_SCALES};
 use egui::emath::Numeric;
 use egui::{Align, Context, Frame, Id, Layout, Rect, Response, RichText, ScrollArea, Sense, Ui, Vec2};
 use motorview::cine_edit::{self, CineEdit, Preview, Req};
 use motorview::drive::{CamMode, PoseCam, Session};
+use motorview::fill_gizmo::Mode as GizmoMode;
 use motorview::ghost::{runs, Follow, Sync, ViewerGhost};
 use motorview::gui::{wheel_drag, wheel_slider};
 use motorview::icons as ic;
@@ -54,7 +55,7 @@ impl RTab {
         }
     }
 
-    fn icon(self) -> &'static str {
+    pub(crate) fn icon(self) -> &'static str {
         match self {
             RTab::View => ic::EYE,
             RTab::Sim => ic::PLAY,
@@ -81,16 +82,16 @@ impl RTab {
 }
 
 /// The game's own track and car names (`TrackName` / `CarName` of `Game/TrackN.trk` / `carNN.car`).
-const TRACKS: [&str; 8] = ["RedRock", "NolbyHills", "NeoCity", "Atlantika", "OkkunSpeedway", "Olympos", "RuhrStadt", "Goldbridge"];
-const CARS: [&str; 10] = ["Kobra X3", "Adder Mk2", "Python V12", "Serpent", "ASC II", "Avalanche", "ASC", "Resonic", "R-Build 2", "Titan"];
+pub(crate) const TRACKS: [&str; 8] = ["RedRock", "NolbyHills", "NeoCity", "Atlantika", "OkkunSpeedway", "Olympos", "RuhrStadt", "Goldbridge"];
+pub(crate) const CARS: [&str; 10] = ["Kobra X3", "Adder Mk2", "Python V12", "Serpent", "ASC II", "Avalanche", "ASC", "Resonic", "R-Build 2", "Titan"];
 
 /// The ribbon's own state (kept by the viewer between frames).
 pub struct RibbonState {
     pub tab: RTab,
     /// the shelf is hidden (`\`, double-click a tab); the top bar stays
     pub minimised: bool,
-    /// Help > Shortcuts search text
-    pub filter: String,
+    /// the transport strip above the status bar is hidden (`Shift+\`, #435)
+    pub no_transport: bool,
     /// the backdrop colour the picker starts from (gamma space)
     pub backdrop: [u8; 3],
     /// the open flyout: the group's index in the tab
@@ -99,27 +100,29 @@ pub struct RibbonState {
     pub pick: Option<Pick>,
 }
 
-/// One of the top bar's dropdowns.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// A dropdown held open for a headless shot: one of the top bar's, or a toolbar choice by its name.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Pick {
     Car,
     Track,
+    /// a choice of 5 or more options, by its full or short name (`Race camera`, `Speed`)
+    Item(String),
 }
 
 impl Pick {
-    /// `--ribbon-pick car|track`.
-    pub fn parse(s: &str) -> Option<Pick> {
+    /// `--ribbon-pick car|track|NAME`.
+    pub fn parse(s: &str) -> Pick {
         match s.to_ascii_lowercase().as_str() {
-            "car" => Some(Pick::Car),
-            "track" => Some(Pick::Track),
-            _ => None,
+            "car" => Pick::Car,
+            "track" => Pick::Track,
+            _ => Pick::Item(s.to_string()),
         }
     }
 }
 
 impl Default for RibbonState {
     fn default() -> Self {
-        RibbonState { tab: RTab::View, minimised: false, filter: String::new(), backdrop: [128; 3], fly: None, pick: None }
+        RibbonState { tab: RTab::View, minimised: false, no_transport: false, backdrop: [128; 3], fly: None, pick: None }
     }
 }
 
@@ -136,6 +139,8 @@ pub struct Ribbon<'a> {
     pub st: &'a mut RibbonState,
     pub tune: &'a mut Tune,
     pub view: &'a mut View,
+    /// the mode drawn now (`App::shown_view`: a previewed cine shot's `Mode` wins over `view.mode`, #432)
+    pub shown: RenderMode,
     pub dbg: &'a mut DebugState,
     pub sess: Option<&'a mut Session>,
     pub free: bool,
@@ -195,6 +200,8 @@ struct It<'a> {
     short: &'a str,
     act: Option<Act>,
     key: &'a str,
+    /// longer hover text when the name is kept short for the flyout row ("" = the name)
+    hover: &'a str,
     /// the flyout only (`sh: hide`)
     hide: bool,
     /// the shelf tile's value when it is not the choice's name (`MSAA 16×`)
@@ -203,7 +210,7 @@ struct It<'a> {
 
 impl<'a> It<'a> {
     fn new(icon: &'a str, name: &'a str, short: &'a str) -> It<'a> {
-        It { icon, name, short, act: None, key: "", hide: false, tile: None }
+        It { icon, name, short, act: None, key: "", hover: "", hide: false, tile: None }
     }
 
     fn act(mut self, a: Act) -> Self {
@@ -213,6 +220,11 @@ impl<'a> It<'a> {
 
     fn key(mut self, k: &'a str) -> Self {
         self.key = k;
+        self
+    }
+
+    fn hover(mut self, t: &'a str) -> Self {
+        self.hover = t;
         self
     }
 
@@ -234,10 +246,20 @@ impl<'a> It<'a> {
 
 /// Hover text: the item's name and its key.
 fn tip(it: &It, r: Response) -> Response {
+    let text = if it.hover.is_empty() { it.name } else { it.hover };
     match it.key_text() {
-        "" => r.on_hover_text(it.name),
-        k => r.on_hover_text(format!("{}  [{k}]", it.name)),
+        "" => r.on_hover_text(text),
+        k => r.on_hover_text(format!("{text}  [{k}]")),
     }
+}
+
+/// The tool shelf is the Remaster tab while Classic is drawn: its lit tools are drawn muted (#432).
+fn muted_id() -> Id {
+    Id::unique("ribbon::muted")
+}
+
+fn muted(ui: &Ui) -> bool {
+    ui.ctx().data(|d| d.get_temp::<bool>(muted_id())).unwrap_or(false)
 }
 
 fn open_id() -> Id {
@@ -262,6 +284,7 @@ fn fly_is_open(ui: &Ui) -> bool {
 fn tog(ui: &mut Ui, l: Look, it: &It, on: bool) -> bool {
     match l {
         Look::Shelf if it.hide => false,
+        Look::Shelf if muted(ui) => tip(it, glass_ui::tool_muted(ui, it.icon, it.short, on)).clicked(),
         Look::Shelf => tip(it, glass_ui::tool(ui, it.icon, it.short, on)).clicked(),
         Look::Fly => glass_ui::row_check(ui, it.icon, it.name, it.key_text(), on),
     }
@@ -283,19 +306,35 @@ fn press(ui: &mut Ui, l: Look, it: &It, enabled: bool) -> bool {
     }
 }
 
-/// A choice among `names`: a value tile on the shelf (click opens the flyout), ◀ value ▶ in the flyout. The new index
-/// when a triangle was clicked.
+/// A choice among `names`. Under `glass_ui::DROPDOWN_MIN` options: a value tile on the shelf (click opens the flyout),
+/// ◀ value ▶ in the flyout. From `DROPDOWN_MIN` on (the rule of #431): the tile opens the option list under itself and
+/// the flyout row is a `value ▾` box opening the same list, the wheel over either steps. The new index when one was
+/// picked.
 fn pick_idx(ui: &mut Ui, l: Look, it: &It, names: &[&str], i: usize) -> Option<usize> {
     let i = i.min(names.len().saturating_sub(1));
+    let dropdown = names.len() >= glass_ui::DROPDOWN_MIN;
+    // a shot holds the list open: on the shelf unless the group's flyout is open, else in the flyout
+    let hold = (l == Look::Fly || !fly_is_open(ui)) && glass_ui::is_held(ui.ctx(), &[it.name, it.short]);
+    let opts = glass_ui::ListOpts { wheel: true, hold, ..Default::default() };
     match l {
         Look::Shelf if it.hide => None,
         Look::Shelf => {
             let shown = it.tile.as_deref().unwrap_or(names[i]);
-            if glass_ui::value_tile(ui, it.short, shown, true, None, fly_is_open(ui)).clicked() {
-                request_open(ui);
+            if !dropdown {
+                if glass_ui::value_tile(ui, it.short, shown, true, None, fly_is_open(ui)).clicked() {
+                    request_open(ui);
+                }
+                return None;
             }
-            None
+            let r = glass_ui::value_tile(ui, it.short, shown, true, None, fly_is_open(ui));
+            let r = tip(it, r);
+            let n = glass_ui::pick_list(ui, &r, names, i, glass_ui::ListOpts { width: Some(r.rect.width().max(170.0)), ..opts });
+            if glass_ui::list_is_open(ui.ctx(), &r) {
+                glass_ui::tile_open_rim(ui, r.rect);
+            }
+            n
         }
+        Look::Fly if dropdown => glass_ui::row_pick(ui, it.icon, it.name, it.key_text(), names, i, opts),
         Look::Fly => match glass_ui::row_choice(ui, it.icon, it.name, it.key_text(), names[i], i > 0, i + 1 < names.len()) {
             -1 => Some(i - 1),
             1 => Some(i + 1),
@@ -368,12 +407,12 @@ fn list_tile(ui: &mut Ui, l: Look, it: &It, shown: &str) -> bool {
 }
 
 /// One shelf group.
-struct Group {
-    name: &'static str,
+pub(crate) struct Group {
+    pub(crate) name: &'static str,
     /// the dock page its ⧉ opens
     page: Option<Page>,
     /// has a ▾ flyout (a choice, a slider or hidden items)
-    fly: bool,
+    pub(crate) fly: bool,
     /// the group is on the shelf now
     shown: fn(&Ribbon<'_>) -> bool,
     body: fn(&mut Ribbon<'_>, &mut Ui, Look),
@@ -408,9 +447,9 @@ fn cine_is_open(s: &Ribbon<'_>) -> bool {
 macro_rules! bodies {
     ($($n:ident),* $(,)?) => { $( fn $n(s: &mut Ribbon<'_>, ui: &mut Ui, l: Look) { s.$n(ui, l) } )* };
 }
-bodies!(cine_cameras, cine_clock, cine_file, cine_preview, cine_render, dbg_gizmos, dbg_inspect, ghost_ghost, ghost_show, ghost_window, help_keys, render_debug, render_effects, render_light, rm_aa, rm_car, rm_fog, rm_grass, rm_hdr, rm_post, rm_shadows, rm_sky, rm_surface, sim_car, sim_physics, sim_playback, sim_race, sim_run_file, view_camera, view_capture, view_show, world_editor, world_file, world_generate, world_history, world_select, world_view);
+bodies!(cine_cameras, cine_clock, cine_file, cine_history, cine_preview, cine_render, dbg_gizmos, dbg_inspect, ghost_ghost, ghost_show, ghost_window, help_keys, render_debug, render_effects, render_light, rm_aa, rm_car, rm_fog, rm_grass, rm_hdr, rm_post, rm_shadows, rm_sky, rm_surface, sim_car, sim_physics, sim_playback, sim_race, sim_run_file, view_camera, view_capture, view_show, world_editor, world_file, world_generate, world_history, world_select, world_view);
 
-fn groups(tab: RTab) -> &'static [Group] {
+pub(crate) fn groups(tab: RTab) -> &'static [Group] {
     const VIEW: [Group; 3] = [g("Camera", Some(Page::Camera), true, view_camera), g("Show", None, false, view_show), g("Capture", None, false, view_capture)];
     const SIM: [Group; 5] = [
         g("Playback", Some(Page::Sim), true, sim_playback),
@@ -441,14 +480,15 @@ fn groups(tab: RTab) -> &'static [Group] {
         gif("View", None, false, world_is_open, world_view),
     ];
     const GHOST: [Group; 3] = [g("Ghost", Some(Page::Ghost), false, ghost_ghost), gif("Show", None, true, ghost_loaded, ghost_show), g("Ghost window", None, true, ghost_window)];
-    const CINE: [Group; 5] = [
+    const CINE: [Group; 6] = [
         g("File", Some(Page::Cine), false, cine_file),
+        gif("History", None, true, cine_is_open, cine_history),
         gif("Cameras", None, true, cine_is_open, cine_cameras),
         gif("Preview", None, false, cine_is_open, cine_preview),
         gif("Render", None, false, cine_is_open, cine_render),
         gif("Clock", Some(Page::Cine), false, cine_is_open, cine_clock),
     ];
-    const HELP: [Group; 1] = [g("Keys", None, true, help_keys)];
+    const HELP: [Group; 1] = [g("Keys", None, false, help_keys)];
     match tab {
         RTab::View => &VIEW,
         RTab::Sim => &SIM,
@@ -466,9 +506,14 @@ impl Ribbon<'_> {
     /// The top bar and the tool shelf along the top edge; their height in points.
     pub fn bar(&mut self, ui: &mut Ui) -> f32 {
         let ctx = ui.ctx().clone();
+        let held = match &self.st.pick {
+            Some(Pick::Item(n)) => n.clone(),
+            _ => String::new(),
+        };
+        glass_ui::set_held(&ctx, &held);
         let width = ui.available_width();
-        // a narrow window: only the open tab keeps its label, then the key cap goes
-        let (compact, tiny) = (width < 1500.0, width < 1300.0);
+        // a narrow window: only the open tab keeps its label (all nine labels need about 1720 px, #438), then the key cap goes
+        let (compact, tiny) = (width < 1760.0, width < 1300.0);
         let mut h = 0.0;
         let top = egui::Panel::top("ribbon_bar").frame(Frame::NONE).show(ui, |ui| {
             ui.add_space(10.0);
@@ -491,6 +536,8 @@ impl Ribbon<'_> {
         h += top.response.rect.height();
         let mut region = top.response.rect;
         let tab = self.st.tab;
+        let classic_note = tab == RTab::Remaster && self.shown == RenderMode::Classic;
+        ctx.data_mut(|dt| dt.insert_temp(muted_id(), classic_note));
         let defs = groups(tab);
         let mut rects: Vec<Option<Rect>> = vec![None; defs.len()];
         let mut card_rect = Rect::NOTHING;
@@ -507,6 +554,15 @@ impl Ribbon<'_> {
                             ui.horizontal_top(|ui| {
                                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                                 let mut first = true;
+                                if classic_note {
+                                    let key = key_name(Act::Mode);
+                                    glass_ui::shelf_group(ui, "Classic view", true, None, false, |ui| {
+                                        if glass_ui::classic_note(ui, key) {
+                                            self.acts.push((Act::Mode, 0));
+                                        }
+                                    });
+                                    first = false;
+                                }
                                 for (gi, d) in defs.iter().enumerate() {
                                     if !(d.shown)(self) {
                                         continue;
@@ -569,8 +625,32 @@ impl Ribbon<'_> {
         h
     }
 
+    /// Every group on the shelf now, of every tab, drawn once as its flyout (`Look::Fly`), unseen and off the screen,
+    /// recording its rows (motorview's command search, #436; `glass_ui::harvest_begin`). The rows are disabled, so
+    /// nothing is clicked or changed. Each row with its tab and the group's index in `groups(tab)`.
+    pub fn harvest(&mut self, ui: &mut Ui) -> Vec<(RTab, usize, glass_ui::Harvested)> {
+        let off = Rect::from_min_size(egui::pos2(-20000.0, 0.0), Vec2::new(420.0, 100_000.0));
+        let mut out = Vec::new();
+        for tab in RTab::ALL {
+            for (gi, d) in groups(tab).iter().enumerate() {
+                if !(d.shown)(self) {
+                    continue;
+                }
+                let mut ghost = ui.new_child(egui::UiBuilder::new().id_salt(("harvest", tab as u8, gi)).max_rect(off).invisible());
+                glass_ui::harvest_begin();
+                (d.body)(self, &mut ghost, Look::Fly);
+                out.extend(glass_ui::harvest_take().into_iter().map(|h| (tab, gi, h)));
+            }
+        }
+        out
+    }
+
     /// A press outside the flyout and the shelf closes the flyout.
     fn fly_outside_press(&mut self, ctx: &Context, shelf: Rect) {
+        // a press on an option list (it hangs below the flyout) is not outside
+        if egui::Popup::is_any_open(ctx) {
+            return;
+        }
         let fly = FLY_RECT.with(std::cell::Cell::get);
         let pressed = ctx.input(|i| i.pointer.primary_pressed().then(|| i.pointer.interact_pos()).flatten());
         if pressed.is_some_and(|p| !fly.contains(p) && !shelf.contains(p)) {
@@ -696,6 +776,7 @@ impl Ribbon<'_> {
         self.tog_act(ui, l, It::new(ic::GAUGE, "Telemetry", "Telemetry").act(Act::Overlay), self.overlay);
         self.tog_act(ui, l, It::new(ic::CROSSHAIR, "Target", "Target").act(Act::Cross), self.cross);
         self.tog_act(ui, l, It::new(ic::PANEL_TOP, "Toolbar", "Toolbar").act(Act::MenuBar), !self.st.minimised);
+        self.tog_act(ui, l, It::new(ic::PLAY, "Transport bar (pause, step, timeline and speed above the status bar)", "Transport").act(Act::Transport), !self.st.no_transport);
         self.tog_act(ui, l, It::new(ic::BLEND, "Solid panels (no blur behind the panels)", "Solid").act(Act::SolidUi), self.solid_ui);
     }
 
@@ -710,7 +791,9 @@ impl Ribbon<'_> {
         let paused = self.dbg.paused;
         if l == Look::Shelf {
             // timeline (#60): the whole recorded run, drag to scrub; driving in the past takes over
-            if let Some(span) = self.sess.as_ref().and_then(|x| x.timeline.as_ref()).map(|t| t.span()) {
+            // (with the transport strip shown it carries the timeline: never two, #435)
+            let span = self.sess.as_ref().and_then(|x| x.timeline.as_ref()).map(|t| t.span()).filter(|_| self.st.no_transport);
+            if let Some(span) = span {
                 let left = format!("{} / {}", clock(span.1), clock(span.2));
                 if let Some(t) = glass_ui::timeline(ui, span, &left, "rec") {
                     *self.seek = Some(t);
@@ -719,7 +802,7 @@ impl Ribbon<'_> {
             // held buttons: the sim goes back / runs ahead while the button is down, then returns
             // to what it was doing (playing or paused)
             let back = glass_ui::tool(ui, ic::REWIND, "Rewind", false).on_hover_text("hold: run the race backwards  [, key]");
-            self.tog_act(ui, l, It::new(if paused { ic::PLAY } else { ic::PAUSE }, "Pause", if paused { "Paused" } else { "Playing" }).act(Act::Pause), paused);
+            self.tog_act(ui, l, It::new(if paused { ic::PLAY } else { ic::PAUSE }, "Pause", if paused { "Paused" } else { "Pause" }).act(Act::Pause), paused);
             self.press_act(ui, l, It::new(ic::STEP, "Step one frame", "Step").act(Act::Step), true);
             let fwd = glass_ui::tool(ui, ic::FORWARD, "Forward", false).on_hover_text("hold: run the race ahead at x4  [/ key]");
             if back.is_pointer_button_down_on() {
@@ -769,14 +852,13 @@ impl Ribbon<'_> {
 
     fn sim_car(&mut self, ui: &mut Ui, l: Look) {
         self.press_act(ui, l, It::new(ic::RELOAD, "Reload car recipes", "Reload").act(Act::ReloadCars), true);
+        self.press_act(ui, l, It::new(ic::DOWNLOAD, "Export body (.obj to the Exports folder)", "Export .obj").act(Act::ExportBody), true);
         self.tog_act(ui, l, It::new(ic::BOX, "Swap mesh (original / generated)", "Swap mesh").act(Act::SwapMesh), self.mesh_swap);
         if l == Look::Fly {
-            let opts: Vec<String> = (1..=10).map(|c| c.to_string()).collect();
-            let opts: Vec<glass_ui::SegOpt> = opts.iter().map(|t| glass_ui::SegOpt { icon: "", text: t }).collect();
             let sel = (self.car.clamp(1, 10) - 1) as usize;
-            let mut picked = None;
-            glass_ui::row_ctl(ui, ic::CAR, "Car", key_name(Act::NextCar), 260.0, |ui| picked = glass_ui::seg(ui, &opts, sel, Some(22.0)));
-            if let Some(i) = picked {
+            let hold = glass_ui::is_held(ui.ctx(), &["Sim car"]);
+            // the car switch rebuilds the race, so the wheel does not step it
+            if let Some(i) = glass_ui::row_pick(ui, ic::CAR, "Car", key_name(Act::NextCar), &CARS, sel, glass_ui::ListOpts { digits: Some(2), hold, ..Default::default() }) {
                 self.acts.push((Act::Car, i));
             }
         }
@@ -852,6 +934,13 @@ impl Ribbon<'_> {
         flip(ui, l, &It::new(ic::SPARKLES, "Clear coat", "Coat"), &mut r.clear_coat);
         flip(ui, l, &It::new(ic::SHADOW, "Car shadows", "Shadows"), &mut r.car_shadows);
         flip(ui, l, &It::new(ic::CAR, "Generated cars", "Gen. cars").hide(), &mut r.generated_cars);
+        // REMASTER (#478): which body the cars load, the model file, the recipe or the original (the cars reload)
+        let mut src = motorview::procgen::carmodel::source();
+        pick(ui, l, &It::new(ic::BOX, "Car model", "Model"), &mut src, &motorview::procgen::carmodel::CarSource::ALL, |c| c.name().to_string());
+        if src != motorview::procgen::carmodel::source() {
+            motorview::procgen::carmodel::set_source(src);
+            self.acts.push((Act::ReloadCars, 0));
+        }
         let (lo, hi) = RemasterView::CAR_LOD_DISTANCE;
         ui.add_enabled_ui(r.generated_cars, |ui| fslider(ui, l, &It::new(ic::BINOCULARS, "Car detail distance", "Detail").hide(), &mut r.car_lod_distance, lo..=hi, pct));
     }
@@ -994,13 +1083,15 @@ impl Ribbon<'_> {
         match l {
             Look::Shelf => {
                 ui.add_space(4.0);
-                let (area, _) = ui.allocate_exact_size(Vec2::new(4.0 * 26.0 + 3.0 * 3.0, 2.0 * 24.0 + 3.0), Sense::hover());
+                // 8 kinds (no water) and "all": two rows of 5
+                let (area, _) = ui.allocate_exact_size(Vec2::new(5.0 * 26.0 + 4.0 * 3.0, 2.0 * 24.0 + 3.0), Sense::hover());
                 let kinds: Vec<Kind> = Kind::ALL.into_iter().filter(|k| *k != Kind::Water).collect();
-                let cell = |i: usize| Rect::from_min_size(area.min + Vec2::new((i % 4) as f32 * 29.0, (i / 4) as f32 * 27.0), Vec2::new(26.0, 24.0));
+                let cell = |i: usize| Rect::from_min_size(area.min + Vec2::new((i % 5) as f32 * 29.0, (i / 5) as f32 * 27.0), Vec2::new(26.0, 24.0));
                 for (i, k) in kinds.iter().enumerate() {
                     let on = !w.hidden[*k as usize];
                     if glass_ui::layer_cell(ui, cell(i), i, kind_icon(*k), on).on_hover_text(format!("{} layer", k.name())).clicked() {
                         w.hidden[*k as usize] = on;
+                        w.dirty_mesh = true;
                     }
                 }
                 let all = kinds.iter().all(|k| !w.hidden[*k as usize]);
@@ -1008,6 +1099,7 @@ impl Ribbon<'_> {
                     for k in &kinds {
                         w.hidden[*k as usize] = all;
                     }
+                    w.dirty_mesh = true;
                 }
             }
             Look::Fly => {}
@@ -1070,20 +1162,18 @@ impl Ribbon<'_> {
     fn cine_file(&mut self, ui: &mut Ui, l: Look) {
         let Some(ed) = self.cine.as_deref_mut() else { return };
         let open = ed.active();
-        if press(ui, l, &It::new(ic::FILM, "New sequence (on this track, its first camera where the free camera is; the race becomes all AI)", "New"), true) {
+        if press(ui, l, &It::new(ic::FILM, "New sequence", "New").hover("New sequence (on this track, its first camera where the free camera is; the race becomes all AI)"), true) {
             ed.reqs.push(Req::New);
         }
-        if press(ui, l, &It::new(ic::UPLOAD, "Open… (pick a .cine in the dock)", "Open…"), true) {
+        if press(ui, l, &It::new(ic::UPLOAD, "Open…", "Open…").hover("Open… (pick a .cine file; the dock lists the saved ones)"), true) {
+            ed.reqs.push(Req::Pick);
             self.tune.page = Some(Page::Cine);
         }
-        if press(ui, l, &It::new(ic::SAVE, "Save", "Save"), open) {
-            ed.msg = match ed.save(None) {
-                Ok(p) => format!("saved {}", p.display()),
-                Err(e) => e,
-            };
+        if press(ui, l, &It::new(ic::SAVE, "Save", "Save").act(Act::CineSave), open) {
+            ed.save_msg();
         }
-        if press(ui, l, &It::new(ic::CLOSE, "Close (leave the editor, the race stays)", "Close"), open) {
-            ed.close();
+        if press(ui, l, &It::new(ic::CLOSE, "Close", "Close").hover("Close (leave the editor, the race stays)"), open) {
+            ed.reqs.push(Req::Close);
         }
         if l == Look::Shelf {
             let name = match &ed.path {
@@ -1095,23 +1185,35 @@ impl Ribbon<'_> {
         }
     }
 
+    fn cine_history(&mut self, ui: &mut Ui, l: Look) {
+        let Some(ed) = self.cine.as_deref() else { return };
+        let (undo, redo) = (ed.can_undo(), ed.can_redo());
+        self.press_act(ui, l, It::new(ic::UNDO, "Undo (Ctrl+Z)", "Undo").act(Act::CineUndo), undo);
+        self.press_act(ui, l, It::new(ic::REDO, "Redo (Ctrl+Y)", "Redo").act(Act::CineRedo), redo);
+    }
+
     fn cine_cameras(&mut self, ui: &mut Ui, l: Look) {
         let Some(ed) = self.cine.as_deref_mut() else { return };
         let ncars = ed.seq.as_ref().map_or(0, |q| q.race.cars.len());
         if press(ui, l, &It::new(ic::CAMERA, "Camera here", "Add here").act(Act::CineAddCam), true) {
             self.acts.push((Act::CineAddCam, 0));
         }
-        if press(ui, l, &It::new(ic::CAR, "Mounted camera (on the followed car, where the free camera is)", "Mounted"), true) {
+        if press(ui, l, &It::new(ic::CAR, "Mounted camera", "Mounted").hover("Mounted camera (on the car New cameras follow, where the free camera is)"), true) {
             ed.reqs.push(Req::AddMounted);
         }
-        if press(ui, l, &It::new(ic::SPLINE, "Path camera (its first key at the free camera)", "Path"), true) {
+        if press(ui, l, &It::new(ic::SPLINE, "Path camera", "Path").hover("Path camera (its first key at the free camera)"), true) {
             ed.reqs.push(Req::AddPath);
         }
         if press(ui, l, &It::new(ic::ROUTE, "Path key here", "Add key").act(Act::CineAddKey), true) {
             self.acts.push((Act::CineAddKey, 0));
         }
+        for (m, icon, name, tip, label) in [(GizmoMode::Move, ic::MOVE, "Move gizmo", "Move gizmo: arrows on the global axes", "Move"), (GizmoMode::Rotate, ic::ROTATE, "Rotate gizmo", "Rotate gizmo: rings on the camera's own axes (a static camera's aim point, a mounted camera's or a path key's angles)", "Rotate")] {
+            if tog(ui, l, &It::new(icon, name, label).hover(tip).act(Act::CineGizmo(m)), ed.gizmo == m) {
+                self.acts.push((Act::CineGizmo(m), 0));
+            }
+        }
         let many = ed.seq.as_ref().is_some_and(|q| q.cameras.len() > 1);
-        if press(ui, l, &It::new(ic::TRASH, "Remove the selected camera and its shots", "Remove"), many) {
+        if press(ui, l, &It::new(ic::TRASH, "Remove camera", "Remove").hover("Remove the selected camera and its shots"), many) {
             ed.remove_selected();
         }
         if let Some(seq) = ed.seq.as_ref() {
@@ -1141,6 +1243,9 @@ impl Ribbon<'_> {
         }
         let names: Vec<&str> = Preview::ALL.iter().map(|p| p.name()).collect();
         let i = Preview::ALL.iter().position(|p| *p == ed.preview).unwrap_or(0);
+        let mut sound = !ed.muted;
+        flip(ui, l, &It::new(ic::VOLUME, "Sound", "Sound").hover("Hear the race from the previewed camera (the sequence's audio rows; this switch is not saved)"), &mut sound);
+        ed.muted = !sound;
         if l == Look::Shelf {
             let opts: Vec<glass_ui::SegOpt> = names.iter().map(|t| glass_ui::SegOpt { icon: "", text: t }).collect();
             if let Some(n) = glass_ui::seg(ui, &opts, i, None) {
@@ -1157,7 +1262,7 @@ impl Ribbon<'_> {
         match (ed.job.as_ref(), ed.render_path()) {
             (None, Some(out)) => {
                 let name = out.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                if press(ui, l, &It::new(ic::FILM, "Render the whole sequence as it is here, in the background, with these graphics options (the status bar shows the progress)", "Render"), true) {
+                if press(ui, l, &It::new(ic::FILM, "Render", "Render").hover("Render the whole sequence as it is here, in the background, with these graphics options (the status bar shows the progress)"), true) {
                     ed.reqs.push(Req::Render);
                 }
                 if l == Look::Shelf {
@@ -1170,7 +1275,7 @@ impl Ribbon<'_> {
                 }
             }
             (Some(j), _) => {
-                if press(ui, l, &It::new(ic::CLOSE, "Cancel the render (the frames so far stay in the video)", "Cancel"), true) {
+                if press(ui, l, &It::new(ic::CLOSE, "Cancel render", "Cancel").hover("Cancel the render (the frames so far stay in the video)"), true) {
                     j.watch.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 if let (Some((text, _, _)), Look::Shelf) = (ed.job_status(), l) {
@@ -1182,7 +1287,7 @@ impl Ribbon<'_> {
 
     fn cine_clock(&mut self, ui: &mut Ui, l: Look) {
         let paused = self.dbg.paused;
-        self.tog_act(ui, l, It::new(if paused { ic::PLAY } else { ic::PAUSE }, "Pause", if paused { "Paused" } else { "Playing" }).act(Act::Pause), paused);
+        self.tog_act(ui, l, It::new(if paused { ic::PLAY } else { ic::PAUSE }, "Pause", if paused { "Paused" } else { "Pause" }).act(Act::Pause), paused);
         let Some(ed) = self.cine.as_deref_mut() else { return };
         if press(ui, l, &It::new(ic::RESTART, "Start (the clock to 0)", "Start"), true) {
             ed.seek(0.0);
@@ -1193,7 +1298,7 @@ impl Ribbon<'_> {
         if press(ui, l, &It::new(ic::FORWARD, "Next shot", "Next shot"), true) {
             ed.shot_step(1);
         }
-        if l == Look::Shelf {
+        if l == Look::Shelf && self.st.no_transport {
             let end = ed.slider_end(self.sess.as_deref());
             let race = ed.race_secs();
             let behind = if ed.behind { " · ahead" } else { "" };
@@ -1206,44 +1311,10 @@ impl Ribbon<'_> {
 
     // ----- Help -----
 
+    /// Help > Shortcuts: opens the command search (#436), which lists every key, action and setting.
     fn help_keys(&mut self, ui: &mut Ui, l: Look) {
-        match l {
-            Look::Shelf => {
-                if glass_ui::tool(ui, ic::KEYBOARD, "Shortcuts", false).on_hover_text("every key and its action").clicked() {
-                    request_open(ui);
-                }
-            }
-            Look::Fly => {
-                for (title, keys) in [("free camera", HELD_FREE), ("race camera", HELD_RACE)] {
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(title.to_uppercase()).size(10.0).color(theme::DIM));
-                    for (k, what) in keys {
-                        key_line(ui, k, what);
-                    }
-                }
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(ic::SEARCH).color(theme::DIM));
-                    ui.add(egui::TextEdit::singleline(&mut self.st.filter).hint_text("filter keys and actions").desired_width(250.0));
-                    if ui.small_button(ic::CLOSE).clicked() {
-                        self.st.filter.clear();
-                    }
-                });
-                let f = self.st.filter.to_lowercase();
-                ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                    for (title, ctx) in [("any", Ctx::Any), ("race camera", Ctx::Race), ("free camera", Ctx::Free), ("world editor", Ctx::World)] {
-                        let mut head = false;
-                        for b in BINDS.iter().filter(|b| b.ctx == ctx && (f.is_empty() || b.label().to_lowercase().contains(&f) || b.name.to_lowercase().contains(&f) || title.contains(&f))) {
-                            if !head {
-                                ui.add_space(6.0);
-                                ui.label(RichText::new(title.to_uppercase()).size(10.0).color(theme::DIM));
-                                head = true;
-                            }
-                            key_line(ui, b.name, b.label());
-                        }
-                    }
-                });
-            }
+        if press(ui, l, &It::new(ic::KEYBOARD, "Search every key, action and setting", "Shortcuts").act(Act::Command), true) {
+            self.acts.push((Act::Command, 0));
         }
     }
 }
@@ -1251,15 +1322,6 @@ impl Ribbon<'_> {
 thread_local! {
     /// the flyout's rect of the last pass (a press outside it closes it)
     static FLY_RECT: std::cell::Cell<Rect> = const { std::cell::Cell::new(Rect::NOTHING) };
-}
-
-/// A key and what it does, one line of the shortcut list.
-fn key_line(ui: &mut Ui, key: &str, what: &str) {
-    ui.horizontal(|ui| {
-        ui.set_height(22.0);
-        ui.add_sized([110.0, 18.0], egui::Label::new(RichText::new(key).font(egui::FontId::monospace(12.0)).color(theme::WHITE)).sense(Sense::hover()));
-        ui.label(RichText::new(what).color(theme::TEXT));
-    });
 }
 
 /// A percent.

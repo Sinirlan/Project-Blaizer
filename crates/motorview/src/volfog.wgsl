@@ -36,7 +36,7 @@ struct U {
     proj: vec4<f32>,
     // volume near, volume far, slices, columns' x size
     vol: vec4<f32>,
-    // output width, height
+    // output width, height; zw: the projection's lens shift in NDC (render.rs `Camera::shift`)
     scr: vec4<f32>,
     // x: lamps in use, y, z: cosine of the lamp cone's inner and outer half angle, w: scatter gain
     lamp_n: vec4<f32>,
@@ -54,6 +54,9 @@ struct U {
     shaft_vp: mat4x4<f32>,
     // x: sun shafts on, y: depth bias (map units), z: how much the haze darkens in the sun's shadow
     shaft: vec4<f32>,
+    // REMASTER clouds (#470): shader.wgsl `Globals.clouds` / `cloud_n`
+    clouds: array<vec4<f32>, 64>,
+    cloud_n: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: U;
 
@@ -88,6 +91,42 @@ fn fog_sky_amount(dir: vec3<f32>) -> f32 {
     let haze = 1.0 - exp(-min(rho / (k * max(dir.y, 0.02)), 20.0));
     let below = 1.0 - smoothstep(-0.02, 0.0, dir.y);
     return max(1.0 - (1.0 - u.fog5.z * w) * (1.0 - haze), below);
+}
+
+// shader.wgsl `cloud_tau` over `u`: the optical depth of the clouds along o + t dir, t in 0..t_max
+fn cloud_tau(o: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
+    var tau = 0.0;
+    let n = u32(u.cloud_n.x + 0.5);
+    for (var i = 0u; i < n; i++) {
+        let c = u.clouds[4u * i];
+        let r0 = u.clouds[4u * i + 1u].xyz;
+        let r1 = u.clouds[4u * i + 2u].xyz;
+        let r2 = u.clouds[4u * i + 3u].xyz;
+        let d = o - c.xyz;
+        let u0 = vec3<f32>(dot(r0, d), dot(r1, d), dot(r2, d));
+        let v = vec3<f32>(dot(r0, dir), dot(r1, dir), dot(r2, dir));
+        let a = max(dot(v, v), 1e-12);
+        let tm = -dot(u0, v) / a;
+        let pm = u0 + v * tm;
+        let qmin = dot(pm, pm);
+        if (qmin < 1.0) {
+            let h = sqrt((1.0 - qmin) / a);
+            let s0 = max(tm - h, 0.0) - tm;
+            let s1 = min(tm + h, t_max) - tm;
+            if (s1 > s0) {
+                tau += c.w * ((1.0 - qmin) * (s1 - s0) - a * (s1 * s1 * s1 - s0 * s0 * s0) / 3.0);
+            }
+        }
+    }
+    return tau;
+}
+
+// `f` with the clouds up to `t_max` added in front (they take the fog colour like the distance ramp)
+fn with_clouds(f: f32, dir: vec3<f32>, t_max: f32) -> f32 {
+    if (u.cloud_n.x < 0.5) {
+        return f;
+    }
+    return 1.0 - (1.0 - f) * exp(-cloud_tau(u.cam.xyz, dir, t_max));
 }
 
 // view distance of slice boundary k (exponential)
@@ -254,11 +293,11 @@ fn fs_apply(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let dir = normalize(b.xyz / b.w - a.xyz / a.w);
     if (d >= 1.0) {
         // the sky: fogged by direction (shader.wgsl fog_sky skips it in a volumetric view)
-        let f = fog_sky_amount(dir);
+        let f = with_clouds(fog_sky_amount(dir), dir, 1e7);
         return vec4<f32>(fog_colour(dir) * f, 1.0 - f);
     }
     let z = u.proj.z * u.proj.w / (u.proj.w - d * (u.proj.w - u.proj.z));
-    let dist = length(vec3<f32>(ndc.x * z / u.proj.x, ndc.y * z / u.proj.y, z));
+    let dist = length(vec3<f32>((ndc.x - u.scr.z) * z / u.proj.x, (ndc.y - u.scr.w) * z / u.proj.y, z));
     // slice coordinate: texel k holds the far side of slice k+1, so 0 (the near plane) is the
     // implicit (no scatter, full transmittance) texel before it
     let w = clamp(log(z / u.vol.x) / log(u.vol.y / u.vol.x), 0.0, 1.0) * u.vol.z;
@@ -266,6 +305,6 @@ fn fs_apply(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let near = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     let v = mix(near, tex, clamp(w, 0.0, 1.0));
     // the distance ramp (and the clip guard) behind the volume: scene * T * (1 - f) + S * (1 - f) + colour * f
-    let f = fog_dist(dist);
+    let f = with_clouds(fog_dist(dist), dir, dist);
     return vec4<f32>(v.rgb * (1.0 - f) + fog_colour(dir) * f, v.a * (1.0 - f));
 }

@@ -36,8 +36,21 @@ pub struct Centreline {
     pub groups: usize,
     /// (arc length, checkpoint number)
     pub checkpoints: Vec<(f32, u32)>,
+    /// The key channel 3 ("heading" slot) along the line, one value per sample: the zone's echo strength
+    /// 0..1. The original copies it from the spline tracker to the car's progress struct (`0x425bab`,
+    /// S+0x38) and from there to P+0xc28 (`0x45b570`), the `b` of the engine sound (07-audio 7.2) [O].
+    echo: Vec<f32>,
+    /// The key channels 6-8 (`sx sy sz`) along the line, one value per sample: the tint the original
+    /// multiplies into a car's or a loose prop's ambient and sun light (`0x425b96` -> S+0x3c ->
+    /// object +0xb8, used by `0x439134`) [O]. 1.0 where a key has no such channel.
+    tint: Vec<Vec3>,
     pub finish_point: Vec3,
     pub finish_dir: Vec3,
+}
+
+/// Channels 6-8 of a key; 1.0 when the file has fewer channels.
+fn tint_of(v: &[f32]) -> Vec3 {
+    Vec3::new(v.get(6).copied().unwrap_or(1.0), v.get(7).copied().unwrap_or(1.0), v.get(8).copied().unwrap_or(1.0))
 }
 
 fn catmull(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
@@ -48,10 +61,10 @@ fn catmull(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
 
 impl Centreline {
     pub fn from_motion(m: &Motion) -> Result<Centreline, String> {
-        let mut keys: Vec<(Vec3, f32)> = m
+        let mut keys: Vec<(Vec3, f32, f32, Vec3)> = m
             .keys
             .iter()
-            .map(|k| (Vec3::new(k.values[0], k.values[1], k.values[2]), k.values.get(4).copied().unwrap_or(0.0)))
+            .map(|k| (Vec3::new(k.values[0], k.values[1], k.values[2]), k.values.get(4).copied().unwrap_or(0.0), k.values.get(3).copied().unwrap_or(0.0), tint_of(&k.values)))
             .collect();
         if keys.len() > 2 && keys[0].0.distance(keys[keys.len() - 1].0) < 0.01 {
             keys.pop(); // closed: last key repeats the first
@@ -67,6 +80,16 @@ impl Centreline {
                 pts.push(catmull(p(i + n - 1), p(i), p(i + 1), p(i + 2), k as f32 / SAMPLES_PER_KEY as f32));
             }
         }
+        let echo = (0..n)
+            .flat_map(|i| {
+                let e = |j: usize| Vec3::new(keys[j % n].2, 0.0, 0.0);
+                (0..SAMPLES_PER_KEY).map(move |k| catmull(e(i + n - 1), e(i), e(i + 1), e(i + 2), k as f32 / SAMPLES_PER_KEY as f32).x)
+            })
+            .collect();
+        let tint = (0..n)
+            .flat_map(|i| (0..SAMPLES_PER_KEY).map(move |k| (i, k)))
+            .map(|(i, k)| catmull(keys[(i + n - 1) % n].3, keys[i].3, keys[(i + 1) % n].3, keys[(i + 2) % n].3, k as f32 / SAMPLES_PER_KEY as f32))
+            .collect();
         let mut s = Vec::with_capacity(pts.len());
         let mut acc = 0.0;
         for i in 0..pts.len() {
@@ -80,7 +103,7 @@ impl Centreline {
             .map(|(i, k)| (s[i * SAMPLES_PER_KEY], k.1.round() as u32))
             .collect();
         let finish_dir = (pts[1] - pts[0]).normalize_or(Vec3::Z);
-        Ok(Centreline { finish_point: pts[0], finish_dir, pts, s, length: acc, groups: n, checkpoints })
+        Ok(Centreline { finish_point: pts[0], finish_dir, pts, s, length: acc, groups: n, checkpoints, echo, tint })
     }
 
     /// Arc length at key `k` (the lap's length for the key after the last).
@@ -96,6 +119,28 @@ impl Centreline {
         let seg = self.pts[j] - self.pts[i];
         let t = ((s - self.s[i]) / seg.length().max(1e-6)).clamp(0.0, 1.0);
         (self.pts[i] + seg * t, seg.normalize_or(self.finish_dir))
+    }
+
+    /// Echo strength 0..1 at arc length `s` (`b` of the car sound update, clamped as at `0x483d8a`) [O].
+    // CLASSIC 0x425bab -> S+0x38 -> P+0xc28 (0x45b570)
+    pub fn echo_at(&self, s: f32) -> f32 {
+        let s = s.rem_euclid(self.length);
+        let i = self.s.partition_point(|&x| x <= s).saturating_sub(1);
+        let j = (i + 1) % self.pts.len();
+        let next = if j == 0 { self.length } else { self.s[j] };
+        let t = ((s - self.s[i]) / (next - self.s[i]).max(1e-6)).clamp(0.0, 1.0);
+        (self.echo[i] + (self.echo[j] - self.echo[i]) * t).clamp(0.0, 1.0)
+    }
+
+    /// The `sx sy sz` tint at arc length `s`, not clamped (the light is, later, `0x439134`) [O].
+    // CLASSIC 0x425b96 -> S+0x3c -> object +0xb8
+    pub fn tint_at(&self, s: f32) -> Vec3 {
+        let s = s.rem_euclid(self.length);
+        let i = self.s.partition_point(|&x| x <= s).saturating_sub(1);
+        let j = (i + 1) % self.pts.len();
+        let next = if j == 0 { self.length } else { self.s[j] };
+        let t = ((s - self.s[i]) / (next - self.s[i]).max(1e-6)).clamp(0.0, 1.0);
+        self.tint[i].lerp(self.tint[j], t)
     }
 
     /// Nearest sample to `p` (searching around `hint`, or everywhere when `None`) and its arc length.
@@ -678,7 +723,7 @@ pub(crate) mod tests {
             acc += pts[i].distance(pts[(i + 1) % pts.len()]);
         }
         let finish_dir = (pts[1] - pts[0]).normalize();
-        Centreline { finish_point: pts[0], finish_dir, pts, s, length: acc, groups: n, checkpoints: vec![] }
+        Centreline { finish_point: pts[0], finish_dir, echo: vec![0.0; pts.len()], tint: vec![Vec3::ONE; pts.len()], pts, s, length: acc, groups: n, checkpoints: vec![] }
     }
 
     /// A 400 x 300 m rectangle with chamfered corners and checkpoints on its long sides: the
@@ -688,6 +733,51 @@ pub(crate) mod tests {
         // chamfered corners (two keys 40 m along each side), a key mid-side for the checkpoints
         let corners = [(40.0, 0.0), (200.0, 0.0), (360.0, 0.0), (400.0, 40.0), (400.0, 260.0), (360.0, 300.0), (200.0, 300.0), (40.0, 300.0), (0.0, 260.0), (0.0, 40.0)];
         rectangle_turns(&corners);
+    }
+
+    /// The echo channel (key channel 3) is interpolated along the line and clamped to 0..1.
+    #[test]
+    fn echo_follows_channel_three() {
+        let pts = [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0), (100.0, 100.0), (0.0, 100.0)];
+        let keys = pts
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, z))| cfg::MotionKey { values: vec![x, 0.0, z, if i == 2 { 0.4 } else { 0.0 }, 0.0], frame: i as f32, linear: 0.0, tension: 0.0, continuity: 0.0, bias: 0.0 })
+            .collect();
+        let line = Centreline::from_motion(&Motion { version: 1, channels: 9, keys }).unwrap();
+        let at_key = line.echo_at(line.key_arc(2));
+        assert!((at_key - 0.4).abs() < 1e-3, "echo at the key: {at_key}");
+        assert!(line.echo_at(line.key_arc(5)).abs() < 1e-3);
+        let mid = line.echo_at((line.key_arc(1) + line.key_arc(2)) * 0.5);
+        assert!(mid > 0.0 && mid < 0.4, "between the keys: {mid}");
+        for k in 0..400 {
+            let e = line.echo_at(k as f32 * line.length / 400.0);
+            assert!((0.0..=1.0).contains(&e));
+        }
+    }
+
+    /// The tint (key channels 6-8) is interpolated along the line, not clamped, and 1.0 without the channels.
+    #[test]
+    fn tint_follows_channels_six_to_eight() {
+        let pts = [(0.0, 0.0), (100.0, 0.0), (200.0, 0.0), (300.0, 0.0), (300.0, 100.0), (200.0, 100.0), (100.0, 100.0), (0.0, 100.0)];
+        let mk = |n: usize| -> Vec<cfg::MotionKey> {
+            pts.iter()
+                .enumerate()
+                .map(|(i, &(x, z))| {
+                    let mut values = vec![x, 0.0, z, 0.0, 0.0, 0.0];
+                    if n > 6 {
+                        values.extend(if i == 2 { [0.5, 1.0, 1.3] } else { [1.0; 3] });
+                    }
+                    cfg::MotionKey { values, frame: i as f32, linear: 0.0, tension: 0.0, continuity: 0.0, bias: 0.0 }
+                })
+                .collect()
+        };
+        let line = Centreline::from_motion(&Motion { version: 1, channels: 9, keys: mk(9) }).unwrap();
+        let t = line.tint_at(line.key_arc(2));
+        assert!((t - Vec3::new(0.5, 1.0, 1.3)).abs().max_element() < 1e-3, "tint at the key: {t}");
+        assert!((line.tint_at(line.key_arc(5)) - Vec3::ONE).abs().max_element() < 1e-3);
+        let plain = Centreline::from_motion(&Motion { version: 1, channels: 6, keys: mk(6) }).unwrap();
+        assert_eq!(plain.tint_at(123.0), Vec3::ONE);
     }
 
     /// A 28 degree kink in the top side (up and back down within 80 m) is not a corner: still four turns.

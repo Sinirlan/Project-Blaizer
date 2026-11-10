@@ -158,35 +158,54 @@ pub fn palette(i: usize) -> [f32; 4] {
     [0.25 + 0.75 * r, 0.25 + 0.75 * g, 0.25 + 0.75 * b, 1.0]
 }
 
-/// tan of half the horizontal field of view of `cam` in a view whose field is `fov_x` degrees at zoom 1 (render.rs
+/// tan of half the horizontal field of view of `cam` in a view whose field is `fov_x` degrees at zoom 1 and 4:3 (render.rs
 /// `Gpu::draw`: the TV camera's zoom narrows it, 0x40b498).
 fn half_tan(cam: &Camera, fov_x: f32) -> f32 {
     (fov_x.to_radians() / 2.0).tan() / cam.zoom.max(1e-3)
 }
 
-/// Window position (pixels) of a view-space point, as the main view projects it (render.rs `Gpu::draw`: `fov_x` =
-/// `View::fov_x`, the camera's zoom and roll; view distance and mirror ignored); None behind the camera or off screen.
-pub fn project(cam: &Camera, size: (u32, u32), fov_x: f32, p: Vec3) -> Option<(f32, f32)> {
+/// The tangents of the half fields (across, up) of `cam` in a window of `aspect`, as the main view draws them: Vert+ on a
+/// window wider than 4:3 (`render::field_aspect`, #446 / #479), except for a Cine camera (`Camera::lens_across`).
+fn half_tans(cam: &Camera, fov_x: f32, aspect: f32) -> (f32, f32) {
+    let k = half_tan(cam, fov_x);
+    let field = crate::render::field_aspect(!cam.lens_across, aspect);
+    (k * aspect / field, k / field)
+}
+
+/// Window position (pixels, may lie outside the window) and view depth (metres along the view axis) of a view-space
+/// point, as the main view projects it (render.rs `Gpu::draw`: `fov_x` = `View::fov_x`, the camera's zoom and roll; the
+/// mirror is ignored, the far plane is the caller's business: `depth`); None behind the camera.
+pub fn project_any(cam: &Camera, size: (u32, u32), fov_x: f32, p: Vec3) -> Option<(f32, f32, f32)> {
     let aspect = size.0 as f32 / size.1.max(1) as f32;
-    let fov = 2.0 * (half_tan(cam, fov_x) / aspect).atan();
+    let fov = 2.0 * half_tans(cam, fov_x, aspect).1.atan();
+    // the planes only shape depth, not x / y / w
     let proj = glam::camera::rh::proj::directx::perspective(fov, aspect, 0.2, 1000.0);
+    // the lens shift as `Gpu::draw` (#441)
+    let proj = Mat4::from_translation(cam.shift.extend(0.0)) * proj;
     let view = glam::camera::rh::view::look_to_mat4(cam.pos, cam.forward(), cam.up());
     let c = (proj * view) * p.extend(1.0);
     if c.w <= 0.2 {
         return None;
     }
     let (x, y) = (c.x / c.w, c.y / c.w);
-    ((-1.0..=1.0).contains(&x) && (-1.0..=1.0).contains(&y)).then_some(((x + 1.0) * 0.5 * size.0 as f32, (1.0 - y) * 0.5 * size.1 as f32))
+    Some(((x + 1.0) * 0.5 * size.0 as f32, (1.0 - y) * 0.5 * size.1 as f32, c.w))
+}
+
+/// Window position (pixels) of a view-space point inside the window; None behind the camera or off screen. Used by
+/// picking and the gizmo drags, so it has no far plane: a point beyond the view distance still picks.
+pub fn project(cam: &Camera, size: (u32, u32), fov_x: f32, p: Vec3) -> Option<(f32, f32)> {
+    let (x, y, _) = project_any(cam, size, fov_x, p)?;
+    ((0.0..=size.0 as f32).contains(&x) && (0.0..=size.1 as f32).contains(&y)).then_some((x, y))
 }
 
 /// Unit view-space ray through window pixel `px` (the inverse of `project`).
 pub fn cursor_ray(cam: &Camera, size: (u32, u32), fov_x: f32, px: (f32, f32)) -> Vec3 {
     let aspect = size.0 as f32 / size.1.max(1) as f32;
-    let (nx, ny) = (px.0 / size.0.max(1) as f32 * 2.0 - 1.0, 1.0 - px.1 / size.1.max(1) as f32 * 2.0);
-    // at depth 1, x spans +-tan(fov_x / 2) / zoom and y that over the aspect
-    let k = half_tan(cam, fov_x);
+    let (nx, ny) = (px.0 / size.0.max(1) as f32 * 2.0 - 1.0 - cam.shift.x, 1.0 - px.1 / size.1.max(1) as f32 * 2.0 - cam.shift.y);
+    // at depth 1, x spans +-tan(fov_x / 2) / zoom (times aspect over the field's: Vert+) and y that over the aspect
+    let (kx, ky) = half_tans(cam, fov_x, aspect);
     let view = glam::camera::rh::view::look_to_mat4(cam.pos, cam.forward(), cam.up());
-    view.inverse().transform_vector3(Vec3::new(nx * k, ny * k / aspect, -1.0)).normalize_or(cam.forward())
+    view.inverse().transform_vector3(Vec3::new(nx * kx, ny * ky, -1.0)).normalize_or(cam.forward())
 }
 
 const WHEEL_NAMES: [&str; 4] = ["FL", "FR", "BR", "BL"];
@@ -237,7 +256,7 @@ pub fn car(g: &mut Gizmos, sess: &Session, slot: usize, label: bool) {
         }
     }
     if label {
-        g.label(car.pos + y * 2.0, format!("#{slot} {}", r.driver.name), WHITE);
+        g.label(car.pos + y * 2.0, format!("slot {slot} {}", r.driver.name), WHITE);
     }
 }
 
@@ -404,7 +423,7 @@ pub fn car_panel(sess: &Session, slot: usize) -> Vec<String> {
     let mat = |m: Option<usize>| m.and_then(|m| w.materials.get(m)).map_or("-", |m| m.name.as_str());
     let fwd = c.rot.z_axis;
     let mut out = vec![
-        format!("car #{slot} car{:02} {} ({})", r.car_id, r.driver.name, if r.human { "human" } else { "AI" }),
+        format!("{}, slot {slot}, driver {} ({})", sess.racer_label(slot), r.driver.name, if r.human { "human" } else { "AI" }),
         format!("pos   {}  heading {:.0} deg", v3(c.pos), fwd.x.atan2(fwd.z).to_degrees()),
         format!("vel   {}  {:.0} km/h", v3(c.vel), t.kmh),
         format!("ang   {}", v3(c.ang)),
@@ -427,7 +446,7 @@ pub fn racers_panel(sess: &Session) -> Vec<String> {
         let r = &race.racers[i];
         let mark = if i == sess.focus { '>' } else { ' ' };
         let done = r.progress.finished_ms.map_or(String::new(), |f| format!(" fin {}", fmt_ms(f)));
-        out.push(format!("{mark}{} #{i} {:<20} lap {} {:3.0} km/h node {:4}{done}", place + 1, r.driver.name, r.progress.lap, r.telemetry.kmh, r.ai.node()));
+        out.push(format!("{mark}{} slot {i} {:<20} lap {} {:3.0} km/h node {:4}{done}", place + 1, r.driver.name, r.progress.lap, r.telemetry.kmh, r.ai.node()));
     }
     out
 }

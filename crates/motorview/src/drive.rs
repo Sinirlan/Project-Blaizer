@@ -22,6 +22,10 @@ motor_tune::tunable! {
 }
 
 /// Game space (left-handed) -> view space (right-handed): negate z.
+/// A scene object that moved less than this (m) since its last centreline tint sample keeps the value [design choice: saves the search for sleepers].
+const PROP_TINT_STEP: f32 = 0.05;
+/// A scene object that moved more than this (m) since its last sample searches the whole line (rewind, restart) [design choice].
+const PROP_TINT_JUMP: f32 = 20.0;
 const FLIP: Vec3 = Vec3::new(1.0, 1.0, -1.0);
 
 // The eye offsets and look-at points below are car space, game axes (x right, y up, z forward),
@@ -413,6 +417,14 @@ impl Default for Follow {
     }
 }
 
+/// A scene object's centreline tint and how it was found (`Session::prop_tints`).
+#[derive(Clone, Copy)]
+struct PropTint {
+    at: Option<Vec3>,
+    hint: Option<usize>,
+    tint: [f32; 3],
+}
+
 pub struct Session {
     pub race: Race,
     /// slot whose car the camera follows
@@ -465,12 +477,18 @@ pub struct Session {
     /// time, oldest first (`Frame::trail`), and per racer where and when it was last stamped
     trail: std::collections::VecDeque<TrailStamp>,
     trail_last: Vec<(Vec3, f32)>,
+    /// CLASSIC centreline tint of every scene object (`prop_tints`): where it was last sampled, the
+    /// tracker's key hint and the value
+    prop_tint: std::cell::RefCell<Vec<PropTint>>,
     /// CHEAT tribute to tron, REMASTER Neon grid (#320): per racer the points of its light wall of the last
     /// `LIGHT_WALL_LIFE` seconds of sim time, oldest first, and where the car is now (the wall's live end)
     light_walls: Vec<std::collections::VecDeque<WallPt>>,
     light_head: Vec<Option<WallPt>>,
     /// simulated seconds stepped so far (the trail's clock; `rewind` takes them back)
     pub sim_secs: f32,
+    /// motorview cine (#423): the race is a recording (`from_recording`): `play_to` drives it, its clock holds at the
+    /// last recorded frame
+    pub replay: bool,
 }
 
 motor_tune::tunable! {
@@ -500,6 +518,10 @@ motor_tune::tunable! {
     /// area: Camera & drive/Effects
     WHEEL_STEER: f32 = 0.7;
 }
+
+/// motorview cine (#423): `Session::play_to` seeks rather than steps a recording forward by more than this, seconds
+/// (a jump of the editor's clock) [design choice].
+const PLAY_JUMP_S: f64 = 2.0;
 
 // Skid marks, CLASSIC (the mark code 0x446644, 08-missing-features 8.6): which wheels mark is
 // `Car::skid_marking`, the commit distance is `skid_step2`; the constants below are the rest of the original's spacing.
@@ -933,9 +955,11 @@ impl Session {
             setup: None,
             trail: std::collections::VecDeque::new(),
             trail_last: vec![(Vec3::ZERO, f32::NEG_INFINITY); n],
+            prop_tint: Default::default(),
             light_walls: vec![Default::default(); n],
             light_head: vec![None; n],
             sim_secs: 0.0,
+            replay: false,
             fx: crate::fx::Effects::new(n),
             finish_motion: motor_data::fs::read(root, "Data/Finish/finish.mot")
                 .ok()
@@ -960,6 +984,57 @@ impl Session {
         // #374: the physics the run was made on (MHR3 names the fixed tick; older files step once per frame)
         sess.race.set_fixed_tick(h.tick_hz);
         Ok(sess)
+    }
+
+    /// The League drivers' own paint per slot (the human's car keeps the scene's): what the scene of a recording is
+    /// loaded with.
+    pub fn driver_paints(&self) -> Vec<(usize, [[u8; 3]; 3])> {
+        self.race.racers.iter().enumerate().filter(|(_, r)| !r.human).filter_map(|(i, r)| r.driver.car_colours.map(|c| (i, c))).collect()
+    }
+
+    /// motorview cine (#423): a recording as a cine race. The recorded frames are stepped up to the "3" of the
+    /// countdown (the first frame after the fly-by, or the green light with `start_go`), and the rest become the
+    /// timeline, so timeline second 0 is the sequence's time 0. `play_to` then drives it; `setup` stays None (the
+    /// frames do not start at the race load, so they make no repro file).
+    pub fn from_recording(root: &Path, rec: &Recording, start_go: bool) -> Result<Session, String> {
+        let mut sess = Self::for_recording(root, rec)?;
+        sess.fly_by = false;
+        let at_zero = |race: &Race| if start_go { race.started() } else { race.countdown <= motor_sim::session::COUNT_DIGITS_S };
+        let mut k = 0;
+        while k < rec.frames.len() && !at_zero(&sess.race) {
+            Recording::step(&mut sess.race, &rec.frames[k]);
+            k += 1;
+        }
+        if k == rec.frames.len() {
+            return Err(format!("the recording ends before the {}", if start_go { "green light" } else { "countdown" }));
+        }
+        sess.timeline = Some(crate::timeline::Timeline::from_frames(&mut sess.race, &rec.frames[k..]));
+        sess.replay = true;
+        Ok(sess)
+    }
+
+    /// motorview cine (#423): put a recording (`from_recording`) at timeline second `secs`, held at its end. Forward
+    /// the recorded frames are stepped one by one (skid marks, smoke and the wheels run with them) until the clock is
+    /// at or past `secs`; back, or further ahead than `PLAY_JUMP_S`, it seeks. The cars are then drawn at `secs`
+    /// exactly, between the last two states (`Race::set_view_lead`): pose resampling, so a slow-motion shot moves
+    /// smoothly. A session without a timeline is left as it is.
+    pub fn play_to(&mut self, secs: f64) {
+        const EPS: f64 = 1e-6;
+        let Some((start, now, end)) = self.timeline.as_ref().map(|t| t.span()) else { return };
+        let secs = secs.clamp(start, end);
+        if secs < now - EPS || secs > now + PLAY_JUMP_S {
+            self.seek(secs);
+            self.jumped();
+        }
+        loop {
+            let Some((_, now, end)) = self.timeline.as_ref().map(|t| t.span()) else { return };
+            if now >= secs - EPS || now >= end - EPS {
+                self.race.set_view_lead((now - secs).max(0.0) as f32);
+                return;
+            }
+            // the timeline replays its next recorded frame (its own dt) for an idle input
+            self.step(0.0, Input::default());
+        }
     }
 
     /// The slot motorview's hand driving feeds the keys to (`step_as`): the followed car, `None`
@@ -1433,6 +1508,11 @@ impl Session {
         self.cam.hides_car() && !self.flying() && !self.top_down() && !self.ignition()
     }
 
+    /// The followed car's slot while the view leaves it out (its body and its shadow, 0x45a210 / 0x438308).
+    pub fn hidden_focus(&self) -> Option<usize> {
+        self.hides_car().then_some(self.focus)
+    }
+
     /// lemmy / ace "Hell mode" (#316): `Some(lightning)` while the cheat is on, the flash rolled on a 1/30 s tick of the
     /// race clock (`cheats::hell_flash`, a design choice: the original rolls per drawn frame).
     pub fn hell(&self) -> Option<bool> {
@@ -1559,14 +1639,14 @@ impl Session {
 
     /// (mesh index, model matrix) for every car; meshes are loaded in grid-slot order.
     pub fn models(&self) -> Vec<(usize, Mat4)> {
-        self.models_hiding(self.hides_car().then_some(self.focus))
+        self.models_hiding(self.hidden_focus())
     }
 
     /// The body (mesh index, model matrix) of the car a view leaves out (`hide`, or by default
     /// the followed car when the camera hides it): its lights still light the scene (REMASTER
     /// car lights).
     pub fn hidden_bodies(&self, hide: Option<usize>) -> Vec<(usize, Mat4)> {
-        let hide = hide.or(self.hides_car().then_some(self.focus));
+        let hide = hide.or(self.hidden_focus());
         hide.filter(|&i| i < self.race.racers.len()).map(|i| (i * CAR_MESHES, self.model_of(i))).into_iter().collect()
     }
 
@@ -1687,6 +1767,38 @@ impl Session {
         &self.spin
     }
 
+    /// CLASSIC: per car in grid-slot order, the centreline's `sx sy sz` at its arc length, which the
+    /// original multiplies into the car's ambient and sun light (`0x425b96` -> S+0x3c -> body +0xb8
+    /// by `0x45b549`, used by `0x439134`; the wheels share it) [O].
+    pub fn car_tints(&self) -> Vec<[f32; 3]> {
+        self.race.racers.iter().map(|r| self.race.line.tint_at(r.progress.s).to_array()).collect()
+    }
+
+    /// CLASSIC: the same for the scene objects, in `prop_models` order. Only a rigid body without a
+    /// motion samples the line, at its position every frame (`0x455ef8` -> `0x425ae0`, tracker hint =
+    /// the last key); everything else keeps the 1.0 of its loader (`0x45555c`, `0x455ddd`) [O].
+    /// The search restarts from the whole line when the object jumped (rewind, restart); an object
+    /// that moved under `PROP_TINT_STEP` keeps its value.
+    pub fn prop_tints(&self) -> Vec<[f32; 3]> {
+        let mut cache = self.prop_tint.borrow_mut();
+        cache.resize(self.race.props.props.len(), PropTint { at: None, hint: None, tint: [1.0; 3] });
+        let line = &self.race.line;
+        for (c, p) in cache.iter_mut().zip(&self.race.props.props) {
+            if !p.samples_tint() {
+                c.tint = [1.0; 3];
+                continue;
+            }
+            let pos = p.pose.pos;
+            let moved = c.at.map_or(f32::INFINITY, |a| a.distance(pos));
+            if moved < PROP_TINT_STEP {
+                continue;
+            }
+            let (key, s) = line.project(pos, if moved < PROP_TINT_JUMP { c.hint } else { None });
+            (c.at, c.hint, c.tint) = (Some(pos), Some(key), line.tint_at(s).to_array());
+        }
+        cache.iter().map(|c| c.tint).collect()
+    }
+
     /// Per car in grid-slot order (car mesh index / `CAR_MESHES`): this frame's brake input,
     /// which brightens its tail lights in Remaster [design choice].
     pub fn car_brakes(&self) -> Vec<f32> {
@@ -1710,14 +1822,12 @@ impl Session {
     /// Car shadows (0x438308): a ground plane from three downward rays under shadow points
     /// 5, 6 and 10; the 16 points are dropped vertically onto it and drawn as a 3x3 grid of
     /// quads. APPROX: the original starts the first ray at the midpoint of points 5 and 6.
-    pub fn shadows(&self) -> Vec<Vertex> {
-        self.shadows_except(None)
-    }
-
-    /// `shadows` without car `skip`'s (a ghost-like car casts none).
-    pub fn shadows_except(&self, skip: Option<usize>) -> Vec<Vertex> {
+    /// Every car but those in `skip` (a ghost-like car casts none) casts one. The followed car's own is
+    /// skipped when the view hides it (`hidden_focus`): CLASSIC 0x438308 [I: goes with the car's draw skip, 0x45a210].
+    pub fn shadows_except(&self, skip: &[usize]) -> Vec<Vertex> {
+        let skip: Vec<usize> = skip.iter().copied().chain(self.hidden_focus()).collect();
         let mut out = Vec::new();
-        for (i, (r, pts)) in self.race.racers.iter().zip(&self.shadow_points).enumerate().filter(|(i, (r, _))| Some(*i) != skip && r.progress.eliminated_ms.is_none()) {
+        for (i, (r, pts)) in self.race.racers.iter().zip(&self.shadow_points).enumerate().filter(|(i, (r, _))| !skip.contains(i) && r.progress.eliminated_ms.is_none()) {
             let Some(pts) = pts else { continue };
             let scale = if r.remote { self.race.car_scale.0 } else { r.car.p.scale };
             let v = self.race.view_pose(i);
@@ -1778,11 +1888,13 @@ impl Session {
         props.extend(self.finish_emblem(cam));
         FrameParts {
             cars: self.models(),
-            shadows: if shadows { self.shadows() } else { Vec::new() },
+            shadows: if shadows { self.shadows_except(&[]) } else { Vec::new() },
             skids: if skids { self.skid_marks(detailed) } else { Vec::new() },
             props,
             glows: self.prop_glows(),
             brakes: self.car_brakes(),
+            car_tints: self.car_tints(),
+            prop_tints: self.prop_tints(),
             spins: self.wheel_spins().to_vec(),
             motion: self.car_motions(),
             trail: self.trail.iter().copied().collect(),
@@ -1815,12 +1927,23 @@ impl Session {
         true
     }
 
+    /// Race position of racer `slot` (1 = leading).
+    pub fn position_of(&self, slot: usize) -> usize {
+        self.race.standings().iter().position(|&i| i == slot).unwrap_or(0) + 1
+    }
+
+    /// The one label of a car (#433): `P8 · 01 Kobra X3` (race position, car number, the game's name).
+    pub fn racer_label(&self, slot: usize) -> String {
+        let name = self.race.racers.get(slot).map_or(String::new(), |r| crate::scene::car_label(r.car_id, &r.car.p.name));
+        format!("P{} · {name}", self.position_of(slot))
+    }
+
     /// One-line race HUD for the window title.
     pub fn hud(&self) -> String {
         let r = &self.race.racers[self.focus];
         let p = &r.progress;
         let t = &r.telemetry;
-        let pos = self.race.standings().iter().position(|&i| i == self.focus).unwrap_or(0) + 1;
+        let pos = self.position_of(self.focus);
         let gear = if t.gear == 0 { "R".to_string() } else { t.gear.to_string() };
         let mut s = format!("P{pos}/{}  Lap {}/{}  ", self.race.racers.len(), p.lap, p.laps);
         if !self.race.started() {
@@ -1859,6 +1982,9 @@ pub struct FrameParts {
     pub props: Vec<(usize, Mat4)>,
     pub glows: Vec<Vec3>,
     pub brakes: Vec<f32>,
+    /// CLASSIC centreline tint per racer / scene object (`Session::car_tints`, `prop_tints`); empty = 1.0
+    pub car_tints: Vec<[f32; 3]>,
+    pub prop_tints: Vec<[f32; 3]>,
     pub spins: Vec<[f32; 2]>,
     /// REMASTER grass: per racer, how it presses the blades
     pub motion: Vec<crate::render::CarMotion>,
@@ -1888,6 +2014,8 @@ impl FrameParts {
         f.props = &self.props;
         f.prop_glow = &self.glows;
         f.car_brake = &self.brakes;
+        f.car_tint = &self.car_tints;
+        f.prop_tint = &self.prop_tints;
         f.car_spin = &self.spins;
         f.car_motion = &self.motion;
         f.trail = &self.trail;
@@ -2131,6 +2259,64 @@ mod tests {
         assert_eq!(after, state(&s));
         s.seek(1000.0).unwrap();
         assert_eq!(later, state(&s));
+    }
+
+    /// #423: a recording as a cine race. Time 0 is the "3" of the countdown, `play_to` a recorded frame's end draws
+    /// that frame's poses, and a moment between two frames draws between them (on the per-frame path exactly the
+    /// lerp), forward, back and past the end; on both physics paths, frames of 1/50 and 1/70 s (needs the install).
+    #[test]
+    fn recording_plays_to_the_video_clock() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.exists() {
+            return;
+        }
+        for tick in [None, Some(60.0)] {
+            let cars = lineup(2);
+            let player = cars.len() - 1;
+            let mut s = Session::new(&root, 2, &cars, Some(player), Difficulty::Medium).unwrap();
+            let row = AiRow::Difficulty(Difficulty::Medium);
+            s.setup = Some(Header { track: 2, laps: s.race.laps, catchup: true, rules: Rules::Normal, manual: false, row, player: Some(player), cars: cars.clone(), track_name: "Test".into(), nick: String::new(), car_name: String::new(), drivers: Vec::new(), tick_hz: None, race_ms: None, best_lap_ms: None });
+            s.race.set_fixed_tick(tick);
+            s.record_timeline();
+            // (seconds since the race load, countdown, the drawn poses) at every frame's end; the fly-by is not skipped
+            let mut ends = vec![(0.0f64, s.race.countdown, (0..cars.len()).map(|i| s.race.view_pose(i).pos).collect::<Vec<_>>())];
+            let mut secs = 0.0f64;
+            for i in 0..700 {
+                let dt = if i % 2 == 0 { 1.0 / 50.0 } else { 1.0 / 70.0 };
+                s.step(dt, Input { throttle: 1.0, steer: (i as f32 * 0.05).sin() * 0.4, ..Input::default() });
+                secs += dt as f64;
+                ends.push((secs, s.race.countdown, (0..cars.len()).map(|i| s.race.view_pose(i).pos).collect()));
+            }
+            let rec = Recording::from_bytes(&s.recording().unwrap().to_bytes()).unwrap();
+            let zero = ends.iter().position(|e| e.1 <= motor_sim::session::COUNT_DIGITS_S).unwrap();
+            let t0 = ends[zero].0;
+            let ends: Vec<_> = ends[zero..].iter().map(|e| (e.0 - t0, e.2.clone())).collect();
+            let mut r = Session::from_recording(&root, &rec, false).unwrap();
+            assert!(r.replay && r.setup.is_none());
+            assert!(r.race.countdown <= motor_sim::session::COUNT_DIGITS_S && !r.race.started(), "{tick:?}: time 0 is the 3");
+            let end = r.timeline.as_ref().unwrap().span().2;
+            assert!((end - ends.last().unwrap().0).abs() < 1e-6, "{tick:?}: the timeline ends with the frames");
+            let close = |a: &[Vec3], b: &[Vec3], tol: f32| a.iter().zip(b).all(|(x, y)| x.distance(*y) < tol);
+            let drawn = |r: &Session| (0..cars.len()).map(|i| r.race.view_pose(i).pos).collect::<Vec<_>>();
+            // video frames of 1/30 s, forward; then back to 3 s and again to 6 s (a seek and a replay)
+            let mut times: Vec<f64> = (0..250).map(|n| n as f64 / 30.0).collect();
+            times.extend([3.0, 3.5, 6.0, end + 5.0]);
+            for &t in &times {
+                r.play_to(t);
+                let k = ends.iter().position(|e| e.0 >= t - 1e-9).unwrap_or(ends.len() - 1);
+                let now = drawn(&r);
+                if (ends[k].0 - t).abs() < 1e-6 || k == 0 || t > end {
+                    assert!(close(&now, &ends[k].1, 1e-3), "{tick:?} at {t}: a frame's end draws that frame");
+                    continue;
+                }
+                let (a, b) = (&ends[k - 1], &ends[k]);
+                let f = ((t - a.0) / (b.0 - a.0)) as f32;
+                let lerp: Vec<_> = a.1.iter().zip(&b.1).map(|(p, q)| p.lerp(*q, f)).collect();
+                // the fixed tick draws between ticks, not between frames: on the frames' path within a few cm
+                let tol = if tick.is_none() { 1e-3 } else { 0.05 };
+                assert!(close(&now, &lerp, tol), "{tick:?} at {t}: between the frames {} and {}", a.0, b.0);
+            }
+        }
     }
 
     /// A recorded run is a repro file: saved, read back and loaded as a new session it ends in

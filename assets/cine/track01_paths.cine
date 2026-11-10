@@ -31,4 +31,4 @@ Shake nose handheld 1.5
 Shot 0 fly FadeIn 1
 Shot 4 gantry
 Shot 7 dolly
-Shot 11 nose Speed 0.5 FadeOut 1.5
+Shot 11 nose Speed 0.5 Pitch tape FadeOut 1.5

@@ -7,26 +7,30 @@
 //! ```text
 //! # Motorhead cine v1
 //! Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start grid|go     # time 0 = the "3" of the countdown (grid) or the green light (go)
-//! Output Size 1920 1080 Fps 60
+//! Output Size 1920 1080 Fps 60 Letterbox 2.39     # Letterbox = black bars down to this aspect (omitted = none)
 //! End 40                              # seconds; omitted = every car finished + 2 s
 //! Camera gantry static Eye x y z Target car 3 Zoom auto 25 Lag 0.3 Lead 0.2 Clear on
 //! Camera hill   static Eye x y z At x y z Zoom 1.5               # fixed aim
 //! Camera roof   mounted Target leader Offset 0 1.6 -0.5 Angles 5 0 0 Zoom 1 Hide off
 //! Camera follow chase|far|incar|bumper|tv Target nearest
 //! Camera fly    path Drive time|car N Aim keys|tangent|Target T Lag 0.2 Zoom 1  # a keyed path (#151)
+//! Camera drone  orbit Target leader Radius 12 Height 4 Speed 20 Start 0 Lag 0.3 Zoom 1 Clear on  # circles a car (#425)
 //! Key fly 0 Eye x y z Angles 5 90 0 Fov 60 Tcb 0 0 0 Linear off    # keys of a path / zoom keys of any camera
 //! Shake gantry proximity 2 Radius 15  # proximity|handheld|impact, amplitude in degrees
 //! Shot 0 gantry Speed 0.5 FadeIn 1 FadeOut 1   # from this second on the camera is on air
+//! Shot 11 nose Speed 0.5 Pitch tape            # the shot's sound slows with its Speed, pitch included (#426); keep = normal pitch
+//! Shot 12 nose Mode remaster                # this shot on draws in Remaster (or classic); no Mode = the render's own (#427)
+//! Shot 20 auto Cams gantry hill Follow battle Min 3 Dissolve 0.4  # the director picks the camera, TV style; Dissolve = every cut crossfades (#154)
 //! ```
 //! `Target`: `car N` (grid slot, 0-based, order of `Cars`), `leader`, `nearest` (static cameras: the
-//! car nearest the eye), `player` (the last slot, as in the viewer's line-up).
+//! car nearest the eye), `player` (the last slot, as in the viewer's line-up), `auto` (the auto director's car, #154).
 
 use crate::drive::{cam_origin, cam_origin_at, CamTune, PoseCam};
-use crate::render::Camera;
+use crate::render::{Camera, Dof, RenderMode};
 use glam::{Mat3, Vec3};
 use motor_data::cfg::{Motion, MotionKey};
 use motor_sim::props::evaluate;
-use motor_sim::tvcam::{euler_to_rot, TvShot};
+use motor_sim::tvcam::{euler_to_rot, rot_to_euler, TvShot};
 use motor_sim::{Difficulty, Race};
 use std::collections::HashMap;
 
@@ -42,6 +46,8 @@ const AIM_UP: f32 = 0.5;
 /// Limits of the per-shot options and the Fov keys.
 pub const SPEED_RANGE: (f32, f32) = (0.1, 4.0);
 pub const FOV_RANGE: (f32, f32) = (1.0, 170.0);
+/// `Output Letterbox A` limits (width / height of the visible window).
+pub const LETTERBOX_RANGE: (f32, f32) = (1.0, 4.0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Target {
@@ -50,6 +56,8 @@ pub enum Target {
     Leader,
     Nearest,
     Player,
+    /// the car the auto director follows (#154; outside auto shots the leader)
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +101,17 @@ pub enum CamKind {
     Pose { mode: CamMode, target: Target },
     /// a camera on a keyed TCB path (#151)
     Path { drive: Drive, aim: PathAim, zoom: Zoom, clear: bool },
+    /// a drone circling a car (#425): `radius` metres out and `height` up, turning `speed` degrees a second from `start`
+    /// degrees (0 = straight behind the car, positive towards its right), the car's position and heading eased by `lag`
+    Orbit { target: Target, radius: f32, height: f32, speed: f32, start: f32, lag: f32, zoom: Zoom, clear: bool },
 }
+
+/// `Camera ... orbit` defaults (#425).
+pub const ORBIT_RADIUS: f32 = 12.0;
+pub const ORBIT_HEIGHT: f32 = 4.0;
+pub const ORBIT_SPEED: f32 = 20.0;
+pub const ORBIT_LAG: f32 = 0.3;
+
 
 /// One `Key` line: a key of each channel it names. Eye and Angles are for path cameras, Fov for any camera.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -105,10 +123,44 @@ pub struct CamKey {
     pub angles: Option<Vec3>,
     /// horizontal field of view, degrees (90 = zoom 1)
     pub fov: Option<f32>,
+    /// what the lens focuses on from this key (#421; a rack between keys, `focus_between`)
+    pub focus: Option<FocusOn>,
     /// tension, continuity, bias
     pub tcb: [f32; 3],
     pub linear: bool,
 }
+
+/// What a camera's lens focuses on (#421, `Focus`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FocusOn {
+    /// the car the camera shows (a static camera with `At`: that point); the default
+    Own,
+    /// metres in front of the lens
+    Dist(f32),
+    Car(Target),
+}
+
+/// A camera's lens (#421, `Aperture` / `Focus` on its line): with an aperture, the Remaster capture blurs what lies off
+/// the focus distance (render.rs `Dof`). No aperture = everything sharp.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lens {
+    /// f-number
+    pub aperture: Option<f32>,
+    /// the focus without `Focus` keys
+    pub focus: FocusOn,
+}
+
+impl Default for Lens {
+    fn default() -> Self {
+        Lens { aperture: None, focus: FocusOn::Own }
+    }
+}
+
+/// `Aperture` f-numbers: below about 1 no real lens, an artistic dial for a shallow focus at the short lenses and
+/// distances of most cine cameras (a real one needs a lens of under 1 degree from hundreds of metres) [design choice]
+pub const APERTURE_RANGE: (f32, f32) = (0.1, 32.0);
+/// the nearest focus, metres
+pub const FOCUS_MIN: f32 = 0.3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShakeKind {
@@ -147,23 +199,95 @@ pub struct CineCam {
     /// sorted by `at`
     pub keys: Vec<CamKey>,
     pub shakes: Vec<Shake>,
+    pub lens: Lens,
 }
 
+/// The car an auto shot follows (#154).
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Follow {
+    /// the chasing car of the closest pair of neighbours in the standings
+    Battle,
+    Leader,
+    /// each camera is scored with the car nearest its eye; the followed car is the one on air
+    Nearest,
+    /// grid slot
+    Car(usize),
+    Player,
+}
+
+pub(crate) const FOLLOWS: [(&str, Follow); 4] = [("battle", Follow::Battle), ("leader", Follow::Leader), ("nearest", Follow::Nearest), ("player", Follow::Player)];
+
+/// `Shot T auto ...` (#154): the director picks the camera, TV style, among `pool`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Auto {
+    /// camera indices; empty = every static and path camera
+    pub pool: Vec<usize>,
+    pub follow: Follow,
+    /// seconds a shot holds at least (unless the car is lost)
+    pub min: f32,
+}
+
+/// An auto shot's default `Min`, seconds.
+pub const AUTO_MIN: f32 = 3.0;
+
+impl Default for Auto {
+    fn default() -> Self {
+        Auto { pool: Vec::new(), follow: Follow::Battle, min: AUTO_MIN }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Shot {
     pub t: f32,
+    /// the camera on air (an auto shot: the first of its pool, the camera before the director has picked)
     pub cam: usize,
     /// race seconds per video second (slow motion below 1)
     pub speed: f32,
+    /// the shot's sound in slow motion (#426)
+    pub pitch: Pitch,
+    /// the graphics mode this shot is drawn in (#427), None = the render's own
+    pub mode: Option<RenderMode>,
     /// seconds from black at the start / to black at the end of the shot
     pub fade_in: f32,
     pub fade_out: f32,
+    /// seconds the cut into this shot crossfades from the camera before (an auto shot: every cut inside it too), 0 = a hard cut
+    pub dissolve: f32,
+    /// the director picks the camera (#154); fades and speed belong to the whole auto shot
+    pub auto: Option<Auto>,
 }
+
+/// What a shot's `Speed` does to its sound (#426): `Keep` plays every sound at its own pitch (the events just come further
+/// apart), `Tape` plays the mix `Speed` times as fast, pitch included, like a tape slowing down.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pitch {
+    #[default]
+    Keep,
+    Tape,
+}
+
+pub const PITCHES: [(&str, Pitch); 2] = [("keep", Pitch::Keep), ("tape", Pitch::Tape)];
 
 impl Shot {
     pub fn new(t: f32, cam: usize) -> Shot {
-        Shot { t, cam, speed: 1.0, fade_in: 0.0, fade_out: 0.0 }
+        Shot { t, cam, speed: 1.0, pitch: Pitch::Keep, mode: None, fade_in: 0.0, fade_out: 0.0, dissolve: 0.0, auto: None }
     }
+}
+
+/// A camera standing in the world (static or path), the ones an auto shot picks by distance.
+pub fn is_world(k: &CamKind) -> bool {
+    matches!(k, CamKind::Static { .. } | CamKind::Path { .. })
+}
+
+/// The cameras an auto shot picks from: its pool, else every world camera, else every camera.
+pub fn auto_pool(seq: &Sequence, a: &Auto) -> Vec<usize> {
+    let mut p: Vec<usize> = a.pool.iter().copied().filter(|&i| i < seq.cameras.len()).collect();
+    if p.is_empty() {
+        p = (0..seq.cameras.len()).filter(|&i| is_world(&seq.cameras[i].kind)).collect();
+    }
+    if p.is_empty() {
+        p = (0..seq.cameras.len()).collect();
+    }
+    p
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,6 +299,33 @@ pub struct RaceDef {
     pub catchup: bool,
     /// time 0 is the green light, else the "3" of the countdown (the fly-by is skipped)
     pub start_go: bool,
+    /// `Recording FILE.mhr` (#423, 20-cine "Race source"): film that recorded race instead of an all-AI one. Its
+    /// track, cars, laps and drivers replace the ones above when it is loaded (`from_header`); the path as written
+    /// (`recording_path` resolves it)
+    pub recording: Option<String>,
+}
+
+impl RaceDef {
+    /// The track, cars and laps of a recording's header (#423), so the scene and the editor show the recorded race.
+    pub fn from_header(&mut self, h: &motor_sim::replay::Header) {
+        (self.track, self.cars, self.laps, self.catchup) = (h.track, h.cars.clone(), Some(h.laps), h.catchup);
+        if let motor_sim::AiRow::Difficulty(d) = h.row {
+            self.difficulty = d;
+        }
+    }
+}
+
+/// Where a `Recording` path points (#423): the path as written (absolute, `~/`, or from the working folder) when it
+/// exists, else that name in the game's Replays folder (`ghost::replay_dir`), where the game saves its recordings.
+pub fn recording_path(p: &str) -> std::path::PathBuf {
+    let given = match p.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map_or_else(|| p.into(), |h| std::path::Path::new(&h).join(rest)),
+        None => std::path::PathBuf::from(p),
+    };
+    if given.exists() || given.is_absolute() {
+        return given;
+    }
+    crate::ghost::replay_dir().map(|d| d.join(p)).filter(|f| f.exists()).unwrap_or(given)
 }
 
 /// `Audio on|off Doppler on|off` (#153, 20-cine "Audio"): the render's sound, heard by the camera on air.
@@ -196,6 +347,8 @@ pub struct Sequence {
     pub audio: AudioDef,
     pub size: (u32, u32),
     pub fps: u32,
+    /// `Output Letterbox A`: the picture shows an A:1 window, black bars above and below (None = the whole frame)
+    pub letterbox: Option<f32>,
     pub end: Option<f32>,
     pub cameras: Vec<CineCam>,
     pub shots: Vec<Shot>,
@@ -203,7 +356,7 @@ pub struct Sequence {
 
 impl Default for RaceDef {
     fn default() -> Self {
-        RaceDef { track: 1, cars: (1..=8).collect(), difficulty: Difficulty::Medium, laps: None, catchup: true, start_go: false }
+        RaceDef { track: 1, cars: (1..=8).collect(), difficulty: Difficulty::Medium, laps: None, catchup: true, start_go: false, recording: None }
     }
 }
 
@@ -257,8 +410,57 @@ fn target(v: &[&str]) -> Result<Target, String> {
         ["leader"] => Ok(Target::Leader),
         ["nearest"] => Ok(Target::Nearest),
         ["player"] => Ok(Target::Player),
+        ["auto"] => Ok(Target::Auto),
         ["car", n] => n.parse().map(Target::Car).map_err(|_| format!("Target car N: bad slot `{n}`")),
-        _ => Err("Target car N | leader | nearest | player".into()),
+        _ => Err("Target car N | leader | nearest | player | auto".into()),
+    }
+}
+
+fn focus_on(v: &[&str]) -> Result<FocusOn, String> {
+    const USE: &str = "Focus D (metres) | own | car N | leader | nearest | player | auto";
+    match v {
+        ["own"] => Ok(FocusOn::Own),
+        [d] if d.parse::<f32>().is_ok() => match d.parse::<f32>() {
+            Ok(d) if d.is_finite() && d >= FOCUS_MIN => Ok(FocusOn::Dist(d)),
+            _ => Err(format!("Focus distance is at least {FOCUS_MIN} m")),
+        },
+        _ => target(v).map(FocusOn::Car).map_err(|_| USE.into()),
+    }
+}
+
+/// Take `Aperture N` and `Focus D | TARGET` (any camera kind, #421) out of a camera line's words.
+fn take_lens<'a>(words: &[&'a str]) -> Result<(Vec<&'a str>, Lens), String> {
+    let (mut rest, mut lens, mut i) = (Vec::new(), Lens::default(), 0);
+    while i < words.len() {
+        match words[i].to_ascii_lowercase().as_str() {
+            "aperture" => {
+                let n = nums(words.get(i + 1..i + 2).ok_or("Aperture N")?, 1, "Aperture")?[0];
+                if !(APERTURE_RANGE.0..=APERTURE_RANGE.1).contains(&n) {
+                    return Err(format!("Aperture is f/{}..f/{}", APERTURE_RANGE.0, APERTURE_RANGE.1));
+                }
+                lens.aperture = Some(n);
+                i += 2;
+            }
+            "focus" => {
+                // `car N` is two words, every other value one
+                let n = if words.get(i + 1).is_some_and(|w| w.eq_ignore_ascii_case("car")) { 2 } else { 1 };
+                lens.focus = focus_on(words.get(i + 1..i + 1 + n).ok_or("Focus D | TARGET")?)?;
+                i += 1 + n;
+            }
+            _ => {
+                rest.push(words[i]);
+                i += 1;
+            }
+        }
+    }
+    Ok((rest, lens))
+}
+
+fn follow(v: &[&str]) -> Result<Follow, String> {
+    match v {
+        ["car", n] => n.parse().map(Follow::Car).map_err(|_| format!("Follow car N: bad slot `{n}`")),
+        [w] => FOLLOWS.iter().find(|f| f.0.eq_ignore_ascii_case(w)).map(|f| f.1).ok_or_else(|| "Follow battle | leader | nearest | car N | player".into()),
+        _ => Err("Follow battle | leader | nearest | car N | player".into()),
     }
 }
 
@@ -337,6 +539,8 @@ fn track_fields(f: &Fields, t: &[&str]) -> Result<(Target, f32, f32), String> {
 /// A camera line; the bool is false for a path camera without `Aim` / `Target` (its aim is settled once its keys are known).
 fn parse_camera(w: &[&str]) -> Result<(CineCam, bool), String> {
     let [name, kind, rest @ ..] = w else { return Err("Camera NAME KIND ...".into()) };
+    let (rest, lens) = take_lens(rest)?;
+    let rest = rest.as_slice();
     let kind = kind.to_ascii_lowercase();
     let mut aim_given = true;
     let kind = match kind.as_str() {
@@ -399,8 +603,30 @@ fn parse_camera(w: &[&str]) -> Result<(CineCam, bool), String> {
                 clear: f.get("clear").map_or(Ok(false), |v| flag(v, "Clear"))?,
             }
         }
+        "orbit" => {
+            let f = fields(rest, &["target", "radius", "height", "speed", "start", "lag", "zoom", "clear"])?;
+            let num = |k: &str, name: &str, d: f32| f.get(k).map_or(Ok(d), |v| nums(v, 1, name).map(|n| n[0]));
+            let radius = num("radius", "Radius", ORBIT_RADIUS)?;
+            if radius <= 0.0 {
+                return Err("Radius must be > 0".into());
+            }
+            let lag = num("lag", "Lag", ORBIT_LAG)?;
+            if lag < 0.0 {
+                return Err("Lag must be >= 0".into());
+            }
+            CamKind::Orbit {
+                target: target(f.get("target").ok_or("orbit needs Target")?)?,
+                radius,
+                height: num("height", "Height", ORBIT_HEIGHT)?,
+                speed: num("speed", "Speed", ORBIT_SPEED)?,
+                start: num("start", "Start", 0.0)?,
+                lag,
+                zoom: f.get("zoom").map_or(Ok(Zoom::Fixed(1.0)), |v| zoom(v))?,
+                clear: f.get("clear").map_or(Ok(false), |v| flag(v, "Clear"))?,
+            }
+        }
         k => {
-            let mode = POSE_MODES.iter().find(|m| m.0 == k).map(|m| m.1).ok_or(format!("camera kind `{k}`: static, mounted, path, chase, far, incar, bumper or tv"))?;
+            let mode = POSE_MODES.iter().find(|m| m.0 == k).map(|m| m.1).ok_or(format!("camera kind `{k}`: static, mounted, path, orbit, chase, far, incar, bumper or tv"))?;
             let f = fields(rest, &["target"])?;
             let t = target(f.get("target").ok_or("needs Target")?)?;
             if t == Target::Nearest {
@@ -409,18 +635,18 @@ fn parse_camera(w: &[&str]) -> Result<(CineCam, bool), String> {
             CamKind::Pose { mode, target: t }
         }
     };
-    if let CamKind::Mounted { target: Target::Nearest, .. } | CamKind::Path { aim: PathAim::Track { target: Target::Nearest, .. }, .. } = kind {
+    if let CamKind::Mounted { target: Target::Nearest, .. } | CamKind::Orbit { target: Target::Nearest, .. } | CamKind::Path { aim: PathAim::Track { target: Target::Nearest, .. }, .. } = kind {
         return Err("Target nearest is for static cameras".into());
     }
-    Ok((CineCam { name: name.to_string(), kind, keys: Vec::new(), shakes: Vec::new() }, aim_given))
+    Ok((CineCam { name: name.to_string(), kind, keys: Vec::new(), shakes: Vec::new(), lens }, aim_given))
 }
 
 /// `Key NAME T ...`: the camera name and its key.
 fn parse_key(w: &[&str]) -> Result<(String, CamKey), String> {
     let [name, at, rest @ ..] = w else { return Err("Key CAMERA T ...".into()) };
     let at = nums(&[at], 1, "Key time")?[0];
-    let f = fields(rest, &["eye", "angles", "fov", "tcb", "linear"])?;
-    let mut key = CamKey { at, eye: None, angles: None, fov: None, tcb: [0.0; 3], linear: false };
+    let f = fields(rest, &["eye", "angles", "fov", "focus", "tcb", "linear"])?;
+    let mut key = CamKey { at, eye: None, angles: None, fov: None, focus: None, tcb: [0.0; 3], linear: false };
     if let Some(v) = f.get("eye") {
         key.eye = Some(vec3(v, "Eye")?);
     }
@@ -434,6 +660,9 @@ fn parse_key(w: &[&str]) -> Result<(String, CamKey), String> {
         }
         key.fov = Some(fov);
     }
+    if let Some(v) = f.get("focus") {
+        key.focus = Some(focus_on(v)?);
+    }
     if let Some(v) = f.get("tcb") {
         let n = nums(v, 3, "Tcb")?;
         if n.iter().any(|x| x.abs() > 1.0) {
@@ -444,8 +673,8 @@ fn parse_key(w: &[&str]) -> Result<(String, CamKey), String> {
     if let Some(v) = f.get("linear") {
         key.linear = flag(v, "Linear")?;
     }
-    if key.eye.is_none() && key.angles.is_none() && key.fov.is_none() {
-        return Err("Key needs Eye, Angles or Fov".into());
+    if key.eye.is_none() && key.angles.is_none() && key.fov.is_none() && key.focus.is_none() {
+        return Err("Key needs Eye, Angles, Fov or Focus".into());
     }
     Ok((name.to_string(), key))
 }
@@ -466,35 +695,68 @@ fn parse_shake(w: &[&str]) -> Result<(String, Shake), String> {
     Ok((name.to_string(), Shake { kind, amp, radius }))
 }
 
-/// `Shot T NAME [Speed S] [FadeIn s] [FadeOut s]`: time, camera name and the shot (its camera unresolved).
-fn parse_shot(w: &[&str]) -> Result<(f32, String, Shot), String> {
-    let [t, cam, rest @ ..] = w else { return Err("Shot T CAMERA [Speed S] [FadeIn s] [FadeOut s]".into()) };
+/// A `Shot` line: its time, camera name (`auto`: the director picks), the auto pool's camera names, the shot.
+fn parse_shot(w: &[&str]) -> Result<(f32, String, Vec<String>, Shot), String> {
+    let [t, cam, rest @ ..] = w else { return Err("Shot T CAMERA|auto [Speed S] [Pitch keep|tape] [Mode classic|remaster] [FadeIn s] [FadeOut s] [Dissolve s]".into()) };
     let t = match t.parse::<f32>() {
         Ok(t) if t >= 0.0 && t.is_finite() => t,
         _ => return Err(format!("Shot: bad time `{t}`")),
     };
-    let f = fields(rest, &["speed", "fadein", "fadeout"])?;
+    let is_auto = cam.eq_ignore_ascii_case("auto");
+    let keys: &[&str] = if is_auto { &["speed", "pitch", "mode", "fadein", "fadeout", "dissolve", "cams", "follow", "min"] } else { &["speed", "pitch", "mode", "fadein", "fadeout", "dissolve"] };
+    let f = fields(rest, keys)?;
     let mut shot = Shot::new(t, 0);
+    let mut pool = Vec::new();
+    if is_auto {
+        let mut a = Auto::default();
+        if let Some(v) = f.get("follow") {
+            a.follow = follow(v)?;
+        }
+        if let Some(v) = f.get("min") {
+            a.min = nums(v, 1, "Min")?[0];
+            if a.min < 0.0 {
+                return Err("Min is >= 0 seconds".into());
+            }
+        }
+        if let Some(v) = f.get("cams") {
+            pool = v.iter().map(|s| s.to_string()).collect();
+        }
+        shot.auto = Some(a);
+    }
     if let Some(v) = f.get("speed") {
         shot.speed = nums(v, 1, "Speed")?[0];
         if !(SPEED_RANGE.0..=SPEED_RANGE.1).contains(&shot.speed) {
             return Err(format!("Speed is {}..{}", SPEED_RANGE.0, SPEED_RANGE.1));
         }
     }
-    for (k, out) in [("fadein", &mut shot.fade_in), ("fadeout", &mut shot.fade_out)] {
+    if let Some(v) = f.get("pitch") {
+        shot.pitch = match v.as_slice() {
+            [w] => PITCHES.iter().find(|p| p.0.eq_ignore_ascii_case(w)).map(|p| p.1),
+            _ => None,
+        }
+        .ok_or("Pitch keep | tape")?;
+    }
+    if let Some(v) = f.get("mode") {
+        shot.mode = Some(match v.as_slice() {
+            [w] => RenderMode::parse(w),
+            _ => None,
+        }
+        .ok_or("Mode classic | remaster")?);
+    }
+    for (k, out) in [("fadein", &mut shot.fade_in), ("fadeout", &mut shot.fade_out), ("dissolve", &mut shot.dissolve)] {
         if let Some(v) = f.get(k) {
             *out = nums(v, 1, "Fade")?[0];
             if *out < 0.0 {
-                return Err("a fade is >= 0 seconds".into());
+                return Err("a fade or dissolve is >= 0 seconds".into());
             }
         }
     }
-    Ok((t, cam.to_string(), shot))
+    Ok((t, cam.to_string(), pool, shot))
 }
 
 /// Parse a `.cine` text. Bad lines are skipped and returned as warnings; an unusable sequence is an Err.
 pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
-    let mut seq = Sequence { race: RaceDef::default(), audio: AudioDef::default(), size: (1920, 1080), fps: 60, end: None, cameras: Vec::new(), shots: Vec::new() };
+    let mut seq = Sequence { race: RaceDef::default(), audio: AudioDef::default(), size: (1920, 1080), fps: 60, letterbox: None, end: None, cameras: Vec::new(), shots: Vec::new() };
     let mut warn = Vec::new();
     let mut shot_lines = Vec::new();
     let mut key_lines = Vec::new();
@@ -505,7 +767,15 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
         let Some((&head, rest)) = words.split_first() else { continue };
         let res: Result<(), String> = match head.to_ascii_lowercase().as_str() {
             "race" => parse_race(rest, &mut seq.race),
-            "output" => fields(rest, &["size", "fps"]).and_then(|f| {
+            // the rest of the line as written, so a path may hold spaces
+            "recording" => match line.split('#').next().unwrap_or("").trim()[head.len()..].trim() {
+                "" => Err("Recording FILE.mhr".into()),
+                p => {
+                    seq.race.recording = Some(p.to_string());
+                    Ok(())
+                }
+            },
+            "output" => fields(rest, &["size", "fps", "letterbox"]).and_then(|f| {
                 if let Some(v) = f.get("size") {
                     let n = nums(v, 2, "Size")?;
                     seq.size = (n[0] as u32, n[1] as u32);
@@ -519,6 +789,17 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
                         return Err("Fps is 1..240".into());
                     }
                 }
+                if let Some(v) = f.get("letterbox") {
+                    seq.letterbox = if v.as_slice() == ["off"] {
+                        None
+                    } else {
+                        let a = nums(v, 1, "Letterbox")?[0];
+                        if !(LETTERBOX_RANGE.0..=LETTERBOX_RANGE.1).contains(&a) {
+                            return Err(format!("Letterbox is an aspect {}..{} or off", LETTERBOX_RANGE.0, LETTERBOX_RANGE.1));
+                        }
+                        Some(a)
+                    };
+                }
                 Ok(())
             }),
             "audio" => parse_audio(rest, &mut seq.audio),
@@ -530,6 +811,9 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
                 Ok(())
             }),
             "camera" => parse_camera(rest).and_then(|(c, aim_given)| {
+                if c.name.eq_ignore_ascii_case("auto") {
+                    return Err("`auto` is not a camera name (Shot T auto lets the director pick)".into());
+                }
                 if seq.cameras.iter().any(|o| o.name == c.name) {
                     return Err(format!("camera {} is defined twice", c.name));
                 }
@@ -541,7 +825,7 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
             }),
             "key" => parse_key(rest).map(|k| key_lines.push((i + 1, k))),
             "shake" => parse_shake(rest).map(|s| shake_lines.push((i + 1, s))),
-            "shot" => parse_shot(rest).map(|(t, name, shot)| shot_lines.push((i + 1, t, name, shot))),
+            "shot" => parse_shot(rest).map(|(t, name, pool, shot)| shot_lines.push((i + 1, t, name, pool, shot))),
             h => Err(format!("unknown line `{h}`")),
         };
         if let Err(e) = res {
@@ -557,13 +841,13 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
         if !matches!(c.kind, CamKind::Path { .. }) && (key.eye.is_some() || key.angles.is_some()) {
             warn.push(format!("line {line}: Eye and Angles keys are for path cameras (ignored)"));
             (key.eye, key.angles) = (None, None);
-            if key.fov.is_none() {
+            if key.fov.is_none() && key.focus.is_none() {
                 continue;
             }
         }
         // a channel keyed twice at the same time keeps its first key
         if let Some(o) = c.keys.iter().find(|o| o.at == key.at) {
-            let dup = (o.eye.is_some() && key.eye.is_some()) || (o.angles.is_some() && key.angles.is_some()) || (o.fov.is_some() && key.fov.is_some());
+            let dup = (o.eye.is_some() && key.eye.is_some()) || (o.angles.is_some() && key.angles.is_some()) || (o.fov.is_some() && key.fov.is_some()) || (o.focus.is_some() && key.focus.is_some());
             if dup {
                 warn.push(format!("line {line}: camera {name} already has a key at {} (skipped)", key.at));
                 continue;
@@ -597,7 +881,19 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
     }
     seq.cameras.retain(|c| !dropped.contains(&c.name));
     // shots refer to cameras by name: resolved once all are known
-    for (line, _, name, mut shot) in shot_lines {
+    for (line, _, name, pool, mut shot) in shot_lines {
+        if let Some(a) = shot.auto.as_mut() {
+            for p in pool {
+                match seq.cameras.iter().position(|c| c.name == p) {
+                    Some(i) if !a.pool.contains(&i) => a.pool.push(i),
+                    Some(_) => {}
+                    None => warn.push(format!("line {line}: Cams names the unknown camera {p} (ignored)")),
+                }
+            }
+            shot.cam = auto_pool(&seq, a).first().copied().unwrap_or(0);
+            seq.shots.push(shot);
+            continue;
+        }
         match seq.cameras.iter().position(|c| c.name == name) {
             Some(cam) => {
                 shot.cam = cam;
@@ -619,7 +915,7 @@ pub fn parse(text: &str) -> Result<(Sequence, Vec<String>), String> {
     for c in &seq.cameras {
         let t = match &c.kind {
             CamKind::Static { aim: Aim::Track { target, .. }, .. } => Some(*target),
-            CamKind::Mounted { target, .. } | CamKind::Pose { target, .. } => Some(*target),
+            CamKind::Mounted { target, .. } | CamKind::Pose { target, .. } | CamKind::Orbit { target, .. } => Some(*target),
             CamKind::Path { aim: PathAim::Track { target, .. }, .. } | CamKind::Path { drive: Drive::Car(target), .. } => Some(*target),
             _ => None,
         };
@@ -638,6 +934,34 @@ fn target_text(t: Target) -> String {
         Target::Leader => "leader".into(),
         Target::Nearest => "nearest".into(),
         Target::Player => "player".into(),
+        Target::Auto => "auto".into(),
+    }
+}
+
+fn focus_text(f: FocusOn) -> String {
+    match f {
+        FocusOn::Own => "own".into(),
+        FocusOn::Dist(d) => d.to_string(),
+        FocusOn::Car(t) => target_text(t),
+    }
+}
+
+/// A camera line's `Aperture` / `Focus` words (#421; none at their defaults).
+fn lens_text(l: &Lens) -> String {
+    let mut o = String::new();
+    if let Some(n) = l.aperture {
+        o += &format!(" Aperture {n}");
+    }
+    if l.focus != FocusOn::Own {
+        o += &format!(" Focus {}", focus_text(l.focus));
+    }
+    o
+}
+
+fn follow_text(f: Follow) -> String {
+    match f {
+        Follow::Car(n) => format!("car {n}"),
+        f => FOLLOWS.iter().find(|x| x.1 == f).map_or("battle", |x| x.0).into(),
     }
 }
 
@@ -654,7 +978,14 @@ pub fn to_text(s: &Sequence) -> String {
         o += &format!(" Laps {l}");
     }
     o += &format!(" Catchup {} Start {}\n", if r.catchup { "on" } else { "off" }, if r.start_go { "go" } else { "grid" });
-    o += &format!("Output Size {} {} Fps {}\n", s.size.0, s.size.1, s.fps);
+    if let Some(p) = &r.recording {
+        o += &format!("Recording {p}\n");
+    }
+    o += &format!("Output Size {} {} Fps {}", s.size.0, s.size.1, s.fps);
+    if let Some(a) = s.letterbox {
+        o += &format!(" Letterbox {a}");
+    }
+    o += "\n";
     let onoff = |b: bool| if b { "on" } else { "off" };
     o += &format!("Audio {} Doppler {}\n", onoff(s.audio.on), onoff(s.audio.doppler));
     if let Some(e) = s.end {
@@ -673,13 +1004,21 @@ pub fn to_text(s: &Sequence) -> String {
                     Zoom::Fixed(z) => o += &format!(" Zoom {z}"),
                     Zoom::Auto(r) => o += &format!(" Zoom auto {r}"),
                 }
-                o += &format!(" Clear {}\n", if *clear { "on" } else { "off" });
+                o += &format!(" Clear {}", if *clear { "on" } else { "off" });
             }
             CamKind::Mounted { target, offset, angles, zoom, hide } => {
-                o += &format!("mounted Target {} Offset {} Angles {} Zoom {zoom} Hide {}\n", target_text(*target), v3(*offset), v3(*angles), if *hide { "on" } else { "off" });
+                o += &format!("mounted Target {} Offset {} Angles {} Zoom {zoom} Hide {}", target_text(*target), v3(*offset), v3(*angles), if *hide { "on" } else { "off" });
+            }
+            CamKind::Orbit { target, radius, height, speed, start, lag, zoom, clear } => {
+                o += &format!("orbit Target {} Radius {radius} Height {height} Speed {speed} Start {start} Lag {lag}", target_text(*target));
+                match zoom {
+                    Zoom::Fixed(z) => o += &format!(" Zoom {z}"),
+                    Zoom::Auto(r) => o += &format!(" Zoom auto {r}"),
+                }
+                o += &format!(" Clear {}", if *clear { "on" } else { "off" });
             }
             CamKind::Pose { mode, target } => {
-                o += &format!("{} Target {}\n", POSE_MODES.iter().find(|m| m.1 == *mode).map_or("chase", |m| m.0), target_text(*target));
+                o += &format!("{} Target {}", POSE_MODES.iter().find(|m| m.1 == *mode).map_or("chase", |m| m.0), target_text(*target));
             }
             CamKind::Path { drive, aim, zoom, clear } => {
                 o += "path Drive ";
@@ -696,9 +1035,11 @@ pub fn to_text(s: &Sequence) -> String {
                     Zoom::Fixed(z) => o += &format!(" Zoom {z}"),
                     Zoom::Auto(r) => o += &format!(" Zoom auto {r}"),
                 }
-                o += &format!(" Clear {}\n", if *clear { "on" } else { "off" });
+                o += &format!(" Clear {}", if *clear { "on" } else { "off" });
             }
         }
+        o += &lens_text(&c.lens);
+        o += "\n";
         for k in &c.keys {
             o += &format!("Key {} {}", c.name, k.at);
             if let Some(e) = k.eye {
@@ -709,6 +1050,9 @@ pub fn to_text(s: &Sequence) -> String {
             }
             if let Some(f) = k.fov {
                 o += &format!(" Fov {f}");
+            }
+            if let Some(f) = k.focus {
+                o += &format!(" Focus {}", focus_text(f));
             }
             if k.tcb != [0.0; 3] {
                 o += &format!(" Tcb {} {} {}", k.tcb[0], k.tcb[1], k.tcb[2]);
@@ -728,15 +1072,36 @@ pub fn to_text(s: &Sequence) -> String {
         }
     }
     for sh in &s.shots {
-        o += &format!("Shot {} {}", sh.t, s.cameras[sh.cam].name);
+        match &sh.auto {
+            Some(a) => {
+                o += &format!("Shot {} auto", sh.t);
+                if !a.pool.is_empty() {
+                    o += " Cams";
+                    for &i in &a.pool {
+                        o += &format!(" {}", s.cameras[i].name);
+                    }
+                }
+                o += &format!(" Follow {} Min {}", follow_text(a.follow), a.min);
+            }
+            None => o += &format!("Shot {} {}", sh.t, s.cameras[sh.cam].name),
+        }
         if sh.speed != 1.0 {
             o += &format!(" Speed {}", sh.speed);
+        }
+        if sh.pitch == Pitch::Tape {
+            o += " Pitch tape";
+        }
+        if let Some(m) = sh.mode {
+            o += &format!(" Mode {}", m.name().to_ascii_lowercase());
         }
         if sh.fade_in > 0.0 {
             o += &format!(" FadeIn {}", sh.fade_in);
         }
         if sh.fade_out > 0.0 {
             o += &format!(" FadeOut {}", sh.fade_out);
+        }
+        if sh.dissolve > 0.0 {
+            o += &format!(" Dissolve {}", sh.dissolve);
         }
         o += "\n";
     }
@@ -758,7 +1123,23 @@ pub fn on_air(seq: &Sequence, t: f32) -> usize {
 /// Seconds since camera `cam`'s latest shot started (`t` itself when it has not had one yet): the clock of
 /// its `Drive time` path and of its Fov keys.
 pub fn since_shot(seq: &Sequence, cam: usize, t: f32) -> f32 {
-    seq.shots.iter().rev().find(|s| s.cam == cam && s.t <= t).map_or(t, |s| t - s.t)
+    seq.shots.iter().rev().find(|s| s.auto.is_none() && s.cam == cam && s.t <= t).map_or(t, |s| t - s.t)
+}
+
+/// The mixer's tape speed at `t` (#426): the shot's `Speed` when its `Pitch` is `tape`, else 1.
+pub fn audio_rate_at(seq: &Sequence, t: f32) -> f32 {
+    let s = &seq.shots[shot_at(seq, t)];
+    if s.pitch == Pitch::Tape { s.speed } else { 1.0 }
+}
+
+/// The graphics mode at `t` (#427): the shot's `Mode`, else `base` (the render's own).
+pub fn mode_at(seq: &Sequence, t: f32, base: RenderMode) -> RenderMode {
+    seq.shots[shot_at(seq, t)].mode.unwrap_or(base)
+}
+
+/// Whether any shot asks for mode `m` (#427).
+pub fn uses_mode(seq: &Sequence, m: RenderMode) -> bool {
+    seq.shots.iter().any(|s| s.mode == Some(m))
 }
 
 /// Race seconds per video second at `t` (the shot's `Speed`).
@@ -810,6 +1191,37 @@ pub fn fade_at(seq: &Sequence, t: f32, end: Option<f32>) -> f32 {
     f.clamp(0.0, 1.0)
 }
 
+/// Rows of each black bar of a letterboxed `h` pixel tall frame `w` wide showing an `aspect`:1 window (0 = the window is not
+/// shorter than the frame). Whole rows; an odd remainder goes to the picture.
+pub fn letterbox_bar(w: u32, h: u32, aspect: f32) -> u32 {
+    let win = (w as f32 / aspect.max(1e-3)).round() as u32;
+    h.saturating_sub(win) / 2
+}
+
+/// The editor's preview frame (#438 design choice, the passepartout of a 3D package's camera view): the largest `video`-aspect
+/// rectangle `[x, y, w, h]` centred on the free area of a `win` window between the panels' `margins` (top, right, bottom,
+/// left), `gap` more clear of a panel that is there, all in the same units. `preview_cam` zooms the view out by `w / win.0`
+/// (the field spans the window's width) and shifts its lens to the frame's centre (#441). Never smaller than one unit.
+pub fn preview_frame(win: (f32, f32), margins: (f32, f32, f32, f32), video: (u32, u32), gap: f32) -> [f32; 4] {
+    let m = |v: f32| if v > 0.0 { v + gap } else { 0.0 };
+    let (top, right, bottom, left) = (m(margins.0), m(margins.1), m(margins.2), m(margins.3));
+    let hw = ((win.0 - left - right) * 0.5).max(0.5);
+    let hh = ((win.1 - top - bottom) * 0.5).max(0.5);
+    let (cx, cy) = (left + hw, top + hh);
+    let aspect = video.0.max(1) as f32 / video.1.max(1) as f32;
+    let w = (2.0 * hw).min(2.0 * hh * aspect);
+    let h = w / aspect;
+    [cx - w * 0.5, cy - h * 0.5, w, h]
+}
+
+/// The camera that shows `cam`'s view in the preview frame `rect` (`preview_frame`) of a `win` window: zoomed out so its
+/// horizontal field spans the frame, its lens shifted so the view axis lands on the frame's centre (#441, design choice).
+pub fn preview_cam(cam: Camera, rect: [f32; 4], win: (f32, f32)) -> Camera {
+    let (w, h) = (win.0.max(1.0), win.1.max(1.0));
+    let (cx, cy) = (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5);
+    Camera { zoom: cam.zoom * rect[2] / w, shift: glam::Vec2::new(2.0 * cx / w - 1.0, 1.0 - 2.0 * cy / h), ..cam }
+}
+
 /// APPROX [design choice]: auto zoom keeps a car at about the same size on screen, zoom 1.0 at `r` metres.
 pub fn auto_zoom(dist: f32, r: f32) -> f32 {
     (dist / r).clamp(1.0, ZOOM_MAX)
@@ -820,9 +1232,118 @@ fn far_k(zoom: f32) -> f32 {
     zoom.clamp(1.0, FAR_K_MAX)
 }
 
+// ---------------------------------------------------------------- TV camera export (#424)
+
+/// APPROX [design choice]: the static cameras of a sequence as keys of the game's TV camera motion (`tvcam::shot`).
+/// A `Target` camera becomes type 0 (eye at the station, look at the car), an `At` camera type 2 (fixed angles); `Zoom Z` a
+/// fixed zoom, `Zoom auto R` the game's distance-scaled zoom (the same d / R clamp as `auto_zoom`). Lag, lead, the target car,
+/// `Clear`, Fov / Focus keys, lens and shakes have no TV equivalent and are listed in the notes. `first_frame` numbers the keys.
+pub fn tv_keys(seq: &Sequence, first_frame: f32) -> (Vec<MotionKey>, Vec<String>) {
+    let (mut keys, mut notes) = (Vec::new(), Vec::new());
+    for c in &seq.cameras {
+        let CamKind::Static { eye, aim, zoom, .. } = &c.kind else { continue };
+        let (kind, angles) = match aim {
+            Aim::Track { .. } => (0.0, Vec3::ZERO),
+            Aim::At(a) => (2.0, rot_to_euler(look_rot(*eye, *a)) / DEG),
+        };
+        // the far plane: the game grows it by `1 + r * f / 100` with the zoom r, the cine by `far_k`
+        let (tension, cap, far) = match zoom {
+            Zoom::Fixed(z) => (-*z, 0.0, 100.0 * (far_k(*z) - 1.0)),
+            Zoom::Auto(r) => (1.0 / r.max(0.01), ZOOM_MAX * r, 100.0 * (FAR_K_MAX - 1.0) / FAR_K_MAX),
+        };
+        let mut dropped = Vec::new();
+        if let Aim::Track { lag, lead, .. } = aim {
+            if *lag > 0.0 || *lead > 0.0 {
+                dropped.push("Lag / Lead");
+            }
+        }
+        if !c.keys.is_empty() {
+            dropped.push("keys");
+        }
+        if !c.shakes.is_empty() {
+            dropped.push("shakes");
+        }
+        if c.lens.aperture.is_some() {
+            dropped.push("lens");
+        }
+        if !dropped.is_empty() {
+            notes.push(format!("{}: {} not exported", c.name, dropped.join(", ")));
+        }
+        keys.push(MotionKey {
+            values: vec![eye.x, eye.y, eye.z, angles.x, angles.y, angles.z, 0.0, 0.0, 0.0],
+            frame: first_frame + 30.0 * keys.len() as f32,
+            linear: kind,
+            tension,
+            continuity: far,
+            bias: cap,
+        });
+    }
+    (keys, notes)
+}
+
+/// Write `remaster/tv/trackNN.mot`: the track's shipped TV stations plus the sequence's static cameras. Always rebuilt from the
+/// shipped file, so exporting again replaces the earlier export. Returns the message to show.
+pub fn export_tv(root: &std::path::Path, seq: &Sequence) -> Result<String, String> {
+    let track = seq.race.track;
+    let trk = motor_data::fs::config(root, &format!("Game/Track{track}.trk"))?;
+    let mut motion = motor_sim::tvcam::shipped_motion(root, &trk).unwrap_or(Motion { version: 1, channels: 9, keys: Vec::new() });
+    let shipped = motion.keys.len();
+    let last = motion.keys.iter().map(|k| k.frame).fold(-30.0, f32::max);
+    let (added, notes) = tv_keys(seq, last + 30.0);
+    if added.is_empty() {
+        return Err("no static camera to export (TV stations are fixed eyes)".into());
+    }
+    let n = added.len();
+    motion.keys.extend(added);
+    let p = motor_sim::tvcam::override_path(root, track);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(&p, motor_data::cfg::write_lwmo(&motion)).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut msg = format!("wrote {}: {shipped} shipped + {n} cine stations", p.display());
+    if !notes.is_empty() {
+        msg += &format!(" ({})", notes.join("; "));
+    }
+    Ok(msg)
+}
+
+/// Delete the exported TV stations of `track`; Ok(false) when there were none.
+pub fn remove_tv(root: &std::path::Path, track: u32) -> Result<bool, String> {
+    let p = motor_sim::tvcam::override_path(root, track);
+    if !p.exists() {
+        return Ok(false);
+    }
+    std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok(true)
+}
+
 /// The zoom of a horizontal field of view: 1.0 at the views' `FOV_X` (90 degrees).
 pub fn fov_zoom(fov_deg: f32) -> f32 {
     (crate::render::FOV_X.get() * 0.5 * DEG).tan() / (fov_deg * 0.5 * DEG).tan()
+}
+
+/// The focus distance at key parameter `u` from `(at, metres, linear)` keys sorted by `at` (#421): interpolated in
+/// 1 / distance (the travel of a focus ring), a smoothstep between neighbours (`Linear on` on the later key: straight),
+/// held outside them. Not a TCB curve: the keys' distances move every frame [design choice].
+pub fn focus_between(keys: &[(f32, f32, bool)], u: f32) -> f32 {
+    let n = keys.iter().take_while(|k| k.0 <= u).count();
+    match (n.checked_sub(1).map(|i| keys[i]), keys.get(n).copied()) {
+        (Some(a), Some(b)) => {
+            let s = ((u - a.0) / (b.0 - a.0).max(1e-6)).clamp(0.0, 1.0);
+            let s = if b.2 { s } else { s * s * (3.0 - 2.0 * s) };
+            1.0 / (1.0 / a.1 + (1.0 / b.1 - 1.0 / a.1) * s)
+        }
+        (Some(k), None) | (None, Some(k)) => k.1,
+        (None, None) => f32::INFINITY,
+    }
+}
+
+/// Where an orbit camera (#425) hangs: `radius` metres from `centre` on the horizontal circle and `height` above it, at
+/// `angle_deg` from straight behind a car heading `fwd` (horizontal, unit), positive towards the car's right.
+pub fn orbit_eye(centre: Vec3, fwd: Vec3, radius: f32, height: f32, angle_deg: f32) -> Vec3 {
+    let right = Vec3::new(fwd.z, 0.0, -fwd.x);
+    let a = angle_deg * DEG;
+    centre + (right * a.sin() - fwd * a.cos()) * radius + Vec3::Y * height
 }
 
 /// One step of the cameraman's easing towards `goal` (exponential, time constant `lag` seconds).
@@ -973,6 +1494,8 @@ enum State {
     Pose(PoseCam),
     /// the eased aim point (Target) and the last direction along the path (Tangent, held at the path's ends)
     Path { aim: Option<Vec3>, dir: Vec3 },
+    /// the eased car position and horizontal heading, and the eased aim point (#425)
+    Orbit { centre: Option<Vec3>, fwd: Vec3, aim: Option<Vec3> },
 }
 
 /// A camera's key curves (`Key` lines), built once.
@@ -995,15 +1518,38 @@ pub struct Director {
     hidden: Option<usize>,
     /// per camera, as of the last `camera` call: the camera, the slot it shows, whether it hides that car (the editor's preview)
     views: Vec<Option<(Camera, usize, bool)>>,
+    /// per camera, as of the last `camera` call: its lens (#421; None without an aperture)
+    dofs: Vec<Option<Dof>>,
+    /// the camera on air this frame (an auto shot: the director's pick)
+    air: usize,
+    /// the car the auto director follows (`Target auto`; outside auto shots the leader)
+    follow: usize,
+    /// per camera: the video second of its latest auto cut (its clock restarts there, as at a shot)
+    cut_at: Vec<Option<f32>>,
+    auto: AutoRun,
+    /// `Follow battle`: the pair held (ahead, behind)
+    battle: Option<(usize, usize)>,
+    /// the camera on air at the last `camera` call, and the dissolve in progress: the camera it comes from, its start second, its length
+    last_air: Option<usize>,
+    dis: Option<(usize, f32, f32)>,
+    /// the video second of the last `camera` call
+    now: f32,
 }
 
-/// The car slot a `Target` means now (`eye`: the camera position, for `nearest`).
+/// The car slot a `Target` means now (`eye`: the camera position, for `nearest`; `Target auto` = the leader here).
 pub fn resolve(race: &Race, t: Target, eye: Option<Vec3>) -> usize {
+    resolve_in(race, t, eye, None)
+}
+
+/// `resolve` with the auto director's followed car (`Target auto`).
+fn resolve_in(race: &Race, t: Target, eye: Option<Vec3>, follow: Option<usize>) -> usize {
     let last = race.racers.len() - 1;
+    let leader = || race.standings().first().copied().unwrap_or(0);
     match t {
         Target::Car(n) => n.min(last),
         Target::Player => last,
-        Target::Leader => race.standings().first().copied().unwrap_or(0),
+        Target::Leader => leader(),
+        Target::Auto => follow.map_or_else(leader, |f| f.min(last)),
         Target::Nearest => match eye {
             Some(e) => (0..=last).min_by(|&a, &b| cam_origin(&race.racers[a].car).distance_squared(e).total_cmp(&cam_origin(&race.racers[b].car).distance_squared(e))).unwrap_or(0),
             None => race.standings().first().copied().unwrap_or(0),
@@ -1013,8 +1559,8 @@ pub fn resolve(race: &Race, t: Target, eye: Option<Vec3>) -> usize {
 
 /// A camera at `eye` following a car (static `Target`, path `Target`): eased aim, lead, auto zoom, clear view.
 #[allow(clippy::too_many_arguments)]
-fn track_cam(race: &Race, eye: Vec3, target: Target, lag: f32, lead: f32, zoom: Zoom, clear: bool, state: &mut Option<Vec3>, dt: f32) -> (Camera, usize) {
-    let slot = resolve(race, target, Some(eye));
+fn track_cam(race: &Race, eye: Vec3, target: Target, follow: usize, lag: f32, lead: f32, zoom: Zoom, clear: bool, state: &mut Option<Vec3>, dt: f32) -> (Camera, usize) {
+    let slot = resolve_in(race, target, Some(eye), Some(follow));
     let car = &race.racers[slot].car;
     // #374: the car where it is drawn
     let pos = cam_origin_at(&car.p, &race.view_pose(slot));
@@ -1032,6 +1578,130 @@ fn track_cam(race: &Race, eye: Vec3, target: Target, lag: f32, lead: f32, zoom: 
     (Camera::from_rot(shot.eye, shot.rot, shot.zoom, shot.far_k), slot)
 }
 
+// ---------------------------------------------------------------- auto director (#154)
+
+motor_tune::tunable! {
+    /// Auto director [design choice]: a cut needs a camera nearer the car than this share of the distance of the camera on air.
+    /// range: 0.1..1
+    /// area: Cine
+    AUTO_SWITCH: f32 = 0.7;
+    /// Auto director [design choice]: the camera on air may cut before the shot's `Min` once it has not seen the car this long.
+    /// range: 0..5
+    /// unit: s
+    /// area: Cine
+    AUTO_LOST: f32 = 0.5;
+    /// Auto director [design choice]: a camera farther from the car than this does not see it.
+    /// range: 10..1000
+    /// unit: m
+    /// area: Cine
+    AUTO_SEE_MAX: f32 = 250.0;
+    /// Auto director [design choice]: the share of the frame kept clear at each edge; the car must lie inside the rest.
+    /// range: 0..0.4
+    /// area: Cine
+    AUTO_MARGIN: f32 = 0.1;
+    /// `Follow battle` [design choice]: another pair takes over when its gap is under this share of the held pair's.
+    /// range: 0.1..1
+    /// area: Cine
+    BATTLE_SWITCH: f32 = 0.6;
+}
+
+/// The auto shot in progress.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AutoRun {
+    /// index into `seq.shots` of the auto shot
+    pub shot: Option<usize>,
+    /// the camera on air, the video second of the last cut, the camera cut away from
+    pub cur: usize,
+    pub since: f32,
+    pub left: Option<usize>,
+    /// seconds the camera on air has not seen its car
+    pub lost: f32,
+}
+
+/// One pool camera's chances: the distance from its eye to its car when it sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Candidate {
+    pub cam: usize,
+    /// the car it is judged with (`Follow nearest`: the car nearest its eye)
+    pub car: usize,
+    pub sees: Option<f32>,
+    /// mounted or game-view camera on that car: a fallback when no world camera sees it
+    pub rides: bool,
+}
+
+/// The auto director's cut rule at video second `t` (20-cine "Auto director"): Some(camera) to cut to, None to stay.
+pub(crate) fn auto_pick(run: &AutoRun, cands: &[Candidate], t: f32, min: f32, switch: f32, lost_after: f32) -> Option<usize> {
+    let held = t - run.since;
+    let cur = cands.iter().find(|c| c.cam == run.cur);
+    let cur_rides = cur.is_some_and(|c| c.rides);
+    let cur_d = cur.and_then(|c| c.sees).filter(|_| !cur_rides);
+    let lost = !cur_rides && cur_d.is_none() && run.lost >= lost_after;
+    if held < min && !lost {
+        return None;
+    }
+    // no cut-back: the camera just left waits 2 x Min, unless it alone sees the car
+    let barred = |c: usize| run.left == Some(c) && held < 2.0 * min;
+    let mut seeing: Vec<(usize, f32)> = cands.iter().filter(|c| !c.rides && c.cam != run.cur).filter_map(|c| c.sees.map(|d| (c.cam, d))).collect();
+    seeing.sort_by(|a, b| a.1.total_cmp(&b.1));
+    let best = seeing.iter().find(|c| !barred(c.0)).or(seeing.first().filter(|_| lost)).copied();
+    match best {
+        Some((c, d)) => match cur_d {
+            Some(cd) => (d < switch * cd).then_some(c),
+            None => (lost || cur_rides).then_some(c),
+        },
+        None if lost => cands.iter().find(|c| c.rides && c.cam != run.cur && c.sees.is_some()).map(|c| c.cam),
+        None => None,
+    }
+}
+
+/// The first camera of an auto shot: the nearest world camera that sees its car, else a riding one, else the pool's first.
+pub(crate) fn auto_first(cands: &[Candidate]) -> usize {
+    let world = cands.iter().filter(|c| !c.rides).filter_map(|c| c.sees.map(|d| (c.cam, d))).min_by(|a, b| a.1.total_cmp(&b.1));
+    world.map(|w| w.0).or_else(|| cands.iter().find(|c| c.rides && c.sees.is_some()).map(|c| c.cam)).or(cands.first().map(|c| c.cam)).unwrap_or(0)
+}
+
+/// Where a camera looks at car `slot` (game space): its drawn model origin, `AIM_UP` above.
+fn aim_point(race: &Race, slot: usize) -> Vec3 {
+    cam_origin_at(&race.racers[slot].car.p, &race.view_pose(slot)) + Vec3::Y * AIM_UP
+}
+
+/// The distance from `station` to car `slot` when camera `cam` sees it: in front, inside the frame less its margins
+/// (`size` = the video's), within `AUTO_SEE_MAX` and with no wall between the station and the car. `station` is where
+/// the camera stands (a static camera's `Eye`): `Clear on` pulls the drawn eye up to a car behind a wall, a close-up
+/// that must neither count as near nor as seen.
+fn sees(race: &Race, cam: &Camera, station: Vec3, size: (u32, u32), bars: f32, slot: usize) -> Option<f32> {
+    let flip = Vec3::new(1.0, 1.0, -1.0);
+    let aim = aim_point(race, slot);
+    let d = station.distance(aim);
+    if d > AUTO_SEE_MAX.get() {
+        return None;
+    }
+    let (x, y, _) = crate::debug::project_any(cam, size, crate::render::FOV_X.get(), aim * flip)?;
+    let m = AUTO_MARGIN.get();
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    // a letterbox's black bars (`bars` of the height each) are not frame either
+    let my = bars + m * (1.0 - 2.0 * bars);
+    if !(w * m..=w * (1.0 - m)).contains(&x) || !(h * my..=h * (1.0 - my)).contains(&y) {
+        return None;
+    }
+    race.world.raycast(station, aim).is_none().then_some(d)
+}
+
+/// Running cars in the standings, the closest neighbouring pair (ahead, behind) by track distance, and its gap.
+fn closest_pair(race: &Race) -> Option<((usize, usize), f32)> {
+    let run: Vec<usize> = race.standings().into_iter().filter(|&s| race.racers[s].progress.finished_ms.is_none()).collect();
+    run.windows(2).filter_map(|w| pair_gap(race, (w[0], w[1])).map(|g| ((w[0], w[1]), g))).min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Metres between the two cars of a pair (either order), None when one has finished or has no position.
+fn pair_gap(race: &Race, (a, b): (usize, usize)) -> Option<f32> {
+    let (pa, pb) = (&race.racers[a].progress, &race.racers[b].progress);
+    if pa.finished_ms.is_some() || pb.finished_ms.is_some() {
+        return None;
+    }
+    motor_sim::race::distance_gap(&race.line, pa, pb).map(f32::abs)
+}
+
 impl Director {
     pub fn new(seq: &Sequence) -> Director {
         let states = seq
@@ -1042,6 +1712,7 @@ impl Director {
                 CamKind::Mounted { .. } => State::Mounted,
                 CamKind::Pose { mode, .. } => State::Pose(PoseCam::new(*mode)),
                 CamKind::Path { .. } => State::Path { aim: None, dir: Vec3::Z },
+                CamKind::Orbit { .. } => State::Orbit { centre: None, fwd: Vec3::Z, aim: None },
             })
             .collect();
         let curves = seq
@@ -1054,12 +1725,18 @@ impl Director {
             })
             .collect();
         let shake = seq.cameras.iter().map(|c| vec![0.0; c.shakes.len()]).collect();
-        Director { states, curves, shake, focus: 0, hidden: None, views: vec![None; seq.cameras.len()] }
+        let n = seq.cameras.len();
+        Director { states, curves, shake, focus: 0, hidden: None, views: vec![None; n], dofs: vec![None; n], air: 0, follow: 0, cut_at: vec![None; n], auto: AutoRun::default(), battle: None, last_air: None, dis: None, now: 0.0 }
     }
 
     /// Camera `i` as of the last `camera` call (on air or not): the camera, the slot it shows and whether it hides that car.
     pub fn view(&self, i: usize) -> Option<(Camera, usize, bool)> {
         self.views.get(i).copied().flatten()
+    }
+
+    /// Camera `i`'s depth of field as of the last `camera` call (#421): None without an `Aperture`.
+    pub fn dof(&self, i: usize) -> Option<Dof> {
+        self.dofs.get(i).copied().flatten()
     }
 
     /// The slot of the car the camera on air looks at (the session's followed car: env probe, emblem).
@@ -1072,26 +1749,193 @@ impl Director {
         self.hidden
     }
 
+    /// The camera on air as of the last `camera` call (an auto shot: the director's pick).
+    pub fn air(&self) -> usize {
+        self.air
+    }
+
+    /// The car the auto director follows (`Target auto`), as of the last `camera` call.
+    pub fn follow(&self) -> usize {
+        self.follow
+    }
+
+    /// A dissolve in progress as of the last `camera` call (#154): the camera it comes from and the weight of the
+    /// camera on air, 0..1 (smoothstep over the shot's `Dissolve` seconds; 0 on the frame of the cut).
+    pub fn dissolve(&self) -> Option<(usize, f32)> {
+        let (from, start, len) = self.dis?;
+        let k = (self.now - start) / len;
+        (0.0..1.0).contains(&k).then_some((from, k * k * (3.0 - 2.0 * k)))
+    }
+
+    /// The video second the dissolve in progress started at (its cut), None outside one.
+    pub fn dissolve_start(&self) -> Option<f32> {
+        self.dissolve().and(self.dis.map(|d| d.1))
+    }
+
+    /// Camera `i`'s clock (its `Drive time` path, its Fov keys): seconds since its latest shot or auto cut.
+    fn clock(&self, seq: &Sequence, i: usize, t: f32) -> f32 {
+        let cut = self.cut_at[i].filter(|&c| c <= t);
+        let shot = seq.shots.iter().rev().find(|s| s.auto.is_none() && s.cam == i && s.t <= t).map(|s| s.t);
+        match (shot, cut) {
+            (Some(a), Some(b)) => t - a.max(b),
+            (Some(a), None) | (None, Some(a)) => t - a,
+            (None, None) => t,
+        }
+    }
+
+    /// Camera `i` posed for this frame without shake: the camera, its slot, whether it hides it, whether it rides on it,
+    /// its key parameter.
+    fn posed(&mut self, seq: &Sequence, i: usize, race: &Race, t: f32, dt: f32) -> (Camera, usize, bool, bool, f32) {
+        let since = self.clock(seq, i, t);
+        let (mut cam, slot, hide, param, rides) = self.update(i, &seq.cameras[i], race, since, dt);
+        // zoom keys override the camera's own zoom
+        if let Some(m) = &self.curves[i].fov {
+            let z = fov_zoom(evaluate(m, param, false)[0]);
+            (cam.zoom, cam.far_k) = (z, far_k(z));
+        }
+        (cam, slot, hide, rides, param)
+    }
+
+    /// Camera `c`'s lens this frame (#421): None without an aperture. `cam` is the drawn pose, `slot` the car it shows,
+    /// `u` its key parameter. The focus distance is the subject's depth along the view axis (a focus plane).
+    fn lens_at(&self, c: &CineCam, cam: &Camera, slot: usize, u: f32, race: &Race) -> Option<Dof> {
+        let f_number = c.lens.aperture?;
+        let flip = Vec3::new(1.0, 1.0, -1.0);
+        let at = match &c.kind {
+            CamKind::Static { aim: Aim::At(a), .. } => Some(*a),
+            _ => None,
+        };
+        let dist = |f: FocusOn| {
+            let p = match f {
+                FocusOn::Dist(d) => return d,
+                FocusOn::Own => at.unwrap_or_else(|| aim_point(race, slot)),
+                FocusOn::Car(t) => aim_point(race, resolve_in(race, t, Some(cam.pos * flip), Some(self.follow))),
+            };
+            (p * flip - cam.pos).dot(cam.forward()).max(FOCUS_MIN)
+        };
+        let keys: Vec<(f32, f32, bool)> = c.keys.iter().filter_map(|k| k.focus.map(|f| (k.at, dist(f), k.linear))).collect();
+        let focus = if keys.is_empty() { dist(c.lens.focus) } else { focus_between(&keys, u) };
+        Some(Dof { focus, f_number })
+    }
+
     /// Advance every camera by `dt` (the race has been stepped to `t`) and return the one on air.
     pub fn camera(&mut self, seq: &Sequence, race: &Race, t: f32, dt: f32) -> Camera {
-        let air = on_air(seq, t);
+        let si = shot_at(seq, t);
+        match &seq.shots[si].auto {
+            Some(a) => {
+                // the first frame has no views to judge from: pose every camera once, without moving its easing on
+                if self.views.iter().all(Option::is_none) {
+                    for i in 0..seq.cameras.len() {
+                        let (cam, slot, hide, _, _) = self.posed(seq, i, race, t, 0.0);
+                        let cam = Camera { lens_across: true, ..cam };
+                        self.views[i] = Some((cam, slot, hide));
+                    }
+                }
+                self.auto_step(seq, si, a, race, t, dt);
+                self.air = self.auto.cur;
+            }
+            None => {
+                self.auto.shot = None;
+                self.follow = resolve(race, Target::Leader, None);
+                self.air = seq.shots[si].cam;
+            }
+        }
+        // a cut starts the shot's dissolve from the camera that was on air (a restarted one replaces the running one [APPROX])
+        if let Some(prev) = self.last_air.filter(|&p| p != self.air) {
+            let d = seq.shots[si].dissolve;
+            self.dis = (d > 0.0).then_some((prev, t, d));
+        }
+        (self.last_air, self.now) = (Some(self.air), t);
+        let air = self.air;
         let mut on = None;
         for (i, c) in seq.cameras.iter().enumerate() {
-            let since = since_shot(seq, i, t);
-            let (mut cam, slot, hide, param, rides) = self.update(i, c, race, since, dt);
-            // zoom keys override the camera's own zoom
-            if let Some(m) = &self.curves[i].fov {
-                let z = fov_zoom(evaluate(m, param, false)[0]);
-                (cam.zoom, cam.far_k) = (z, far_k(z));
-            }
+            let (mut cam, slot, hide, rides, param) = self.posed(seq, i, race, t, dt);
+            // #479: a .cine camera's FOV is the field across at every aspect, not the main view's Vert+
+            cam.lens_across = true;
             self.apply_shake(i, c, &mut cam, race, rides.then_some(slot), t, dt);
             self.views[i] = Some((cam, slot, hide));
+            self.dofs[i] = self.lens_at(c, &cam, slot, param, race);
             if i == air {
                 on = Some(cam);
                 (self.focus, self.hidden) = (slot, hide.then_some(slot));
             }
         }
         on.unwrap_or_else(|| Camera::new(Vec3::ZERO, 0.0, 0.0))
+    }
+
+    /// The car an auto shot follows now (`Follow nearest`: kept, it is the car of the camera on air).
+    fn follow_car(&mut self, f: Follow, race: &Race) -> usize {
+        let last = race.racers.len() - 1;
+        match f {
+            Follow::Leader => resolve(race, Target::Leader, None),
+            Follow::Car(n) => n.min(last),
+            Follow::Player => last,
+            Follow::Nearest => self.follow.min(last),
+            Follow::Battle => {
+                let best = closest_pair(race);
+                let held = self.battle.and_then(|p| pair_gap(race, p).map(|g| (p, g)));
+                self.battle = match (held, best) {
+                    (Some((p, g)), Some((q, h))) => Some(if h < BATTLE_SWITCH.get() * g { q } else { p }),
+                    (None, b) => b.map(|b| b.0),
+                    (h, None) => h.map(|h| h.0),
+                };
+                match self.battle {
+                    // the chasing car: the one further back now
+                    Some((a, b)) => {
+                        let (pa, pb) = (&race.racers[a].progress, &race.racers[b].progress);
+                        match motor_sim::race::distance_gap(&race.line, pa, pb) {
+                            Some(g) if g < 0.0 => a,
+                            _ => b,
+                        }
+                    }
+                    None => resolve(race, Target::Leader, None),
+                }
+            }
+        }
+    }
+
+    /// One frame of auto shot `si`: the followed car, then the cut rule over the pool (judged from the cameras' last views).
+    fn auto_step(&mut self, seq: &Sequence, si: usize, a: &Auto, race: &Race, t: f32, dt: f32) {
+        self.follow = self.follow_car(a.follow, race);
+        let bars = seq.letterbox.map_or(0.0, |l| letterbox_bar(seq.size.0, seq.size.1, l) as f32 / seq.size.1.max(1) as f32);
+        let cands: Vec<Candidate> = auto_pool(seq, a)
+            .into_iter()
+            .map(|i| {
+                let rides = !is_world(&seq.cameras[i].kind);
+                let Some((cam, slot, _)) = self.views[i] else { return Candidate { cam: i, car: self.follow, sees: None, rides } };
+                if rides {
+                    // a riding camera shows its own car
+                    let ok = a.follow == Follow::Nearest || slot == self.follow;
+                    let d = (cam.pos * Vec3::new(1.0, 1.0, -1.0)).distance(aim_point(race, slot));
+                    return Candidate { cam: i, car: slot, sees: ok.then_some(d), rides };
+                }
+                let station = match &seq.cameras[i].kind {
+                    CamKind::Static { eye, .. } => *eye,
+                    _ => cam.pos * Vec3::new(1.0, 1.0, -1.0),
+                };
+                let car = if a.follow == Follow::Nearest { resolve(race, Target::Nearest, Some(station)) } else { self.follow };
+                Candidate { cam: i, car, sees: sees(race, &cam, station, seq.size, bars, car), rides }
+            })
+            .collect();
+        if self.auto.shot != Some(si) {
+            let first = auto_first(&cands);
+            // its clock starts with the shot (a director started inside the shot, the editor's after a seek, too)
+            let at = seq.shots[si].t.min(t);
+            self.auto = AutoRun { shot: Some(si), cur: first, since: at, left: None, lost: 0.0 };
+            self.cut_at[first] = Some(at);
+        } else {
+            let seen = cands.iter().find(|c| c.cam == self.auto.cur).is_some_and(|c| c.sees.is_some());
+            self.auto.lost = if seen { 0.0 } else { self.auto.lost + dt };
+            if let Some(c) = auto_pick(&self.auto, &cands, t, a.min, AUTO_SWITCH.get(), AUTO_LOST.get()) {
+                self.auto = AutoRun { shot: Some(si), cur: c, since: t, left: Some(self.auto.cur), lost: 0.0 };
+                self.cut_at[c] = Some(t);
+            }
+        }
+        if a.follow == Follow::Nearest {
+            if let Some(c) = cands.iter().find(|c| c.cam == self.auto.cur) {
+                self.follow = c.car;
+            }
+        }
     }
 
     /// Shake camera `i` (on video time `t`); `own` = the car it rides on (not counted by proximity).
@@ -1122,6 +1966,7 @@ impl Director {
     /// Camera `i` this frame: the camera, the slot it shows, whether it hides that car, its key parameter (Fov keys)
     /// and whether it rides on that car.
     fn update(&mut self, i: usize, c: &CineCam, race: &Race, since: f32, dt: f32) -> (Camera, usize, bool, f32, bool) {
+        let follow = self.follow;
         match (&c.kind, &mut self.states[i]) {
             (CamKind::Static { eye, aim, zoom, clear }, State::Static { aim: state }) => match aim {
                 Aim::At(a) => {
@@ -1132,18 +1977,18 @@ impl Director {
                     (Camera::from_rot(*eye, look_rot(*eye, *a), z, far_k(z)), 0, false, since, false)
                 }
                 Aim::Track { target, lag, lead } => {
-                    let (cam, slot) = track_cam(race, *eye, *target, *lag, *lead, *zoom, *clear, state, dt);
+                    let (cam, slot) = track_cam(race, *eye, *target, follow, *lag, *lead, *zoom, *clear, state, dt);
                     (cam, slot, false, since, false)
                 }
             },
             (CamKind::Mounted { target, offset, angles, zoom, hide }, State::Mounted) => {
-                let slot = resolve(race, *target, None);
+                let slot = resolve_in(race, *target, None, Some(follow));
                 let v = race.view_pose(slot);
                 let eye = cam_origin_at(&race.racers[slot].car.p, &v) + v.rot * *offset;
                 (Camera::from_rot(eye, v.rot * euler_to_rot(*angles * DEG), *zoom, far_k(*zoom)), slot, *hide, since, true)
             }
             (CamKind::Pose { mode, target }, State::Pose(pc)) => {
-                let slot = resolve(race, *target, None);
+                let slot = resolve_in(race, *target, None, Some(follow));
                 let v = race.view_pose(slot);
                 (pc.camera(race, &CamTune::live(), cam_origin_at(&race.racers[slot].car.p, &v), v.rot, dt), slot, mode.hides_car(), since, true)
             }
@@ -1154,7 +1999,7 @@ impl Director {
                 let (u, du, mut slot) = match drive {
                     Drive::Time => (since, 0.02, 0),
                     Drive::Car(t) => {
-                        let slot = resolve(race, *t, None);
+                        let slot = resolve_in(race, *t, None, Some(follow));
                         (lap_param(race.racers[slot].progress.s, race.line.length, cv.span.0, cv.span.1), 0.5, slot)
                     }
                 };
@@ -1176,12 +2021,27 @@ impl Director {
                         Camera::from_rot(eye, look_dir(*dir).unwrap_or(Mat3::IDENTITY), fixed, far_k(fixed))
                     }
                     PathAim::Track { target, lag, lead } => {
-                        let (cam, s) = track_cam(race, eye, *target, *lag, *lead, *zoom, *clear, state, dt);
+                        let (cam, s) = track_cam(race, eye, *target, follow, *lag, *lead, *zoom, *clear, state, dt);
                         slot = s;
                         cam
                     }
                 };
                 (cam, slot, false, u, false)
+            }
+            (CamKind::Orbit { target, radius, height, speed, start, lag, zoom, clear }, State::Orbit { centre, fwd, aim }) => {
+                let slot = resolve_in(race, *target, None, Some(follow));
+                let v = race.view_pose(slot);
+                let goal = cam_origin_at(&race.racers[slot].car.p, &v);
+                let c = centre.map_or(goal, |p| ease(p, goal, *lag, dt));
+                *centre = Some(c);
+                // the heading eased as a vector, so a spin never jumps; a car pointing straight up or down keeps the last one
+                let heading = Vec3::new(v.rot.z_axis.x, 0.0, v.rot.z_axis.z);
+                if let Some(f) = ease(*fwd, heading.try_normalize().unwrap_or(*fwd), *lag, dt).with_y(0.0).try_normalize() {
+                    *fwd = f;
+                }
+                let eye = orbit_eye(c, *fwd, *radius, *height, start + speed * since);
+                let (cam, s) = track_cam(race, eye, *target, follow, *lag, 0.0, *zoom, *clear, aim, dt);
+                (cam, s, false, since, true)
             }
             _ => unreachable!("camera state matches its kind"),
         }
@@ -1210,6 +2070,18 @@ mod tests {
         let (s2, w2) = parse(&to_text(&s)).unwrap();
         assert!(w2.is_empty(), "{w2:?}");
         assert_eq!(s, s2);
+    }
+
+    /// #423: `Recording` keeps the rest of its line (spaces included, a comment cut off) and round-trips.
+    #[test]
+    fn recording_line_round_trips() {
+        let (s, w) = parse(&format!("{SAMPLE}Recording ~/My Runs/Goldbridge 1.mhr  # the final\n")).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.race.recording.as_deref(), Some("~/My Runs/Goldbridge 1.mhr"));
+        let (s2, _) = parse(&to_text(&s)).unwrap();
+        assert_eq!(s, s2);
+        let (_, w) = parse(&format!("{SAMPLE}Recording\n")).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
     }
 
     #[test]
@@ -1312,8 +2184,52 @@ mod tests {
         assert_eq!(w.len(), 13, "{w:#?}");
     }
 
+    #[test]
+    fn lens_parses_and_round_trips() {
+        let text = "Camera a static Eye 1 2 3 Target car 1 Aperture 2.8 Zoom 4\n\
+            Camera b mounted Target leader Focus car 2 Aperture 1.4 Hide on\n\
+            Camera c static Eye 0 0 0 At 1 0 0 Focus 12.5\n\
+            Camera d chase Target player Aperture 8 Focus own\n\
+            Camera p path Aperture 2 Focus leader\nKey p 0 Eye 0 0 0\n\
+            Key a 0 Focus car 1\nKey a 2 Focus car 2 Linear on\nKey a 4 Fov 30 Focus 40\nShot 0 a\n";
+        let (s, w) = parse(text).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.cameras[0].lens, Lens { aperture: Some(2.8), focus: FocusOn::Own });
+        assert!(matches!(s.cameras[0].kind, CamKind::Static { zoom: Zoom::Fixed(4.0), .. }), "the other words still parse");
+        assert_eq!(s.cameras[1].lens, Lens { aperture: Some(1.4), focus: FocusOn::Car(Target::Car(2)) });
+        assert_eq!(s.cameras[2].lens, Lens { aperture: None, focus: FocusOn::Dist(12.5) });
+        assert_eq!(s.cameras[3].lens.focus, FocusOn::Own);
+        assert_eq!(s.cameras[4].lens.focus, FocusOn::Car(Target::Leader));
+        let f: Vec<_> = s.cameras[0].keys.iter().map(|k| k.focus).collect();
+        assert_eq!(f, [Some(FocusOn::Car(Target::Car(1))), Some(FocusOn::Car(Target::Car(2))), Some(FocusOn::Dist(40.0))]);
+        assert!(s.cameras[0].keys[1].linear);
+        let (s2, w2) = parse(&to_text(&s)).unwrap();
+        assert!(w2.is_empty(), "{w2:?}");
+        assert_eq!(s, s2);
+        // bad lens words skip the line
+        let (s, w) = parse("Camera a static Eye 0 0 0 At 1 0 0 Aperture 0.05\nCamera b static Eye 0 0 0 At 1 0 0 Focus 0.1\nCamera c static Eye 0 0 0 At 1 0 0 Focus car\nCamera d static Eye 0 0 0 At 1 0 0 Aperture\nCamera e static Eye 0 0 0 At 1 0 0\nKey e 0 Focus far\nShot 0 e\n").unwrap();
+        assert_eq!(s.cameras.len(), 1);
+        assert_eq!(w.len(), 5, "{w:#?}");
+    }
+
+    #[test]
+    fn focus_racks_in_diopters() {
+        let k = [(0.0, 10.0, false), (2.0, 40.0, true), (4.0, 20.0, false)];
+        // held outside the keys
+        assert_eq!(focus_between(&k, -1.0), 10.0);
+        assert_eq!(focus_between(&k, 9.0), 20.0);
+        assert_eq!(focus_between(&k, 0.0), 10.0);
+        // halfway in 1 / distance, not in metres: 1 / ((1/10 + 1/40) / 2) = 16
+        assert!((focus_between(&k, 1.0) - 16.0).abs() < 1e-4);
+        // the segment into a `Linear on` key is straight at a quarter, the others ease (smoothstep 0.15625 at a quarter)
+        assert!((focus_between(&k, 0.5) - 1.0 / (0.1 - 0.075 * 0.25)).abs() < 1e-3);
+        assert!((focus_between(&k, 2.5) - 1.0 / (0.025 + 0.025 * 0.15625)).abs() < 1e-3);
+        assert_eq!(focus_between(&k, 2.0), 40.0);
+        assert_eq!(focus_between(&[], 1.0), f32::INFINITY);
+    }
+
     fn key(at: f32, x: f32, tcb: [f32; 3]) -> CamKey {
-        CamKey { at, eye: Some(Vec3::new(x, 0.0, 0.0)), angles: None, fov: None, tcb, linear: false }
+        CamKey { at, eye: Some(Vec3::new(x, 0.0, 0.0)), angles: None, fov: None, focus: None, tcb, linear: false }
     }
 
     #[test]
@@ -1345,6 +2261,41 @@ mod tests {
         assert_eq!(lap_param(4950.0, len, -100.0, 100.0), -50.0);
         // outside the span: the nearer side
         assert_eq!(lap_param(2000.0, len, 100.0, 300.0), 2000.0);
+    }
+
+    #[test]
+    fn shot_mode() {
+        let text = "Camera a static Eye 0 0 0 At 1 0 0\nShot 0 a\nShot 4 a Mode remaster\nShot 8 auto Mode CLASSIC\n";
+        let (s, w) = parse(text).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.shots.iter().map(|x| x.mode).collect::<Vec<_>>(), [None, Some(RenderMode::Remaster), Some(RenderMode::Classic)]);
+        assert_eq!(mode_at(&s, 1.0, RenderMode::Classic), RenderMode::Classic);
+        assert_eq!(mode_at(&s, 1.0, RenderMode::Remaster), RenderMode::Remaster);
+        assert_eq!(mode_at(&s, 5.0, RenderMode::Classic), RenderMode::Remaster);
+        assert_eq!(mode_at(&s, 9.0, RenderMode::Remaster), RenderMode::Classic);
+        assert!(uses_mode(&s, RenderMode::Remaster));
+        let out = to_text(&s);
+        assert!(out.contains("Mode remaster") && out.contains("Mode classic"));
+        assert_eq!(parse(&out).unwrap().0.shots, s.shots);
+        let (_, w) = parse("Camera a static Eye 0 0 0 At 1 0 0\nShot 0 a\nShot 5 a Mode fancy\n").unwrap();
+        assert!(w.iter().any(|m| m.contains("Mode")), "{w:?}");
+    }
+
+    #[test]
+    fn shot_pitch() {
+        let text = "Camera a static Eye 0 0 0 At 1 0 0\nShot 0 a\nShot 4 a Speed 0.5 Pitch tape\nShot 8 auto Speed 0.25 Pitch TAPE\nShot 12 a Speed 0.5 Pitch keep\n";
+        let (s, w) = parse(text).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.shots.iter().map(|x| x.pitch).collect::<Vec<_>>(), [Pitch::Keep, Pitch::Tape, Pitch::Tape, Pitch::Keep]);
+        assert_eq!((audio_rate_at(&s, 1.0), audio_rate_at(&s, 5.0), audio_rate_at(&s, 9.0), audio_rate_at(&s, 13.0)), (1.0, 0.5, 0.25, 1.0));
+        let out = to_text(&s);
+        assert_eq!(out.matches("Pitch tape").count(), 2);
+        assert!(!out.contains("Pitch keep"));
+        let (back, w) = parse(&out).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back, s);
+        let (_, w) = parse("Camera a static Eye 0 0 0 At 1 0 0\nShot 0 a\nShot 5 a Pitch fast\n").unwrap();
+        assert!(w.iter().any(|m| m.contains("Pitch")), "{w:?}");
     }
 
     #[test]
@@ -1408,5 +2359,189 @@ mod tests {
         assert!(r.z_axis.distance(Vec3::new(1.0, 0.0, 1.0).normalize()) < 1e-5);
         assert!(r.y_axis.y > 0.9);
         assert_eq!(look_rot(Vec3::ONE, Vec3::ONE), Mat3::IDENTITY);
+    }
+
+    #[test]
+    fn auto_shots_parse_and_round_trip() {
+        let text = "Camera a static Eye 0 0 0 Target auto\nCamera b static Eye 9 0 0 At 1 0 0\nCamera c chase Target auto\n\
+            Shot 0 a\nShot 4 auto Cams b c Follow car 1 Min 2.5 FadeIn 1\nShot 9 auto\n";
+        let (s, w) = parse(text).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.shots.len(), 3);
+        assert_eq!(s.shots[1].auto, Some(Auto { pool: vec![1, 2], follow: Follow::Car(1), min: 2.5 }));
+        assert_eq!((s.shots[1].cam, s.shots[1].fade_in), (1, 1.0), "the pool's first camera");
+        assert_eq!(s.shots[2].auto, Some(Auto::default()));
+        assert_eq!(s.shots[2].cam, 0, "empty pool: the first world camera");
+        assert!(matches!(s.cameras[0].kind, CamKind::Static { aim: Aim::Track { target: Target::Auto, .. }, .. }));
+        let (back, w) = parse(&to_text(&s)).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back, s);
+        // an auto shot is no shot of its first camera: that camera's clock runs on
+        assert_eq!(since_shot(&s, 1, 6.0), 6.0);
+        assert_eq!(auto_pool(&s, s.shots[2].auto.as_ref().unwrap()), [0, 1]);
+        // `auto` is not a camera name; Follow is for auto shots only; unknown pool cameras are reported
+        let (_, w) = parse("Camera auto static Eye 0 0 0 At 1 0 0\nCamera a static Eye 0 0 0 At 1 0 0\nShot 0 a Follow leader\nShot 1 auto Cams zz\n").unwrap();
+        assert_eq!(w.len(), 3, "{w:?}");
+    }
+
+    #[test]
+    fn dissolve_and_letterbox_round_trip_and_run() {
+        let text = "Output Size 1920 1080 Fps 30 Letterbox 2.39\nCamera a static Eye 0 0 0 At 1 0 0\nCamera b static Eye 9 0 0 At 1 0 0\n\
+            Shot 0 a\nShot 5 b Dissolve 1\nShot 9 auto Dissolve 0.4\n";
+        let (s, w) = parse(text).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!((s.letterbox, s.shots[0].dissolve, s.shots[1].dissolve, s.shots[2].dissolve), (Some(2.39), 0.0, 1.0, 0.4));
+        let (back, w) = parse(&to_text(&s)).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back, s);
+        // no letterbox, no dissolve: the old text; off, a bad aspect and a negative dissolve
+        let (plain, _) = parse("Camera a static Eye 0 0 0 At 1 0 0\nShot 0 a\n").unwrap();
+        assert!(!to_text(&plain).contains("Letterbox") && !to_text(&plain).contains("Dissolve"));
+        let (off, w) = parse("Output Letterbox off\nOutput Letterbox 9\nCamera a static Eye 0 0 0 At 1 0 0\nShot 0 a Dissolve -1\n").unwrap();
+        assert_eq!(off.letterbox, None);
+        assert!(w[0].contains("Letterbox") && w[1].contains("dissolve"), "{w:?}");
+        // the director's dissolve: from the old camera, the new one's weight rising by smoothstep over the shot's seconds
+        let mut d = Director::new(&s);
+        assert_eq!(d.dissolve(), None);
+        d.dis = Some((0, 5.0, 1.0));
+        for (now, want) in [(5.0, Some(0.0)), (5.5, Some(0.5)), (5.25, Some(0.15625)), (6.0, None), (4.0, None)] {
+            d.now = now;
+            assert_eq!(d.dissolve().map(|x| x.1), want, "at {now}");
+        }
+        assert_eq!(d.dissolve(), None);
+    }
+
+    #[test]
+    fn preview_frame_fits_and_centres() {
+        let near = |a: [f32; 4], b: [f32; 4]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+        // no panels, the window's own aspect: the whole window
+        assert!(near(preview_frame((1920.0, 1080.0), (0.0, 0.0, 0.0, 0.0), (1920, 1080), 0.0), [0.0, 0.0, 1920.0, 1080.0]));
+        // a dock on the right: centred on the free area, as wide as it allows
+        let r = preview_frame((1920.0, 1080.0), (100.0, 360.0, 120.0, 0.0), (1920, 1080), 8.0);
+        assert!((r[0] + r[2] * 0.5 - (1920.0 - 368.0) * 0.5).abs() < 1e-3 && (r[1] + r[3] * 0.5 - (108.0 + 952.0) * 0.5).abs() < 1e-3);
+        assert!((r[3] - (1080.0 - 108.0 - 128.0)).abs() < 1e-3 && (r[2] / r[3] - 16.0 / 9.0).abs() < 1e-3);
+        assert!(r[0] >= -1e-3 && r[0] + r[2] <= 1920.0 - 368.0 + 1e-3 && r[1] >= 108.0 - 1e-3 && r[1] + r[3] <= 952.0 + 1e-3);
+        // a tall window: the width binds
+        let t = preview_frame((800.0, 1200.0), (0.0, 0.0, 0.0, 0.0), (1920, 1080), 0.0);
+        assert!(near(t, [0.0, 600.0 - 225.0, 800.0, 450.0]));
+        // panels over everything: still a positive rectangle
+        assert!(preview_frame((100.0, 100.0), (90.0, 90.0, 90.0, 90.0), (16, 9), 0.0)[2] > 0.0);
+    }
+
+    #[test]
+    fn preview_cam_puts_the_view_axis_on_the_frame() {
+        let (win, size) = ((1920.0, 1080.0), (1920, 1080));
+        let rect = preview_frame(win, (40.0, 700.0, 30.0, 0.0), (1920, 1080), 8.0);
+        // a Cine camera: its FOV is the field across (#479)
+        let cam = preview_cam(Camera { lens_across: true, ..Camera::new(Vec3::new(1.0, 2.0, 3.0), 0.4, -0.1) }, rect, win);
+        assert!((cam.zoom - rect[2] / 1920.0).abs() < 1e-6);
+        // a point straight ahead projects to the frame's centre
+        let (x, y, _) = crate::debug::project_any(&cam, size, 90.0, cam.pos + cam.forward() * 50.0).unwrap();
+        assert!((x - (rect[0] + rect[2] * 0.5)).abs() < 1e-2 && (y - (rect[1] + rect[3] * 0.5)).abs() < 1e-2, "{x} {y} {rect:?}");
+        // the frame's corner is the field's corner: tan(45 deg) across half the frame's width
+        let c = crate::debug::cursor_ray(&cam, size, 90.0, (rect[0], rect[1]));
+        let (fwd, right, up) = (cam.forward(), cam.right(), cam.up());
+        assert!((c.dot(right) / c.dot(fwd) + 1.0).abs() < 1e-3 && (c.dot(up) / c.dot(fwd) - 9.0 / 16.0).abs() < 1e-3);
+        // the mouse ray inverts the projection
+        let (px, py, _) = crate::debug::project_any(&cam, size, 90.0, cam.pos + c * 20.0).unwrap();
+        assert!((px - rect[0]).abs() < 1e-2 && (py - rect[1]).abs() < 1e-2);
+    }
+
+    #[test]
+    fn letterbox_bar_rows() {
+        // 1920 x 1080 at 2.39:1 shows 803 rows: 138 above and below (the odd row stays in the picture)
+        assert_eq!(letterbox_bar(1920, 1080, 2.39), 138);
+        // a window not shorter than the frame has no bars
+        assert_eq!(letterbox_bar(1920, 1080, 1.0), 0);
+        assert_eq!(letterbox_bar(1920, 1080, 1.7777), 0);
+    }
+
+    fn cand(cam: usize, sees: Option<f32>, rides: bool) -> Candidate {
+        Candidate { cam, car: 0, sees, rides }
+    }
+
+    #[test]
+    fn auto_cut_rules() {
+        let run = |cur, since, left, lost| AutoRun { shot: Some(0), cur, since, left, lost };
+        let pick = |r: &AutoRun, c: &[Candidate], t| auto_pick(r, c, t, 3.0, 0.7, 0.5);
+        // a nearer camera waits for Min, then needs to be under 0.7x the distance
+        let c = [cand(0, Some(50.0), false), cand(1, Some(30.0), false)];
+        assert_eq!(pick(&run(0, 0.0, None, 0.0), &c, 2.9), None, "Min holds");
+        assert_eq!(pick(&run(0, 0.0, None, 0.0), &c, 3.1), Some(1));
+        let near = [cand(0, Some(40.0), false), cand(1, Some(30.0), false)];
+        assert_eq!(pick(&run(0, 0.0, None, 0.0), &near, 10.0), None, "0.75x is not enough");
+        // a lost car cuts before Min, once lost long enough
+        let lost = [cand(0, None, false), cand(1, Some(80.0), false)];
+        assert_eq!(pick(&run(0, 0.0, None, 0.3), &lost, 1.0), None);
+        assert_eq!(pick(&run(0, 0.0, None, 0.6), &lost, 1.0), Some(1));
+        // no cut-back to the camera just left within 2 x Min, unless it alone sees the car
+        let back = [cand(0, Some(50.0), false), cand(1, Some(10.0), false), cand(2, Some(20.0), false)];
+        assert_eq!(pick(&run(0, 0.0, Some(1), 0.0), &back, 4.0), Some(2));
+        assert_eq!(pick(&run(0, 0.0, Some(1), 0.0), &back, 7.0), Some(1), "after 2 x Min it may come back");
+        let only = [cand(0, None, false), cand(1, Some(10.0), false)];
+        assert_eq!(pick(&run(0, 0.0, Some(1), 0.0), &only, 4.0), None, "not lost long enough");
+        assert_eq!(pick(&run(0, 0.0, Some(1), 1.0), &only, 4.0), Some(1));
+        // riding cameras: a fallback when no world camera sees the car, left for a world camera after Min
+        let ride = [cand(0, None, false), cand(1, None, false), cand(2, Some(4.0), true)];
+        assert_eq!(pick(&run(0, 0.0, None, 1.0), &ride, 1.0), Some(2));
+        let back_to_world = [cand(0, Some(90.0), false), cand(2, Some(4.0), true)];
+        assert_eq!(pick(&run(2, 0.0, None, 0.0), &back_to_world, 2.0), None);
+        assert_eq!(pick(&run(2, 0.0, None, 0.0), &back_to_world, 3.5), Some(0));
+        // nothing sees the car: stay
+        assert_eq!(pick(&run(0, 0.0, None, 5.0), &[cand(0, None, false), cand(1, None, false)], 9.0), None);
+        // the first pick: nearest world camera, else a riding one, else the pool's first
+        assert_eq!(auto_first(&[cand(3, Some(40.0), false), cand(4, Some(20.0), false), cand(5, Some(2.0), true)]), 4);
+        assert_eq!(auto_first(&[cand(3, None, false), cand(5, Some(2.0), true)]), 5);
+        assert_eq!(auto_first(&[cand(3, None, false), cand(4, None, false)]), 3);
+    }
+
+    #[test]
+    fn exported_tv_station_reproduces_the_camera() {
+        use motor_sim::tvcam;
+        let text = "Race Track 1 Cars 1 2\nCamera a static Eye 10 3 20 At 40 1 80 Zoom 2.5\nCamera b static Eye -5 4 0 Target car 0 Zoom auto 20\nCamera c chase Target car 0\nShot 0 a\n";
+        let (seq, _) = parse(text).unwrap();
+        let (keys, _) = tv_keys(&seq, 0.0);
+        assert_eq!(keys.len(), 2);
+        let m = Motion { version: 1, channels: 9, keys };
+        let ks = tvcam::keys(&m);
+        // a car near `a`: fixed aim and zoom
+        let s = tvcam::shot(&ks, Vec3::new(12.0, 0.0, 25.0), Mat3::IDENTITY).unwrap();
+        assert!(s.eye.distance(Vec3::new(10.0, 3.0, 20.0)) < 1e-4);
+        assert!(s.rot.z_axis.distance(look_rot(Vec3::new(10.0, 3.0, 20.0), Vec3::new(40.0, 1.0, 80.0)).z_axis) < 1e-4);
+        assert!((s.zoom - 2.5).abs() < 1e-4);
+        // near `b`: looks at the car, the zoom follows the distance as auto_zoom does
+        for d in [10.0f32, 40.0, 100.0, 1000.0] {
+            let car = Vec3::new(-5.0, 4.0, -d);
+            let s = tvcam::shot(&ks, car, Mat3::IDENTITY).unwrap();
+            assert!(s.rot.z_axis.distance((car - s.eye).normalize()) < 1e-4);
+            assert!((s.zoom - auto_zoom(d, 20.0)).abs() < 1e-3, "d {d}: {} vs {}", s.zoom, auto_zoom(d, 20.0));
+        }
+    }
+
+    /// #425: an orbit line parses with its defaults, round-trips, and refuses `Target nearest`.
+    #[test]
+    fn orbit_line_round_trips() {
+        let (s, w) = parse("Camera a orbit Target leader\nCamera b orbit Target car 1 Radius 8 Height -2 Speed -45 Start 90 Lag 0 Zoom auto 20 Clear on\nShot 0 a\n").unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(s.cameras[0].kind, CamKind::Orbit { target: Target::Leader, radius: ORBIT_RADIUS, height: ORBIT_HEIGHT, speed: ORBIT_SPEED, start: 0.0, lag: ORBIT_LAG, zoom: Zoom::Fixed(1.0), clear: false });
+        assert!(matches!(s.cameras[1].kind, CamKind::Orbit { radius, speed, zoom: Zoom::Auto(_), clear: true, .. } if radius == 8.0 && speed == -45.0));
+        let (s2, w2) = parse(&to_text(&s)).unwrap();
+        assert!(w2.is_empty(), "{w2:?}");
+        assert_eq!(s, s2);
+        let (s3, w3) = parse("Camera a orbit Target nearest\nCamera b orbit Radius 5\nCamera c orbit Target leader Radius 0\nCamera d static Eye 0 0 0 At 1 0 0\nShot 0 d\n").unwrap();
+        assert_eq!(w3.len(), 3, "{w3:?}");
+        assert_eq!(s3.cameras.len(), 1);
+    }
+
+    #[test]
+    fn orbit_eye_circles_the_car() {
+        let c = Vec3::new(10.0, 1.0, 20.0);
+        let near = |a: Vec3, b: Vec3| a.distance(b) < 1e-4;
+        // a car heading +z: angle 0 is straight behind, 90 on its right (+x), 180 in front
+        assert!(near(orbit_eye(c, Vec3::Z, 12.0, 4.0, 0.0), c + Vec3::new(0.0, 4.0, -12.0)));
+        assert!(near(orbit_eye(c, Vec3::Z, 12.0, 4.0, 90.0), c + Vec3::new(12.0, 4.0, 0.0)));
+        assert!(near(orbit_eye(c, Vec3::Z, 12.0, 4.0, 180.0), c + Vec3::new(0.0, 4.0, 12.0)));
+        // the circle turns with the car: heading +x, angle 90 is on its right (-z)
+        assert!(near(orbit_eye(c, Vec3::X, 5.0, 0.0, 90.0), c + Vec3::new(0.0, 0.0, -5.0)));
     }
 }

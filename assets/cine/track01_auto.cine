@@ -1,0 +1,20 @@
+# Motorhead cine v1
+# Auto director sample for #154 (Dissolve: every cut crossfades over 0.4 s; Letterbox: cinema bars): RedRock, 8 AI cars, 40 s from the green light.
+# Static tracking cameras near the game's own TV camera stations along the first kilometre (raised a little),
+# all following the auto shot's car (`Target auto`), plus a chase camera as the fallback when no world camera sees it.
+Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60 Letterbox 2.39
+End 40
+
+Camera grid    static Eye 14 3 -10        Target auto Zoom auto 18 Lag 0.15 Lead 0.2 Clear on
+Camera gantry  static Eye -6 7 80         Target auto Zoom auto 30 Lag 0.25 Lead 0.3 Clear on
+Camera s238    static Eye -7.8 8.5 238.1  Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera s410    static Eye 114.2 -7 410.6  Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera s511    static Eye 154.4 -18 511.2 Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera s768    static Eye 154.1 -15 767.9 Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera s952    static Eye 178.7 -12 952.1 Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera s1040   static Eye 348.7 -16 1040.2 Target auto Zoom auto 25 Lag 0.25 Lead 0.2 Clear on
+Camera chase   chase  Target auto
+
+# the director picks among the world cameras and the chase camera, following the closest battle
+Shot 0 auto Cams grid gantry s238 s410 s511 s768 s952 s1040 chase Follow battle Min 3 FadeIn 1 FadeOut 1.5 Dissolve 0.4

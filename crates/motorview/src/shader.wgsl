@@ -92,6 +92,12 @@ struct Globals {
     flash: vec4<f32>,
     // rgb the light colour, w the range in metres (0 = off)
     flash_col: vec4<f32>,
+    // CLASSIC: rgb the track's ObjectBrightness (lit textured faces: `D3D_TEX_FACE`, `D3D_PROP_TEX_FACE`)
+    obj_bright: vec4<f32>,
+    // REMASTER clouds (#470, procgen/fill.rs `Cloud::packed`): 4 vec4 per cloud, (centre, density per metre) and the
+    // three rows of the view offset -> unit sphere matrix; cloud_n.x of them in use
+    clouds: array<vec4<f32>, 64>,
+    cloud_n: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -177,6 +183,12 @@ const SHADOW_LIFT_MIN: f32 = 0.005;
 // REMASTER: set on the multisampled mesh pipelines, where colour-keyed texels turn into
 // sample coverage instead of a hard discard (alpha to coverage)
 override ALPHA_TO_COVERAGE: bool = false;
+
+// CLASSIC world fog (#461): set by render.rs on the Classic `Pass::Mesh` / `Pass::Far` pipelines, whose only unlit draw
+// (`ambient.w` 0) is the world: the D3D world pass (0x438f34 -> 0x43911c -> 0x441098, draw mode 1) goes through the
+// converter 0x43faac like the objects, so the world takes their depth fog and far test (`vs_main`). Shadows (Pass::Shadow),
+// debug lines (Pass::Opaque) and skid marks (`vs_skid`) share the world's bind group and keep `fog_at`.
+override D3D_WORLD: bool = false;
 
 // The env cube holds linear HDR light (render.rs `EnvProbe`: the sun and the lamps are over 1);
 // the paint models mix in gamma space, so a sample is decoded first.
@@ -296,6 +308,10 @@ struct VsOut {
     @location(8) albedo: vec3<f32>,
     // CHEAT tribute to tron (#320): the triangle's corner as a one-hot (vs_main), 0 at the edge opposite each corner
     @location(9) bary: vec3<f32>,
+    // CLASSIC object fog (#460, `vs_main`), lit objects and the world (#461, `D3D_WORLD`) with the fog on: x 1 at a corner nearer than `D3D_FAR_TEST` x far, else
+    // 0, so it stays > 0 inside any triangle with such a corner; y the far silhouette's alpha; z 1 (0 in every other draw
+    // and entry point, which leaves the far test off)
+    @location(10) obj: vec3<f32>,
 };
 
 // The flashlight (motorview, `DebugView::flashlight`) [design choice]: a soft round cone from the camera along its view
@@ -520,7 +536,7 @@ fn headlight_open(x: f32, y: f32) -> f32 {
 // (render.rs `PropLightGpu`). `prop_of` = the record of each vertex of the props buffer.
 @group(0) @binding(11) var<storage, read> prop_myw: array<vec4<f32>>;
 @group(0) @binding(12) var<storage, read> prop_of: array<u32>;
-const MYW_REC: u32 = 17u;
+const MYW_REC: u32 = 18u;
 // the record of the vertex being lit (`vs_main` sets it when `myw_n.y` = 2), -1: `g.myw`, the
 // light list of the draw
 var<private> prop_rec: i32 = -1;
@@ -530,6 +546,15 @@ fn myw_count() -> u32 {
         return u32(prop_myw[u32(prop_rec) * MYW_REC].w + 0.5);
     }
     return u32(g.myw_n.x + 0.5);
+}
+
+// CLASSIC: the centreline tint of the scene object being lit (the last row of its record, 0x439134
+// multiplies ObjectAmbient and the sun colour by it); 1 for everything else
+fn obj_tint() -> vec3<f32> {
+    if (prop_rec >= 0) {
+        return prop_myw[u32(prop_rec) * MYW_REC + MYW_REC - 1u].rgb;
+    }
+    return vec3<f32>(1.0);
 }
 
 fn myw_pos(i: u32) -> vec4<f32> {
@@ -608,18 +633,16 @@ fn myw_light_pp(n: vec3<f32>, p: vec3<f32>, vd: vec3<f32>) -> vec3<f32> {
     return sum;
 }
 
-// CLASSIC per-vertex object light (0x42ce44): ambient + max(0, N.L) * sun + the MYW point
-// lights, clamped to 0..1 per channel. The sun has no highlight in the original (the
-// specular term belongs to the list lights).
-fn object_light(n: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
-    return object_light_amb(n, world, g.ambient.rgb, 1.0);
+// The even light of a polygon (the software path's 0x42d044): ObjectAmbient plus 1.5 x the colours of the
+// cell's point lights (k as `myw_k`, measured from `o`), no sun and no N.L, clamped to 0..1. The software
+// renderer lights env-mapped scene-object polygons and, with Flat car shading, every polygon of a lit object this
+// way; Classic follows the D3D path instead (`d3d_light`, #458 / #459), REMASTER keeps it (`prop_env_light`).
+fn flat_light(o: vec3<f32>) -> vec3<f32> {
+    return clamp(even_light(o), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// CLASSIC: the even light of a polygon (0x42d044): ObjectAmbient plus 1.5 x the colours of the
-// cell's point lights (k as `myw_k`, measured from `o`), no sun and no N.L, clamped to 0..1. The
-// original lights env-mapped scene-object polygons and, with Flat car shading, every polygon of a
-// lit object this way.
-fn flat_light(o: vec3<f32>) -> vec3<f32> {
+// `flat_light` before its clamp: ObjectAmbient x t + 1.5 x the cell's point lights
+fn even_light(o: vec3<f32>) -> vec3<f32> {
     var sum = vec3<f32>(0.0);
     let count = myw_count();
     for (var i = 0u; i < count; i++) {
@@ -627,11 +650,58 @@ fn flat_light(o: vec3<f32>) -> vec3<f32> {
         let b = myw_col(i);
         sum += myw_k(b.w, a.w, distance(a.xyz, o)) * b.rgb;
     }
-    return clamp(g.ambient.rgb + 1.5 * sum, vec3<f32>(0.0), vec3<f32>(1.0));
+    return g.ambient.rgb * obj_tint() + 1.5 * sum;
 }
 
-// the env-mapped scene object's light: from the object's origin when it has its own record
-// (CLASSIC scene objects), else from the vertex [APPROX]
+// CLASSIC 0x43eb98 (cars, wheels: draw mode 4) / 0x43ecfc (scene objects: draw mode 2): the D3D renderer's light of an
+// object vertex (05-formats "Object polygons, D3D path"): 1.4 x ObjectAmbient x t + the cell's point lights with N.L > 0,
+// each (1.5 N.L + `spec` (R.E)^4 when the light is positive and R.E > 0.5) x its colour x k, R = 2 (N.L) N - L; `spec` =
+// `D3D_SPEC` (mode 4) or `D3D_SPEC_PROP` (mode 2). No sun term and no clamp (unlike the software 0x42ce44). Light
+// direction and eye from the object's origin `o`, as `myw_object`.
+fn d3d_light(n: vec3<f32>, o: vec3<f32>, spec: f32) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    let e = normalize(g.cam_pos.xyz - o);
+    let count = myw_count();
+    for (var i = 0u; i < count; i++) {
+        let a = myw_pos(i);
+        let b = myw_col(i);
+        let d = a.xyz - o;
+        let dist = length(d);
+        let l = d / max(dist, 1e-3);
+        let nl = dot(n, l);
+        if (nl > 0.0) {
+            var s = D3D_DIFFUSE * nl;
+            if (b.w > 0.0) {
+                let rs = dot(2.0 * nl * n - l, e);
+                if (rs > 0.5) {
+                    s += spec * rs * rs * rs * rs;
+                }
+            }
+            sum += s * myw_k(b.w, a.w, dist) * b.rgb;
+        }
+    }
+    return D3D_AMBIENT * g.ambient.rgb * obj_tint() + sum;
+}
+
+// CLASSIC 0x43eb98 constants: ambient 1.4 (0x4d36cd), diffuse 1.5 (0x4d36dd), highlight 4 (0x4d36d5). 0x43ecfc has the
+// same ambient and diffuse (0x4d36ed, 0x4d36f5) and its highlight unscaled (`D3D_SPEC_PROP`); both cut R.E at 0.5
+const D3D_AMBIENT: f32 = 1.4;
+const D3D_DIFFUSE: f32 = 1.5;
+const D3D_SPEC: f32 = 4.0;
+const D3D_SPEC_PROP: f32 = 1.0;
+// CLASSIC 0x43faac mode 4: a textured car face's base is 120 x ObjectBrightness (0x4d370d), not its face byte
+const D3D_TEX_FACE: f32 = 120.0 / 255.0;
+// CLASSIC 0x43faac mode 4: the k of `colour = (base + k L) L` in bytes, env paint and textured faces (0x440888,
+// 0x440ac1); other Gouraud faces take 1 (0x440b11)
+const D3D_K: f32 = 50.0;
+// CLASSIC 0x43faac mode 2: a textured scene-object face's base is 200 x ObjectBrightness (0x4d3715)
+const D3D_PROP_TEX_FACE: f32 = 200.0 / 255.0;
+// CLASSIC: `VsOut.env` of a D3D env polygon vertex (Reflection car paint, env-mapped scene objects): `fs_main`
+// MODULATEs it with the plain env texel (no 3DAccBrightness, #458)
+const D3D_ENV: f32 = 11.0;
+
+// REMASTER: the env-mapped scene object's light: from the object's origin when it has its own record,
+// else from the vertex [APPROX]
 fn prop_env_light(vertex: vec3<f32>) -> vec3<f32> {
     var o = vertex;
     if (prop_rec >= 0) {
@@ -643,24 +713,28 @@ fn prop_env_light(vertex: vec3<f32>) -> vec3<f32> {
 // CLASSIC: the env texture's coordinates of an env-mapped scene-object vertex (0x433354 / 0x434080):
 // texel = S (0.5 + 0.2475 (n + s)), n the normal in view space, s the screen position in half
 // widths from the centre (x right, y up, both over the half *width*), each clamped to the image
-// (0..255). The image is square, so these are uv. The v sign puts the picture's sky on up-facing
-// normals [I: the original's row order is not read].
-fn prop_env_uv(n_world: vec3<f32>, clip: vec4<f32>) -> vec2<f32> {
+// (0..255). The image is square, so these are uv. `v_sign` 1 = the original's (#451): rows grow with n.y + s.y (y up),
+// so up-facing faces take the picture's lower half, where the env_*.iff have their bright clouds (pixmatch track 8:
+// the ASC's roof and rear window match only this way). REMASTER keeps -1 (its blend was tuned on it).
+// `f` = 0.2475 in the software builders (REMASTER), 0.2495 in the D3D converter (0x4402f3, CLASSIC env polygons).
+fn prop_env_uv(n_world: vec3<f32>, clip: vec4<f32>, v_sign: f32, f: f32) -> vec2<f32> {
     let nv = normalize((g.view * vec4<f32>(n_world, 0.0)).xyz);
     let s = clip.xy / clip.w;
-    let uv = vec2<f32>(0.5 + 0.2475 * (nv.x + s.x), 0.5 - 0.2475 * (nv.y + s.y * g.cam_pos.w));
+    let uv = vec2<f32>(0.5 + f * (nv.x + s.x), 0.5 + v_sign * f * (nv.y + s.y * g.cam_pos.w));
     return clamp(uv, vec2<f32>(0.0), vec2<f32>(255.0 / 256.0));
 }
 
-// `object_light` with the ambient term and the share of the sun given (REMASTER: `sky_ambient`,
-// `local_sun`)
+// REMASTER: the software path's per-vertex object light (0x42ce44: ambient + max(0, N.L) x sun + the MYW point
+// lights, clamped to 0..1 per channel; the sun has no highlight) with the ambient term and the share of the sun
+// given (`sky_ambient`, `local_sun`)
 fn object_light_amb(n: vec3<f32>, world: vec3<f32>, amb: vec3<f32>, sun: f32) -> vec3<f32> {
     let k = max(dot(n, g.sun_dir.xyz), 0.0) * sun;
     var o = select(world, g.model[3].xyz, g.myw_n.y > 0.5);
     if (prop_rec >= 0) {
         o = prop_myw[u32(prop_rec) * MYW_REC].xyz;
     }
-    return clamp(amb + k * g.sun.rgb + myw_object(n, o), vec3<f32>(0.0), vec3<f32>(1.0));
+    let tint = obj_tint();
+    return clamp(amb * tint + k * g.sun.rgb * tint + myw_object(n, o), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 // REMASTER sky ambient (09-remaster 9.32) [design choice]: the ambient light of a lit object from the
@@ -797,7 +871,7 @@ fn vs_shadow(v: VsIn) -> @builtin(position) vec4<f32> {
     return sh_u.vp * (g.model * vec4<f32>(unspin(v.pos, v.env), 1.0));
 }
 
-// REMASTER: `object_light` per pixel, with a smooth normalized Blinn-Phong highlight in place
+// REMASTER: `object_light_amb` per pixel, with a smooth normalized Blinn-Phong highlight in place
 // of the (N.H)^4 cut off at N.H = 0.5 (no Gouraud popping on low-poly cars). `vis` scales the
 // sun (car shadows); `extra` is added before the limit (the MYW point lights).
 fn object_light_pp(n: vec3<f32>, vd: vec3<f32>, vis: f32, extra: vec3<f32>, amb: vec3<f32>) -> vec3<f32> {
@@ -851,6 +925,29 @@ fn fog_at(world: vec3<f32>) -> f32 {
     return g.params.w * clamp((d - g.params.x) / (g.params.y - g.params.x), 0.0, 1.0);
 }
 
+// CLASSIC 0x43faac (05-formats "Fog per vertex", #460): the D3D converter fogs every object vertex itself by its depth
+// sz = view z / far (0x43eebe, far = `params.y`): none nearer than 0.2 (0x4d3765), full at 0.7 (`0x440b44`: specular
+// alpha 255 clamp(2 (0.7 - sz)), 0x4d3775 0.5 + 0x4d376d -0.2, 0x4d373d 2), linear in depth, not by distance.
+const D3D_FOG_START: f32 = 0.2;
+const D3D_FOG_FULL: f32 = 0.7;
+// CLASSIC 0x43fc4a: a polygon with no corner at sz <= 0.7 (0x4d3755) takes the far branch 0x440bbb
+const D3D_FAR_TEST: f32 = 0.7;
+// CLASSIC 0x440c33: the far polygon's alpha = clamp(7 (sz - 0.8)) (0x4d375d -0.8, 0x4d372d 7.0): drawn as
+// CueColour (1 - a) + frame a, so solid to 0.8 x far and gone at 0.943 x far
+const D3D_FAR_START: f32 = 0.8;
+const D3D_FAR_RAMP: f32 = 7.0;
+
+// CLASSIC: the D3D depth of a point, view z / far
+fn d3d_depth(world: vec3<f32>) -> f32 {
+    return -(g.view * vec4<f32>(world, 1.0)).z / g.params.y;
+}
+
+// CLASSIC: a far triangle of a lit object or the world (#461) (no corner at sz <= 0.7), drawn by the silhouette pass (`fs_far`) instead.
+// APPROX: per triangle; the original tests its polygons, so half of a quad can go far without the other.
+fn d3d_far_poly(i: VsOut) -> bool {
+    return i.obj.z > 0.5 && i.obj.x <= 0.0;
+}
+
 // REMASTER fog (17-fog-rework.md) [design choice]: a distance ramp Start..Full to Opacity (shape
 // t^curve), an exponential height haze rho0 * exp(-(y - ground) / H) integrated along the ray in
 // closed form, and a guard that reaches 100 % at the clip plane. The in-scatter colour is the fog
@@ -878,6 +975,44 @@ fn haze_trans(world: vec3<f32>, d: f32) -> f32 {
     return exp(-g.fog2.x * base * d * ratio);
 }
 
+// REMASTER clouds (#470, 12-world-fill 12.14) [design choice]: the optical depth of the fill's cloud ellipsoids
+// along o + t dir (dir unit), t in 0..t_max. Density rho0 (1 - q), q = |M (p - centre)|^2, is quadratic along the
+// ray: integrated in closed form round the ray's closest point to the centre (fill.rs `packed_tau` is the CPU copy).
+fn cloud_tau(o: vec3<f32>, dir: vec3<f32>, t_max: f32) -> f32 {
+    var tau = 0.0;
+    let n = u32(g.cloud_n.x + 0.5);
+    for (var i = 0u; i < n; i++) {
+        let c = g.clouds[4u * i];
+        let r0 = g.clouds[4u * i + 1u].xyz;
+        let r1 = g.clouds[4u * i + 2u].xyz;
+        let r2 = g.clouds[4u * i + 3u].xyz;
+        let d = o - c.xyz;
+        let u0 = vec3<f32>(dot(r0, d), dot(r1, d), dot(r2, d));
+        let v = vec3<f32>(dot(r0, dir), dot(r1, dir), dot(r2, dir));
+        let a = max(dot(v, v), 1e-12);
+        let tm = -dot(u0, v) / a;
+        let pm = u0 + v * tm;
+        let qmin = dot(pm, pm);
+        if (qmin < 1.0) {
+            let h = sqrt((1.0 - qmin) / a);
+            let s0 = max(tm - h, 0.0) - tm;
+            let s1 = min(tm + h, t_max) - tm;
+            if (s1 > s0) {
+                tau += c.w * ((1.0 - qmin) * (s1 - s0) - a * (s1 * s1 * s1 - s0 * s0 * s0) / 3.0);
+            }
+        }
+    }
+    return tau;
+}
+
+// the clouds' transmittance from the camera to `world` (1: no cloud on the way)
+fn cloud_trans(world: vec3<f32>, d: f32) -> f32 {
+    if (g.cloud_n.x < 0.5) {
+        return 1.0;
+    }
+    return exp(-cloud_tau(g.cam_pos.xyz, (world - g.cam_pos.xyz) / max(d, 1e-4), d));
+}
+
 // how much fog lies between the camera and `world` (0..1)
 fn fog_amount(world: vec3<f32>) -> f32 {
     let d = distance(world, g.cam_pos.xyz);
@@ -886,7 +1021,7 @@ fn fog_amount(world: vec3<f32>) -> f32 {
     // water_t.w is the view's clip plane: the fog is complete there whatever Full says
     let clip = g.water_t.w;
     let guard = smoothstep(0.9 * clip, clip, d);
-    return 1.0 - (1.0 - dist) * haze_trans(world, d) * (1.0 - guard);
+    return 1.0 - (1.0 - dist) * haze_trans(world, d) * cloud_trans(world, d) * (1.0 - guard);
 }
 
 // `c` (gamma) fogged by the amount `f` towards `dir`: the result is gamma too (callers go through
@@ -916,6 +1051,11 @@ fn fog_sky_amount(dir: vec3<f32>) -> f32 {
 fn fog_sky(c: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
     if (flag(2048u)) {
         return c;
+    }
+    // REMASTER clouds (#470): the sky behind them is fogged too (not in the water's mirrored sky [APPROX])
+    if (g.cloud_n.x > 0.5 && g.params.w >= 0.5 && flag(1024u)) {
+        let f = 1.0 - (1.0 - fog_sky_amount(dir)) * exp(-cloud_tau(g.cam_pos.xyz, dir, 1e7));
+        return fog_blend(c, dir, f);
     }
     return fog_sky_dir(c, dir);
 }
@@ -975,42 +1115,110 @@ fn vs_main(v: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
     o.env = 0.0;
     o.wpos = world.xyz;
     o.wnormal = (g.model * vec4<f32>(v.normal, 0.0)).xyz;
-    o.albedo = select(vec3<f32>(1.0), v.color.rgb * g.gain.rgb, g.ambient.w > 0.5);
+    o.albedo = vec3<f32>(1.0);
     if (g.ambient.w > 0.5) {
         let n = normalize((g.model * vec4<f32>(v.normal, 0.0)).xyz);
-        if (flag(8192u)) {
-            // Flat car shading (0x4ebfd8): one even light per object, no sun and no normals
-            var o = select(world.xyz, g.model[3].xyz, g.myw_n.y > 0.5);
-            if (prop_rec >= 0) {
-                o = prop_myw[u32(prop_rec) * MYW_REC].xyz;
-            }
-            c = c * flat_light(o);
-        } else {
-            c = c * object_light(n, world.xyz);
+        // the light origin of the even light: the model's translation (cars, wheels), the scene object's
+        // own record, else the vertex
+        var lo = select(world.xyz, g.model[3].xyz, g.myw_n.y > 0.5);
+        if (prop_rec >= 0) {
+            lo = prop_myw[u32(prop_rec) * MYW_REC].xyz;
         }
-        if (v.env > 8.5) {
-            // env-mapped scene object (scene.rs `PROP_ENV`): even light, the env texture
-            c = v.color.rgb * prop_env_light(world.xyz);
-            o.env_uv = prop_env_uv(n, o.clip);
-            o.env = 9.0;
-        } else if (v.env > 0.5 && v.env < 7.5 && g.env.x > 0.5) {
-            // sphere map of the view-space reflection vector (the original approximates it
-            // as 0.5 + 0.2495 * (normal + screen position), 0x4402fd)
-            let nv = normalize((g.view * vec4<f32>(n, 0.0)).xyz);
-            let pv = normalize((g.view * world).xyz);
-            let r = reflect(pv, nv);
-            let m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
-            o.env_uv = vec2<f32>(r.x / m + 0.5, 0.5 - r.y / m);
-            o.env = 1.0;
+        let textured = v.layer >= 0.0;
+        if (g.myw_n.y > 0.5 && g.myw_n.y < 1.5) {
+            // CLASSIC 0x43faac / 0x43eb98: a car or wheel draw (object +0xac set: draw mode 4, 0x4391bf) through the
+            // D3D converter, the original's renderer: per vertex colour = clamp((base + k L) L) in bytes. Flat car
+            // shading (0x4ebfd8) is read only by the software builders, so it does not change this; flag 0x10 is
+            // dropped on textured faces (`SELF_LIT_ENV` ignored), and no car Gouraud face carries it.
+            // Reflection paint (Gouraud 8/9 with flags 0x60 -> env polygons): base face x OB, k 50, then MODULATEd
+            // with the env texel; textured faces: base 120 x OB, k 50; other faces: base face x OB, k 1.
+            let paint = !textured && v.env > 0.5 && v.env < 7.5 && g.env.x > 0.5;
+            let base = select(v.color.rgb, D3D_TEX_FACE * g.obj_bright.rgb, textured);
+            let k = select(1.0, D3D_K, textured || paint) / 255.0;
+            let l = d3d_light(n, lo, D3D_SPEC);
+            c = clamp((base + k * l) * l, vec3<f32>(0.0), vec3<f32>(1.0));
+            o.albedo = base * g.gain.rgb;
+            if (paint) {
+                o.env_uv = prop_env_uv(n, o.clip, 1.0, 0.2495);
+                o.env = D3D_ENV;
+            }
+        } else {
+            // CLASSIC 0x43faac / 0x43ecfc: a scene object (draw mode 2, 0x440517) through the D3D converter: per vertex
+            // colour = clamp(base L) in bytes, no k L term, no sun, Flat car shading not read. Untextured faces with flag
+            // 0x10 (scene.rs `SELF_LIT_ENV`; the converter puts it in byte1, 0x441146) are face x OB, unlit (0x44073d);
+            // on textured faces the converter drops it. Textured faces: base 200 x OB (0x4407b6); env polygons (Gouraud
+            // 8/9 with 0x60, `PROP_ENV`) and the rest: base face x OB. Types 0..7 carry one normal (the plane's), so the
+            // light is the same at every corner: the original's flat draw of vertex 0's colour (0x442e2f) [O].
+            let base = select(v.color.rgb, D3D_PROP_TEX_FACE * g.obj_bright.rgb, textured);
+            if (!textured && v.env > 9.5 && v.env < 10.5) {
+                c = v.color.rgb;
+            } else {
+                c = clamp(base * d3d_light(n, lo, D3D_SPEC_PROP), vec3<f32>(0.0), vec3<f32>(1.0));
+            }
+            o.albedo = base * g.gain.rgb;
+            if (v.env > 8.5 && v.env < 9.5) {
+                // the D3D env polygon (0x4402f3): MODULATEd with the plain env texel at the converter's 0.2495
+                o.env_uv = prop_env_uv(n, o.clip, 1.0, 0.2495);
+                o.env = D3D_ENV;
+            }
         }
     }
     o.color = vec4<f32>(min(c * g.gain.rgb, vec3<f32>(1.0)), v.color.a);
     o.layer = v.layer;
     o.fog = fog_at(world.xyz);
+    if (g.ambient.w > 0.5 || D3D_WORLD) {
+        // CLASSIC 0x4402c7 / 0x440b44 (#460): objects fog by depth on the D3D converter's own ramp, not the software
+        // path's CueStart one; the far test and silhouette alpha of 0x43fc4a / 0x440c33 go to `fs_main` / `fs_far`. The
+        // world too (#461): its mode 1 colours face x WorldBrightness (0x440161) after the far test 0x44013a, then the same fog
+        let sz = d3d_depth(world.xyz);
+        o.fog = g.params.w * clamp((sz - D3D_FOG_START) / (D3D_FOG_FULL - D3D_FOG_START), 0.0, 1.0);
+        o.obj = vec3<f32>(f32(sz <= D3D_FAR_TEST), clamp(D3D_FAR_RAMP * (sz - D3D_FAR_START), 0.0, 1.0), g.params.w);
+    }
     // CHEAT tribute to tron: every draw is a non-indexed triangle list, so the vertex index gives the corner
     let corner = vi % 3u;
     o.bary = vec3<f32>(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
     return o;
+}
+
+// CLASSIC 0x43fca4 (#253): a remote car (object +0xa8: Ghost-mode recordings; ours also the Time Attack ghost and
+// casper) and its wheels. The converter tests the flag before the far test and the mode switch: per vertex colour (bytes)
+// = clamp(face x 0.4 x (1 - sz) x L, 5, 70), the MYO face byte without ObjectBrightness on every polygon, textured or
+// not, L the mode-2 light 0x43ecfc; no texture, env map or fog. List 0x4ebe3c is drawn last, ONE / ONE, no z write
+// (0x442c94..0x442dcb). APPROX: per vertex on every polygon (the original colours only Gouraud and env polygons per
+// vertex; the flat types carry one normal, so only the 1 - sz term differs across a face).
+const GHOST_FACE: f32 = 0.4;
+const GHOST_MIN: f32 = 5.0 / 255.0;
+const GHOST_MAX: f32 = 70.0 / 255.0;
+
+@vertex
+fn vs_ghost(v: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
+    var o: VsOut;
+    let world = g.model * vec4<f32>(v.pos, 1.0);
+    o.clip = g.view_proj * world;
+    o.uv = v.uv;
+    o.env_uv = vec2<f32>(0.0);
+    o.env = 0.0;
+    o.wpos = world.xyz;
+    o.wnormal = (g.model * vec4<f32>(v.normal, 0.0)).xyz;
+    o.albedo = vec3<f32>(1.0);
+    let n = normalize(o.wnormal);
+    // scene.rs stores face x ObjectBrightness (`rgba_obj`, unclamped): take the face byte back
+    let ob = g.obj_bright.rgb;
+    let face = select(vec3<f32>(0.0), v.color.rgb / ob, ob > vec3<f32>(0.0));
+    let sz = d3d_depth(world.xyz);
+    let c = clamp(face * GHOST_FACE * (1.0 - sz) * d3d_light(n, g.model[3].xyz, D3D_SPEC_PROP), vec3<f32>(GHOST_MIN), vec3<f32>(GHOST_MAX));
+    o.color = vec4<f32>(min(c * g.gain.rgb, vec3<f32>(1.0)), 1.0);
+    o.layer = -1.0;
+    o.fog = 0.0;
+    o.obj = vec3<f32>(1.0, 0.0, 0.0);
+    let corner = vi % 3u;
+    o.bary = vec3<f32>(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
+    return o;
+}
+
+@fragment
+fn fs_ghost(i: VsOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(i.color.rgb, 1.0);
 }
 
 // DEBUG (motorview wire styles, wire.rs): flat colours, no light, no fog, no debug view. Fill
@@ -1215,6 +1423,18 @@ fn neon_shade(i: VsOut, c: vec3<f32>, w: vec3<f32>, n: vec3<f32>, vd: vec3<f32>)
     return cap(col) * (1.0 - fog_at(i.wpos));
 }
 
+// CLASSIC far silhouettes (#460, `Pass::Far`): an object or world (#461) triangle with no corner nearer than 0.7 x far takes the D3D
+// converter's far branch 0x440bbb: flat colour 0x4ec124 (the packed CueColour, 0x43a048), no texture (so no colour
+// key either), alpha clamp(7 (sz - 0.8)) per vertex, list 0x4ebe10 drawn first in the flush 0x442028 with FOGENABLE 0,
+// SRCBLEND INVSRCALPHA, DESTBLEND SRCALPHA (0x442148..0x442183), z test and write on: CueColour (1 - a) + frame a.
+@fragment
+fn fs_far(i: VsOut) -> @location(0) vec4<f32> {
+    if (!d3d_far_poly(i)) {
+        discard;
+    }
+    return vec4<f32>(g.fog.rgb, i.obj.y);
+}
+
 // CLASSIC: texture * colour (MODULATE), colour-keyed texels discarded, vertex fog.
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
@@ -1222,7 +1442,8 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     let t = textureSample(tex, samp, i.uv, max(i32(i.layer + 0.5), 0));
     let bary_w = fwidth(i.bary);
     let textured = i.layer >= 0.0;
-    if (textured && t.a < 0.5) {
+    // CLASSIC 0x440142 (#460): an object's or the world's far triangle is drawn by `fs_far`, not here
+    if ((textured && t.a < 0.5) || d3d_far_poly(i)) {
         discard;
     }
     if (flag(TRON_FLAG)) {
@@ -1236,13 +1457,11 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     if (textured) {
         c = c * t.rgb;
     }
-    if (i.env > 8.5) {
-        // env-mapped scene object: MODULATE with the env texel
+    if (i.env > D3D_ENV - 0.5) {
+        // the D3D env polygon (`D3D_ENV`: Reflection car paint, env-mapped scene objects; list 0x4ebe08, drawn at
+        // 0x4424c4): MODULATE with the plain texel [D, #458: pixmatch track 8 matches without 3DAccBrightness (car
+        // region lum 1.01) and is 1.31x bright with it, so the gain does not reach the surface 0x4ebe04]
         c = min(c * e.rgb, vec3<f32>(1.0));
-    } else if (i.env > 0.5) {
-        // paint keeps 0.4 of its lit colour (0x43fcc9) and the env layer adds the rest,
-        // tinted by the paint [I: blend of the second pass]
-        c = min(c * (0.4 + 1.1 * e.rgb), vec3<f32>(1.0));
     }
     // CLASSIC + flashlight (motorview only): added to the lit colour in gamma space, before the fog hides it
     if (g.flash_col.w > 0.0) {
@@ -1298,7 +1517,11 @@ fn vs_remaster(v: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
     o.wpos = world.xyz;
     o.wnormal = (g.model * vec4<f32>(unspin(v.normal, v.env), 0.0)).xyz;
     let live = live_paint(v.color.rgb, v.env);
-    let col = live.rgb;
+    // REMASTER (#467): a lit textured scene-object face (cars and wheels set myw_n.y = 1) takes the base the original's
+    // object renderer gives it, 200 x ObjectBrightness (0x4407b6, as Classic's `D3D_PROP_TEX_FACE`), not its MYO face
+    // colour, which is only ~0.08 on the airship, hovercraft, helicopters and tanks and left their textures black
+    let prop_tex = g.ambient.w > 0.5 && g.myw_n.y < 0.5 && v.layer >= 0.0;
+    let col = select(live.rgb, D3D_PROP_TEX_FACE * g.obj_bright.rgb, prop_tex);
     o.albedo = select(vec3<f32>(1.0), col * g.gain.rgb, g.ambient.w > 0.5);
     o.color = vec4<f32>(min(col * g.gain.rgb, vec3<f32>(1.0)), v.color.a);
     if (g.ambient.w > 0.5 && v.env > 0.5 && v.env < 2.5) {
@@ -1339,10 +1562,10 @@ fn vs_remaster(v: VsIn, @builtin(vertex_index) vi: u32) -> VsOut {
         o.env_uv = sphere_uv(n, world.xyz);
     }
     // env-mapped scene objects (scene.rs `PROP_ENV`, 9): the Classic light and texture coordinates
-    if (g.ambient.w > 0.5 && v.env > 8.5) {
+    if (g.ambient.w > 0.5 && v.env > 8.5 && v.env < 9.5) {
         let n = normalize(o.wnormal);
         o.env = 9.0;
-        o.env_uv = prop_env_uv(n, o.clip);
+        o.env_uv = prop_env_uv(n, o.clip, -1.0, 0.2475);
         o.color = vec4<f32>(min(v.color.rgb * prop_env_light(world.xyz) * g.gain.rgb, vec3<f32>(1.0)), v.color.a);
     }
     return o;

@@ -1,0 +1,17 @@
+# Motorhead cine v1
+# Teaser #455, the last shot: NolbyHills from the green light, all in slow motion (race time = video time / 2).
+# Rendered as `--from 1 --to 8` (scripts/teaser.sh). A file of its own: Titan and Serpent only run together in the
+# first seconds (Serpent leads by 8 m at race 3 s and 200..300 m from race 30 s on), and a slow-motion start inside
+# teaser_nolby.cine would move every later shot there (the sim step is Speed / fps, so the race changes).
+# Titan (10) on pole, Serpent (4) beside it: the teaser's hero cars.
+Race Track 2 Cars 10 4 3 1 2 5 6 7 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60 Letterbox 2.39
+Audio on Doppler on
+End 8
+
+# 1.1 m up at the grandstand side of the start straight, about 35 m past the grid (7 m off Titan's line at race 3 s):
+# the pack launches out from under the gantry, Serpent passes about 2 m from the lens (video 5.5), Titan just behind
+# (video 6), then the field streams by into the fade. Above 1 m: lower, the verge grass hides the cars.
+Camera final static Eye 95 1.1 374.3 Target car 0 Lag 0.2 Zoom auto 14
+
+Shot 0 final Speed 0.5 Pitch tape FadeOut 2.5

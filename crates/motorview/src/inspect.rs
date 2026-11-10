@@ -37,7 +37,7 @@ pub fn target_details(s: &Scene, picker: &Picker, sess: Option<&Session>, hit: &
         Target::Car { slot, part } => {
             let mesh = slot * CAR_MESHES + part;
             if let Some(r) = sess.and_then(|x| x.race.racers.get(slot)) {
-                out.push(format!("car{:02}, driver {} ({})", r.car_id, r.driver.name, if r.human { "human" } else { "AI" }));
+                out.push(format!("{}, slot {slot}, driver {} ({})", s.car_names.get(slot).map_or("?", |n| n.as_str()), r.driver.name, if r.human { "human" } else { "AI" }));
             }
             let v = s.cars.get(mesh).map_or(&[][..], |v| v.as_slice());
             out.push(format!("mesh {mesh}: {} triangles, triangle #{}", v.len() / 3, hit.tri));
@@ -85,20 +85,22 @@ pub struct Passes {
     pub blades: bool,
     /// REMASTER: the sun shafts of the volumetric fog
     pub shafts: bool,
+    /// halos and lens flares (as the G key; pixmatch's halo-free background, #457)
+    pub halos: bool,
 }
 
 impl Default for Passes {
     fn default() -> Self {
-        Passes { world: true, sky: true, props: true, bodies: true, wheels: true, sprites: true, skids: true, shadows: true, blades: true, shafts: true }
+        Passes { world: true, sky: true, props: true, bodies: true, wheels: true, sprites: true, skids: true, shadows: true, blades: true, shafts: true, halos: true }
     }
 }
 
 impl Passes {
-    pub const NAMES: [&'static str; 10] = ["world", "sky", "props", "bodies", "wheels", "sprites", "skids", "shadows", "blades", "shafts"];
-    pub const HELP: [&'static str; 10] = ["world", "sky", "scene objects", "car bodies", "wheels", "smoke / sparks", "skid marks", "projected shadows", "grass blades (Ultra)", "sun shafts (Volumetric fog)"];
+    pub const NAMES: [&'static str; 11] = ["world", "sky", "props", "bodies", "wheels", "sprites", "skids", "shadows", "blades", "shafts", "halos"];
+    pub const HELP: [&'static str; 11] = ["world", "sky", "scene objects", "car bodies", "wheels", "smoke / sparks", "skid marks", "projected shadows", "grass blades (Ultra)", "sun shafts (Volumetric fog)", "halos and lens flares"];
 
     pub fn get(&mut self, i: usize) -> Option<&mut bool> {
-        [&mut self.world, &mut self.sky, &mut self.props, &mut self.bodies, &mut self.wheels, &mut self.sprites, &mut self.skids, &mut self.shadows, &mut self.blades, &mut self.shafts].into_iter().nth(i)
+        [&mut self.world, &mut self.sky, &mut self.props, &mut self.bodies, &mut self.wheels, &mut self.sprites, &mut self.skids, &mut self.shadows, &mut self.blades, &mut self.shafts, &mut self.halos].into_iter().nth(i)
     }
 
     /// `--hide world,sky,...`
@@ -115,6 +117,7 @@ impl Passes {
     pub fn view(&self, v: &View) -> View {
         let mut v = *v;
         (v.debug.hide_sky, v.debug.hide_world, v.debug.hide_blades, v.debug.hide_shafts) = (!self.sky, !self.world, !self.blades, !self.shafts);
+        v.halos &= self.halos;
         v
     }
 
@@ -283,7 +286,7 @@ impl Browser {
                 if self.sel < s.race.racers.len() {
                     s.focus = self.sel;
                 }
-                Some((m.transform_point3(b.center), b.radius, format!("car #{} (followed)", self.sel)))
+                Some((m.transform_point3(b.center), b.radius, format!("{} (followed)", s.racer_label(self.sel))))
             }
         }
     }

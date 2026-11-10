@@ -1,0 +1,33 @@
+# Motorhead cine v1
+# Teaser #455, NolbyHills (the reference lighting for the cars). Rendered as ranges of race time (scripts/teaser.sh).
+# Titan (10) on pole, Serpent (4) beside it: the teaser's hero cars.
+Race Track 2 Cars 10 4 3 1 2 5 6 7 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60 Letterbox 2.39
+Audio on Doppler on
+
+# Side tracking shot, race 27..33 (`--from 27 --to 33`): Titan down the 464 m straight (AI nodes 1448..1909) and over
+# its crest (airborne at about 30.5 s). Keys at Titan's lap arc (Progress s, probed each second at Fps 60), the eye
+# 6.5 m to its left (north, on the tarmac) and 1.4 m up, sliding from 3 m behind to 3 m ahead; raised after the crest so
+# the lens stays out of the verge grass. No Lag / Lead: at 70 m/s either one pushes the car off-centre.
+Camera track path Drive car 0 Target car 0 Lag 0 Lead 0
+Key track 1470 Eye -188.3 1.0 -426.6
+Key track 1528 Eye -129.1 1.0 -420.9
+Key track 1593 Eye -62.9 0.9 -415.9
+Key track 1665 Eye 9.6 2.5 -411.7
+Key track 1739 Eye 84.2 -0.7 -408.7
+Key track 1815 Eye 161.3 -2.2 -405.1
+Key track 1895 Eye 242.1 -6.3 -400.4
+Key track 1470 Fov 55
+
+Shot 27 track
+
+# Orbit, race 34..36.4 in slow motion (`--from 34 --to 40`): Titan through the left-hander after the crest, the drone on its
+# left (trees and meadow behind; the right side is a concrete wall), turning from its front-left quarter to its rear-left,
+# a soft background (Aperture 0.4, focus on Titan). Tape pitch: the engines drop with the picture.
+Camera orbit orbit Target car 0 Radius 8 Height 1.4 Speed 20 Start -160 Lag 0.05 Zoom 1.2 Clear on Aperture 0.4
+
+# Wheel cam, `--from 41 --to 44`: low on Serpent's left flank behind the front wheel, looking along it through the kerbed bends.
+Camera wheel mounted Target car 1 Offset -1.85 0.25 -0.7 Angles 1 10 0 Zoom 1
+
+Shot 34 orbit Speed 0.4 Pitch tape
+Shot 41 wheel

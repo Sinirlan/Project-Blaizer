@@ -29,6 +29,7 @@ mod movie;
 mod playback;
 mod proximity;
 mod rumble;
+mod slide_fx;
 mod stats;
 
 use front::{Display, Game, Screen};
@@ -52,7 +53,7 @@ fn parse_aa<K>(v: &str, kind: fn(&str) -> Option<K>) -> Result<(K, Option<u32>),
     Ok((kind(k).ok_or_else(|| format!("unknown anti-aliasing method {k:?}"))?, strength))
 }
 
-const USAGE: &str = "usage: motorhead [installed_game] [--demo] [--shot SCREEN out.png [--size WxH] [--knockout] [--laps N] [--time-attack [--ghost run.ghl|run.mhr] [--save-ghost out.ghl --autopilot]] [--threaded-load [--cancel-load] [--cancel-upload]] [--league] [--league-div 0-3] [--locked none|TRACK,TRACK] [--league-name TEXT] [--season-end 1-7] [--stats FILE [--stats-page 0-3]] [--hiscores DIR] [--player-name NAME] [--team TEAM] [--sound-devices NAME;NAME;.. [--sound-device NAME]] [--leagues DIR] [--demos DIR] [--car N] [--track N] [--sim-seconds S] [--frame-hz HZ] [--mirror] [--cheat casper,gulliver] [--free-look X,Y] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--msaa 1|2|4|8] [--aa-render off|msaa|ssaa[:2x|4x|8x|16x]] [--aa-post off|fxaa|smaa|taa[:2x|4x|8x|16x]] [--colour-grade] [--no-hdr] [--tonemap neutral|aces|agx] [--exposure P] [--bloom P] [--ssao P] [--halos classic|smooth] [--flares classic|smooth] [--hud classic|modern] [--rev-meter G,I,A,S,B,T,D,R] [--hud-scale P] [--hud-margin P] [--hud-map circuit|close[,rotate]] [--hud-hide cluster,clocks,lap,pos,map,proximity,numbers,frame,delta] [--hud-show live|sector|sector-slow] [--name-plates off|flat|see-through] [--shadows classic|real] [--blur classic|velocity] [--skids off|on|detailed] [--car-models original|generated]] [--motion-blur] [--view-distance PERCENT] [--no-fill] [--no-intro] [--trees on|off] [--water on|off] [--water-reflect sky|scene] [--local-light on|off] [--texture-pack on|off] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--car-colours R,G,B/R,G,B/R,G,B] [--car-finish gloss|metallic|pearl[,F,F]]]";
+const USAGE: &str = "usage: motorhead [installed_game] [--demo] [--shot SCREEN out.png [--size WxH] [--attract] [--idle S] [--knockout] [--laps N] [--time-attack [--ghost run.ghl|run.mhr] [--save-ghost out.ghl --autopilot]] [--threaded-load [--cancel-load] [--cancel-upload]] [--league] [--league-div 0-3] [--locked none|TRACK,TRACK] [--league-name TEXT] [--season-end 1-7] [--stats FILE [--stats-page 0-3]] [--hiscores DIR] [--player-name NAME] [--team TEAM] [--sound-devices NAME;NAME;.. [--sound-device NAME]] [--leagues DIR] [--demos DIR] [--compare A,B [--car-a C] [--car-b C] [--lap-a N] [--lap-b N]] [--analysis-overlay working|drop|keep] [--analysis-drop FILE] [--car N] [--track N] [--sim-seconds S] [--place X,Z[,HEADING[,FROM_Y]]] [--club-seen] [--frame-hz HZ] [--mirror] [--cheat casper,gulliver] [--free-look X,Y] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--msaa 1|2|4|8] [--aa-render off|msaa|ssaa[:2x|4x|8x|16x]] [--aa-post off|fxaa|smaa|taa[:2x|4x|8x|16x]] [--colour-grade] [--no-hdr] [--tonemap neutral|aces|agx] [--exposure P] [--bloom P] [--ssao P] [--halos classic|smooth] [--flares classic|smooth] [--hud classic|modern] [--rev-meter G,I,A,S,B,T,D,R] [--hud-scale P] [--hud-margin P] [--hud-map circuit|close[,rotate]] [--hud-hide cluster,clocks,lap,pos,map,proximity,numbers,frame,delta] [--hud-show live|sector|sector-slow] [--name-plates off|flat|see-through] [--shadows classic|real] [--blur classic|velocity] [--skids off|on|detailed] [--car-models original|generated]] [--motion-blur] [--view-distance PERCENT] [--no-fill] [--no-intro] [--trees on|off] [--water on|off] [--water-reflect sky|scene] [--local-light on|off] [--texture-pack on|off] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--car-colours R,G,B/R,G,B/R,G,B] [--car-finish gloss|metallic|pearl[,F,F]]]";
 
 struct Args {
     root: PathBuf,
@@ -61,9 +62,17 @@ struct Args {
     car: usize,
     track: usize,
     sim_seconds: f32,
+    /// `--place X,Z[,HEADING[,FROM_Y]]`: stand the followed car there before the shot's frames (dev tool for #366)
+    place: Option<[f32; 4]>,
+    /// `--club-seen`: the Credits screen shows the hidden page, as after the RuhrStadt club message
+    club_seen: bool,
     /// race shots: the frame rate the race is stepped at (60; #374: other rates draw between physics ticks)
     frame_hz: f32,
     demo: bool,
+    /// `--attract`: race shots are the attract demo (#210); `--idle S`: a menu shot after S seconds of the idle timer
+    attract: bool,
+    track_given: bool,
+    idle: Option<f32>,
     /// race shots: play this recording (.mhr) back / drive with the up key held and save the
     /// recording here
     replay: Option<PathBuf>,
@@ -183,6 +192,8 @@ struct Args {
     engine_sound: bool,
     /// seconds of menu animation before a menu screenshot
     menu_time: f32,
+    /// `--leave-time S`: press `--keys` after the menu has settled and run S more seconds (a Classic screen sliding out)
+    leave_time: Option<f32>,
     /// REMASTER pause menu shots: the Restart / Exit hold's fill (0..1)
     pause_hold: Option<f32>,
     /// REMASTER loading screen shots (#90): the bar's share (0..1, 1 = READY)
@@ -210,6 +221,14 @@ struct Args {
     hiscores: Option<PathBuf>,
     leagues: Option<PathBuf>,
     demos: Option<PathBuf>,
+    /// `--shot analysis`: the two laps (`--compare A,B`) with each side's car and lap (#429)
+    compare: Option<[PathBuf; 2]>,
+    compare_car: [Option<String>; 2],
+    compare_lap: [Option<u32>; 2],
+    /// `--analysis-overlay working|drop|keep`: the working overlay on the selected side, the drop overlay, or side B kept from outside
+    analysis_overlay: Option<String>,
+    /// `--analysis-drop FILE`: that file dropped on the screen before the shot (the drop path of #429 phase 4)
+    analysis_drop: Option<PathBuf>,
     player_name: Option<String>,
     team: Option<String>,
     /// the Sound screen's output list (`;` between names) instead of the machine's, and the output picked in it (#260)
@@ -219,7 +238,7 @@ struct Args {
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
-    let mut a = Args { root: PathBuf::new(), shot: None, size: (1280, 800), car: 1, track: 1, sim_seconds: 20.0, frame_hz: 60.0, demo: false, replay: None, playback: None, save_replay: None, ghost_demo: None, save_demo: None, ghost: None, save_ghost: None, autopilot: false, threaded_load: false, cancel_load: false, cancel_upload: false, time_attack: false, sector_sample: None, knockout: false, laps: None, league: false, league_div: None, locked: None, league_name: None, season_end: None, stats: None, stats_page: 0, mirror: false, difficulty: None, motion_blur: false, car_shading: None, car_detail: None, remaster: false, msaa: None, render_aa: None, post_aa: None, grade: false, no_hdr: false, tonemap: None, smooth_halos: None, fog_style: None, fog_tune: None, sky_hdri: None, sky_exposure: None, sky_yaw: None, no_sky_sun: false, no_sky_ambient: false, sky_ambient_tint: None, smooth_flares: None, retro_signs: None, car_shadows: None, velocity_blur: None, skids: None, ssao: None, generated_cars: None, no_fill: false, no_intro: false, prefetch: false, light_shadows: None, grass: None, grass_range: None, car_lod_distance: None, fog_strength: None, water_ssr: None, local_light: None, texture_pack: None, water: None, trees: None, shadow_quality: None, bench: 0, bench_move: false, modern_hud: None, name_plates: None, modern_menu: None, menu_stretch: None, hud: Default::default(), exposure: None, bloom: None, view_distance: None, car_colours: None, car_finish: None, free_look: None, record_audio: None, engine_sound: false, menu_time: 0.5, pause_hold: None, load_progress: None, mode_dissolve: None, confirm_exit: false, save_requester: None, cheats: None, keep_display: false, glyphs: None, font_specimen: None, rev_meter_sheet: None, rev_meter: None, keys: Vec::new(), type_text: None, hiscores: None, leagues: None, demos: None, player_name: None, team: None, sound_devices: None, sound_device: None };
+    let mut a = Args { root: PathBuf::new(), shot: None, size: (1280, 800), car: 1, track: 1, sim_seconds: 20.0, place: None, club_seen: false, frame_hz: 60.0, demo: false, attract: false, track_given: false, idle: None, replay: None, playback: None, save_replay: None, ghost_demo: None, save_demo: None, ghost: None, save_ghost: None, autopilot: false, threaded_load: false, cancel_load: false, cancel_upload: false, time_attack: false, sector_sample: None, knockout: false, laps: None, league: false, league_div: None, locked: None, league_name: None, season_end: None, stats: None, stats_page: 0, mirror: false, difficulty: None, motion_blur: false, car_shading: None, car_detail: None, remaster: false, msaa: None, render_aa: None, post_aa: None, grade: false, no_hdr: false, tonemap: None, smooth_halos: None, fog_style: None, fog_tune: None, sky_hdri: None, sky_exposure: None, sky_yaw: None, no_sky_sun: false, no_sky_ambient: false, sky_ambient_tint: None, smooth_flares: None, retro_signs: None, car_shadows: None, velocity_blur: None, skids: None, ssao: None, generated_cars: None, no_fill: false, no_intro: false, prefetch: false, light_shadows: None, grass: None, grass_range: None, car_lod_distance: None, fog_strength: None, water_ssr: None, local_light: None, texture_pack: None, water: None, trees: None, shadow_quality: None, bench: 0, bench_move: false, modern_hud: None, name_plates: None, modern_menu: None, menu_stretch: None, hud: Default::default(), exposure: None, bloom: None, view_distance: None, car_colours: None, car_finish: None, free_look: None, record_audio: None, engine_sound: false, menu_time: 0.5, leave_time: None, pause_hold: None, load_progress: None, mode_dissolve: None, confirm_exit: false, save_requester: None, cheats: None, keep_display: false, glyphs: None, font_specimen: None, rev_meter_sheet: None, rev_meter: None, keys: Vec::new(), type_text: None, hiscores: None, leagues: None, demos: None, compare: None, compare_car: [None, None], compare_lap: [None, None], analysis_overlay: None, analysis_drop: None, player_name: None, team: None, sound_devices: None, sound_device: None };
     let mut root = None;
     while let Some(x) = it.next() {
         let mut val = |n: &str| it.next().ok_or(format!("{n} needs a value"));
@@ -235,10 +254,20 @@ fn parse_args() -> Result<Args, String> {
                 a.size = (w.parse().map_err(|_| "bad width")?, h.parse().map_err(|_| "bad height")?);
             }
             "--car" => a.car = val("--car")?.parse().map_err(|_| "bad --car")?,
-            "--track" => a.track = val("--track")?.parse().map_err(|_| "bad --track")?,
+            "--track" => { a.track = val("--track")?.parse().map_err(|_| "bad --track")?; a.track_given = true; }
+            "--place" => {
+                let v: Vec<f32> = val("--place")?.split(',').map(|s| s.trim().parse()).collect::<Result<_, _>>().map_err(|_| "bad --place X,Z[,HEADING[,FROM_Y]]")?;
+                if !(2..=4).contains(&v.len()) {
+                    return Err("bad --place X,Z[,HEADING[,FROM_Y]]".into());
+                }
+                a.place = Some([v[0], v[1], v.get(2).copied().unwrap_or(0.0), v.get(3).copied().unwrap_or(100.0)]);
+            }
+            "--club-seen" => a.club_seen = true,
             "--sim-seconds" => a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?,
             "--frame-hz" => a.frame_hz = val("--frame-hz")?.parse::<f32>().ok().filter(|&h| (1.0..=1000.0).contains(&h)).ok_or("bad --frame-hz")?,
             "--demo" => a.demo = true,
+            "--attract" => a.attract = true,
+            "--idle" => a.idle = Some(val("--idle")?.parse().map_err(|_| "bad --idle")?),
             "--replay" => a.replay = Some(val("--replay")?.into()),
             "--playback" => a.playback = Some(val("--playback")?),
             "--save-replay" => a.save_replay = Some(val("--save-replay")?.into()),
@@ -588,6 +617,20 @@ fn parse_args() -> Result<Args, String> {
             "--hiscores" => a.hiscores = Some(PathBuf::from(val("--hiscores")?)),
             "--leagues" => a.leagues = Some(PathBuf::from(val("--leagues")?)),
             "--demos" => a.demos = Some(PathBuf::from(val("--demos")?)),
+            "--compare" => {
+                let v = val("--compare")?;
+                let (x, y) = v.split_once(',').ok_or("--compare takes A,B")?;
+                a.compare = Some([PathBuf::from(x), PathBuf::from(y)]);
+            }
+            "--car-a" => a.compare_car[0] = Some(val("--car-a")?),
+            "--car-b" => a.compare_car[1] = Some(val("--car-b")?),
+            "--lap-a" => a.compare_lap[0] = Some(val("--lap-a")?.parse().map_err(|_| "bad --lap-a")?),
+            "--lap-b" => a.compare_lap[1] = Some(val("--lap-b")?.parse().map_err(|_| "bad --lap-b")?),
+            "--analysis-overlay" => match val("--analysis-overlay")?.as_str() {
+                x @ ("working" | "drop" | "keep") => a.analysis_overlay = Some(x.to_string()),
+                x => return Err(format!("--analysis-overlay: unknown overlay {x} (working, drop, keep)")),
+            },
+            "--analysis-drop" => a.analysis_drop = Some(PathBuf::from(val("--analysis-drop")?)),
             "--player-name" => a.player_name = Some(val("--player-name")?),
             "--team" => a.team = Some(val("--team")?),
             "--sound-devices" => a.sound_devices = Some(val("--sound-devices")?.split(';').filter(|n| !n.is_empty()).map(str::to_string).collect()),
@@ -596,6 +639,7 @@ fn parse_args() -> Result<Args, String> {
             "--pause-hold" => a.pause_hold = Some(val("--pause-hold")?.parse::<f32>().map_err(|_| "bad --pause-hold")?.clamp(0.0, 1.0)),
             "--load-progress" => a.load_progress = Some(val("--load-progress")?.parse::<f32>().map_err(|_| "bad --load-progress")?.clamp(0.0, 1.0)),
             "--menu-time" => a.menu_time = val("--menu-time")?.parse().map_err(|_| "bad --menu-time")?,
+            "--leave-time" => a.leave_time = Some(val("--leave-time")?.parse().map_err(|_| "bad --leave-time")?),
             "--engine-sound" => {
                 a.engine_sound = match val("--engine-sound")?.to_ascii_lowercase().as_str() {
                     "classic" => false,
@@ -743,6 +787,7 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
     if let Some(t) = &a.team {
         game.settings.team = t.clone();
     }
+    game.club_seen = a.club_seen;
     if let Some(dir) = &a.leagues {
         game.preview_leagues(dir);
     }
@@ -850,7 +895,12 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
                     }
                     println!("threaded load: {:.0} ms until the race screen", t0.elapsed().as_secs_f32() * 1000.0);
                 }
-                None => game.start_race()?,
+                None => {
+                    if a.attract {
+                        game.begin_attract(a.track_given.then_some(game.settings.track));
+                    }
+                    game.start_race()?
+                }
             }
             if a.autopilot {
                 if let Some(r) = &mut game.race {
@@ -870,6 +920,12 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
             }
             // the race screen first: `prepare` loads the REMASTER menu-drive scene (Neo City) on a
             // modern-menu screen, over the race's scene
+            if let (Some([x, z, hd, fy]), Some(r)) = (a.place, game.race.as_mut()) {
+                let slot = r.sess.focus;
+                if !r.sess.race.place_at(slot, x, z, hd, fy) {
+                    return Err(format!("--place: no ground at {x},{z} below y {fy}"));
+                }
+            }
             game.screen = Screen::Race;
             game.prepare(&mut gpu);
             let limit = if screen == Screen::Results { 3600.0 } else { a.sim_seconds };
@@ -935,13 +991,54 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
                 println!("wrote {}", f.display());
             }
         }
-        s => game.go(s),
+        // REMASTER Lap Analysis (#429): the `--compare` pair, else the Ghost screen's first recording
+        Screen::Analysis => {
+            let pair = a.compare.clone().map(|[x, y]| {
+                let want = |i: usize| front::Want { slot: None, car: a.compare_car[i].clone(), lap: a.compare_lap[i] };
+                [(x, want(0)), (y, want(1))]
+            });
+            game.preview_analysis(pair, a.analysis_overlay.as_deref())?;
+            game.go(Screen::Analysis);
+            if let Some(f) = a.analysis_drop.clone() {
+                game.ana_dropped(f);
+            }
+        }
+        s => {
+            game.go(s);
+            // #210: the idle timer runs for S seconds, then the demo (if it started) loads and plays a little
+            if let Some(secs) = a.idle {
+                game.attract_idle = true;
+                let mut t = 0.0;
+                while t < secs && game.screen == s {
+                    game.update(dt, &HashSet::new());
+                    t += dt;
+                }
+                // the main menu slides out before the demo's loading screen
+                while game.leaving() {
+                    game.update(dt, &HashSet::new());
+                }
+                while game.screen == Screen::Loading {
+                    game.update(dt, &HashSet::new());
+                    game.prepare(&mut gpu);
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                if game.screen == Screen::Race {
+                    game.prepare(&mut gpu);
+                    for _ in 0..a.sim_seconds.mul_add(60.0, 0.0) as usize {
+                        game.update(dt, &HashSet::new());
+                    }
+                }
+                println!("idle {secs} s: screen {:?}, demo {}", game.screen, game.attract);
+            }
+        }
     }
     if a.prefetch {
         game.update(1.0 / 60.0, &Default::default()); // starts the garage build, as the first frame of the screen does
     }
-    for &k in &a.keys {
-        game.key(k);
+    if a.leave_time.is_none() {
+        for &k in &a.keys {
+            game.key(k);
+        }
     }
     if let Some(t) = &a.type_text {
         game.type_text(t);
@@ -960,6 +1057,17 @@ fn shot(a: &Args, screen: Screen, path: &Path) -> Result<(), String> {
         // (the loading screen would start its load, and the shot would show the race or a timing-dependent frame)
         if !matches!(game.screen, Screen::Race | Screen::Loading) {
             game.update(dt, &keys); // let highlight animations settle
+        }
+    }
+    // a Classic screen sliding out: the keys come after the settle, then the slide runs for S seconds
+    if let Some(secs) = a.leave_time {
+        for &k in &a.keys {
+            game.key(k);
+        }
+        for _ in 0..(secs / dt).round() as usize {
+            if !matches!(game.screen, Screen::Race | Screen::Loading) {
+                game.update(dt, &keys);
+            }
         }
     }
     if let Some(v) = a.pause_hold {
@@ -1126,9 +1234,50 @@ struct App {
     screenshot: bool,
     /// the system mouse arrow is shown (`Game::os_pointer`)
     cursor_shown: bool,
+    /// Lap Analysis's BROWSE FILES (#429): the file dialog runs on its own thread (the frames go on); its answer comes here
+    dialog: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    /// the dialog took the window out of exclusive fullscreen: `apply_display` puts it back when the dialog closes
+    dialog_unfullscreened: bool,
 }
 
 impl App {
+    /// REMASTER Lap Analysis (#429): the system's file dialog for a ghost, race replay or demo, over the window. It runs on a
+    /// thread so the game keeps drawing (and a Linux portal dialog never blocks the event loop); exclusive fullscreen
+    /// would hide it, so the window goes borderless meanwhile.
+    fn open_file_dialog(&mut self) {
+        let Some(w) = self.window.clone() else { return self.game.ana_dialog_done(None) };
+        if matches!(w.fullscreen(), Some(Fullscreen::Exclusive(_))) {
+            w.set_fullscreen(Some(Fullscreen::Borderless(w.current_monitor())));
+            self.dialog_unfullscreened = true;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let p = rfd::FileDialog::new()
+                .set_title("Choose a lap to compare")
+                .add_filter("Motorhead laps (.ghl .mhr .MDE)", &["ghl", "GHL", "mhr", "MHR", "mde", "MDE"])
+                .set_parent(&*w)
+                .pick_file();
+            let _ = tx.send(p);
+        });
+        self.dialog = Some(rx);
+    }
+
+    /// The file dialog answered (or its thread ended): the window goes back to its mode and the lap loads.
+    fn poll_file_dialog(&mut self) {
+        let Some(rx) = &self.dialog else { return };
+        let p = match rx.try_recv() {
+            Ok(p) => p,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.dialog = None;
+        if std::mem::take(&mut self.dialog_unfullscreened) {
+            self.applied = None;
+            self.apply_display();
+        }
+        self.game.ana_dialog_done(p);
+    }
+
     /// Bring the window and surface in line with the graphic options: screen, window or
     /// fullscreen at the chosen resolution, vsync.
     fn apply_display(&mut self) {
@@ -1262,6 +1411,7 @@ impl ApplicationHandler for App {
             use winit::platform::wayland::ActiveEventLoopExtWayland;
             self.wayland = el.is_wayland();
         }
+        self.game.set_wayland(self.wayland);
         self.monitors = el.available_monitors().collect();
         self.game.monitors = self.monitors.iter().enumerate().map(|(i, m)| m.name().unwrap_or_else(|| format!("Screen {}", i + 1))).collect();
         let (w, h) = self.game.settings.display.size;
@@ -1343,6 +1493,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => self.game.pointer_left(),
+            // Lap Analysis (#429): a file dragged onto the window (Windows and X11; winit 0.30 sends none on Wayland)
+            WindowEvent::HoveredFile(_) => self.game.ana_hover(true),
+            WindowEvent::HoveredFileCancelled => self.game.ana_hover(false),
+            WindowEvent::DroppedFile(p) => self.game.ana_dropped(p),
             WindowEvent::MouseInput { state, button, .. } => {
                 let i = match button {
                     MouseButton::Left => 0,
@@ -1384,7 +1538,11 @@ impl ApplicationHandler for App {
                 if self.game.quit {
                     el.exit();
                 }
+                self.poll_file_dialog();
                 self.game.update(dt, &self.keys);
+                if self.dialog.is_none() && self.game.ana_take_browse() {
+                    self.open_file_dialog();
+                }
                 self.apply_display(); // the keep-settings countdown may revert
                 // the system's mouse arrow shows in the menus only; a race has none (demo play draws its own)
                 let shown = self.game.os_pointer();
@@ -1546,6 +1704,7 @@ fn main() {
     motorview::consts::load_overrides();
     let mut game = Game::new(args.root.clone());
     game.demo = args.demo;
+    game.attract_idle = true; // #210: the idle main menu plays the attract demo
     game.prefetch = true;
     game.load_settings();
     game.controls.open_pads();
@@ -1559,6 +1718,6 @@ fn main() {
         game.go(Screen::Intro);
     }
     let sound = audio::GameAudio::new(&args.root, audio, device);
-    let mut app = App { game, sound, window: None, surface: None, config: None, gpu: None, depth: None, keys: HashSet::new(), wheel: 0.0, last: Instant::now(), dissolve: None, next_frame: Instant::now(), monitors: Vec::new(), applied: None, wayland: false, screenshot: false, cursor_shown: true };
+    let mut app = App { game, sound, window: None, surface: None, config: None, gpu: None, depth: None, keys: HashSet::new(), wheel: 0.0, last: Instant::now(), dissolve: None, next_frame: Instant::now(), monitors: Vec::new(), applied: None, wayland: false, screenshot: false, cursor_shown: true, dialog: None, dialog_unfullscreened: false };
     el.run_app(&mut app).expect("event loop");
 }

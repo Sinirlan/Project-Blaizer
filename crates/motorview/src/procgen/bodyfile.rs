@@ -8,7 +8,7 @@
 
 use super::aero::{Fins, Foil, Splitter, Wing};
 use super::body::{BodyStyle, Glass};
-use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken, Warp};
+use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Slice, Thicken, Warp};
 use super::diffuser::Diffuser;
 use super::exhaust::Exhaust;
 use super::lamps::{Lamp, LampKind, LedPath, LedStyle};
@@ -48,7 +48,11 @@ pub fn set_dir(dir: PathBuf) {
 /// The file that overrides `car`'s embedded recipe: `--cars-dir`'s if set, else the install's.
 /// It need not exist (motorview watches it, so one written later counts).
 pub fn path(root: &Path, car: u32) -> PathBuf {
-    let name = format!("car{car:02}.body");
+    override_path(root, &format!("car{car:02}.body"))
+}
+
+/// `name` (a recipe or `.fix` file) in `--cars-dir` if set, else in the install's `remaster/cars`.
+pub fn override_path(root: &Path, name: &str) -> PathBuf {
     match DIR.get() {
         Some(d) => d.join(name),
         None => root.join("remaster/cars").join(name),
@@ -161,6 +165,7 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
     let mut paints = Vec::new();
     let mut mirror_copies = Vec::new();
     let mut pushes = Vec::new();
+    let mut slices = Vec::new();
     let mut thickens: Vec<Thicken> = Vec::new();
     let mut carbon = Vec::new();
     let mut exhaust = None;
@@ -210,6 +215,7 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                     paints: Vec::new(),
                     mirror_copies: Vec::new(),
                     pushes: Vec::new(),
+                    slices: Vec::new(),
                     thickens: Vec::new(),
                     mirror_glass: None,
                     carbon: Vec::new(),
@@ -255,9 +261,10 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 let housing = glass_rec(&mut kv, "rgb")?;
                 let kind = match kv.take("kind")? {
                     "plain" => VentKind::Plain,
-                    "slats" => VentKind::Slats { pitch: kv.f("pitch")?, width: kv.f("width")?, blades: kv.n("blades")?, spine: kv.f("spine")?, tilt: kv.f("tilt")? },
+                    "slats" => VentKind::Slats { pitch: kv.f("pitch")?, width: kv.f("width")?, blades: kv.n("blades")?, spine: kv.f("spine")?, tilt: kv.f("tilt")?, level: kv.f_or("level", 0.0)? != 0.0 },
                     "hex" => VentKind::Hex { radius: kv.f("radius")?, wall: kv.f("wall")?, blades: kv.n("blades")? },
-                    k => return Err(kv.err(format!("unknown kind '{k}' (plain, slats, hex)"))),
+                    "louvres" => VentKind::Louvres { count: kv.n("count")?, ribs: kv.n("ribs")?, width: kv.f("width")?, low: kv.f("low")? },
+                    k => return Err(kv.err(format!("unknown kind '{k}' (plain, slats, hex, louvres)"))),
                 };
                 vents.push(Vent { from, lo, hi, housing, kind });
             }
@@ -297,6 +304,16 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
             "Paint" => paints.push(Paint { from: kv.rgb("from")?, lo: kv.v3("lo")?, hi: kv.v3("hi")?, like: kv.rgb("like")? }),
             "Mirror" => mirror_copies.push(MirrorCopy { lo: kv.v3("lo")?, hi: kv.v3("hi")? }),
             "Push" => pushes.push(Push { lo: kv.v3("lo")?, hi: kv.v3("hi")?, by: kv.v3("by")? }),
+            "Slice" => {
+                let (lo, hi) = (kv.v3("lo")?, kv.v3("hi")?);
+                let axis = match kv.take("axis")? {
+                    "x" => 0,
+                    "y" => 1,
+                    "z" => 2,
+                    a => return Err(kv.err(format!("bad axis '{a}' (x, y or z)"))),
+                };
+                slices.push(Slice { lo, hi, axis, at: kv.f("at")? });
+            }
             "Thicken" => thickens.push(Thicken { lo: kv.v3("lo")?, hi: kv.v3("hi")?, thickness: kv.f("thickness")?, splits: Vec::new(), legs: kv.b("legs")? }),
             "Split" => {
                 let Some(t) = thickens.last_mut() else { return Err(kv.err("needs a Thicken line before it".into())) };
@@ -340,7 +357,21 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 if lo.len() != hi.len() {
                     return Err(kv.err(format!("Smooth: lo lists {} boxes, hi {}", lo.len(), hi.len())));
                 }
-                smooths.push(Smooth { from: kv.list::<3>("from")?.into_iter().map(|c| c.map(|x| x as u8)).collect(), lo, hi, max_deg: kv.f("max_deg")?, step: kv.f("step")?, loose: kv.b("loose")?, round: kv.f("round")? })
+                // `round`: one value, or one per box
+                let round: Vec<f32> = kv.list::<1>("round")?.into_iter().map(|[r]| r).collect();
+                if round.len() != 1 && round.len() != lo.len() {
+                    return Err(kv.err(format!("Smooth: round lists {} values for {} boxes", round.len(), lo.len())));
+                }
+                let tags = |l: Vec<[f32; 3]>| l.into_iter().map(|c| c.map(|x| x as u8)).collect::<Vec<[u8; 3]>>();
+                // `max_deg`: one value, or one per box (#465)
+                let degs: Vec<f32> = kv.list::<1>("max_deg")?.into_iter().map(|[d]| d).collect();
+                if degs.len() != 1 && degs.len() != lo.len() {
+                    return Err(kv.err(format!("Smooth: max_deg lists {} values for {} boxes", degs.len(), lo.len())));
+                }
+                let max_degs = if degs.len() > 1 { degs.clone() } else { Vec::new() };
+                // `level`: optional tags whose level edges keep their height (#464)
+                let level = if kv.pairs.contains_key("level") { tags(kv.list::<3>("level")?) } else { Vec::new() };
+                smooths.push(Smooth { from: tags(kv.list::<3>("from")?), lo, hi, max_deg: degs[0], step: kv.f("step")?, loose: kv.b("loose")?, round, level, max_degs })
             }
             "Warp" => {
                 // `y` and `z` are optional: a missing table weighs 1
@@ -378,6 +409,7 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
     st.paints = paints;
     st.mirror_copies = mirror_copies;
     st.pushes = pushes;
+    st.slices = slices;
     st.thickens = thickens;
     st.carbon = carbon;
     st.exhaust = exhaust;
@@ -458,8 +490,9 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
         *t += &format!("Vent from={} lo={} hi={} {} ", rgb(v.from), v3(v.lo), v3(v.hi), glass_text(&v.housing, "rgb"));
         match v.kind {
             VentKind::Plain => *t += "kind=plain\n",
-            VentKind::Slats { pitch, width, blades, spine, tilt } => *t += &format!("kind=slats pitch={pitch} width={width} blades={blades} spine={spine} tilt={tilt}\n"),
+            VentKind::Slats { pitch, width, blades, spine, tilt, level } => *t += &format!("kind=slats pitch={pitch} width={width} blades={blades} spine={spine} tilt={tilt}{}\n", if level { " level=1" } else { "" }),
             VentKind::Hex { radius, wall, blades } => *t += &format!("kind=hex radius={radius} wall={wall} blades={blades}\n"),
+            VentKind::Louvres { count, ribs, width, low } => *t += &format!("kind=louvres count={count} ribs={ribs} width={width} low={low}\n"),
         }
     }
     for c in &st.chamfers {
@@ -499,6 +532,9 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
     for p in &st.pushes {
         *t += &format!("Push lo={} hi={} by={}\n", v3(p.lo), v3(p.hi), v3(p.by));
     }
+    for s in &st.slices {
+        *t += &format!("Slice lo={} hi={} axis={} at={}\n", v3(s.lo), v3(s.hi), ["x", "y", "z"][s.axis.min(2)], s.at);
+    }
     for th in &st.thickens {
         *t += &format!("Thicken lo={} hi={} thickness={} legs={}\n", v3(th.lo), v3(th.hi), th.thickness, th.legs as u8);
         for (a, b, c) in &th.splits {
@@ -523,7 +559,9 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
     }
     for s in &st.smooths {
         let boxes = |b: &[[f32; 3]]| b.iter().map(|&p| v3(p)).collect::<Vec<_>>().join(";");
-        *t += &format!("Smooth from={} lo={} hi={} max_deg={} step={} loose={} round={}\n", s.from.iter().map(|&c| rgb(c)).collect::<Vec<_>>().join(";"), boxes(&s.lo), boxes(&s.hi), s.max_deg, s.step, s.loose as u8, s.round);
+        let tags = |l: &[[u8; 3]]| l.iter().map(|&c| rgb(c)).collect::<Vec<_>>().join(";");
+        let level = if s.level.is_empty() { String::new() } else { format!(" level={}", tags(&s.level)) };
+        *t += &format!("Smooth from={} lo={} hi={} max_deg={} step={} loose={} round={}{level}\n", tags(&s.from), boxes(&s.lo), boxes(&s.hi), if s.max_degs.is_empty() { s.max_deg.to_string() } else { s.max_degs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(";") }, s.step, s.loose as u8, s.round.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(";"));
     }
     for w in &st.warps {
         let table = |name: &str, t: &[[f32; 2]]| if t.is_empty() { String::new() } else { format!(" {name}={}", t.iter().map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join(";")) };

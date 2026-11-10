@@ -146,6 +146,8 @@ pub struct Loaded {
     pub path: PathBuf,
     /// `SkidMarks` (a pass of the race, not part of the `View`)
     pub skid_marks: bool,
+    /// `SoundDevice` (the output the game plays on; None = the system default), for the Cine editor's live sound (#349)
+    pub sound_device: Option<String>,
 }
 
 /// The game's `settings.cfg` over `view`; `None` when there is none (the view is untouched).
@@ -153,16 +155,19 @@ pub fn load(view: &mut View) -> Option<Loaded> {
     let path = crate::ghost::config_dir()?.join("settings.cfg");
     let text = std::fs::read_to_string(&path).ok()?;
     let mut skid_marks = true;
+    let mut sound_device = None;
     for line in text.lines() {
         let mut it = line.split_whitespace();
         let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
         if k.eq_ignore_ascii_case("skidmarks") {
             skid_marks = v != "0";
+        } else if k.eq_ignore_ascii_case("sounddevice") {
+            sound_device = Some(v.to_string()).filter(|d| d != "default");
         } else {
             apply(view, k, v, &mut it);
         }
     }
-    Some(Loaded { path, skid_marks })
+    Some(Loaded { path, skid_marks, sound_device })
 }
 
 #[cfg(test)]

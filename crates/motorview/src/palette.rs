@@ -40,7 +40,7 @@ pub fn palette(ui: &mut Ui, w: &mut WorldEdit, top: f32, bottom: f32) -> f32 {
                     glass_ui::palette_sep(ui);
                     for k in Kind::ALL {
                         let on = w.armed() == Some(k);
-                        if glass_ui::tool_sm(ui, kind_icon(k), false, on).on_hover_text(format!("place {}  [Ctrl+{}]", k.name(), k as usize + 1)).clicked() {
+                        if glass_ui::tool_sm(ui, kind_icon(k), false, on).on_hover_text(format!("place {}  [Ctrl+{}]", k.name(), (k as usize + 1) % 10)).clicked() {
                             if on {
                                 w.disarm();
                             } else {
@@ -88,20 +88,32 @@ pub fn options(ui: &mut Ui, w: &mut WorldEdit, textures: &[String], top: f32, le
                 let used = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
                     ui.spacing_mut().interact_size.y = 32.0;
-                    let title = if kind == Kind::Plant { "plant brush".to_string() } else { kind.name().to_string() };
+                    let title = match kind {
+                        Kind::Plant => "plant brush".to_string(),
+                        Kind::Object => "structure".to_string(),
+                        _ => kind.name().to_string(),
+                    };
                     ui.label(RichText::new(format!("{}  {}", kind_icon(kind), title.to_uppercase())).font(theme::glass_font(15.0)).color(theme::ORANGE));
                     glass_ui::vsep(ui, 24.0);
                     match kind {
                         Kind::Plant => w.brush_ui(ui, textures),
+                        Kind::Object => {
+                            w.object_ui(ui);
+                            glass_ui::vsep(ui, 24.0);
+                            let text = if w.capture { "Click a building" } else { "New stamp" };
+                            if strip_button(ui, ic::SCAN, text, !w.capture, "click a building on the track: a stamp box is fitted round the whole building (on plain ground: a default box to size with the gizmos), then place copies of it (Stamps section)") {
+                                w.start_capture();
+                            }
+                        }
                         Kind::Water => {
-                            ui.label(RichText::new("click the shore points; the water level is the last click's height").size(13.0).color(theme::DIM));
+                            ui.label(RichText::new("click the shore points; the water level is the average height of your points, a little above the ground").size(13.0).color(theme::DIM));
                         }
                         _ => {
                             glass_ui::cap_label(ui, "points");
                             ui.label(RichText::new(w.points().to_string()).font(FontId::monospace(13.0)).color(theme::WHITE));
                         }
                     }
-                    if kind != Kind::Plant {
+                    if !matches!(kind, Kind::Plant | Kind::Object) {
                         glass_ui::vsep(ui, 24.0);
                         if strip_button(ui, ic::UNDO, "Remove last", w.points() > 0, "Backspace") {
                             w.cmds.push(Cmd::Back);

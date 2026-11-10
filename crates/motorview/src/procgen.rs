@@ -7,6 +7,10 @@
 
 pub mod aero;
 pub mod body;
+pub mod bodyfix;
+pub mod blueprint;
+pub mod bodyobj;
+pub mod carmodel;
 pub mod bodyfile;
 pub mod cuts;
 pub mod diffuser;

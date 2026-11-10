@@ -1,5 +1,5 @@
 //! DEBUG motorview's overlays: the F3 info, sim and render panels, the browser and pinned-target
-//! columns, gizmo labels, the crosshair and the exit dialog. Text is egui's JetBrains Mono (theme.rs)
+//! columns, gizmo labels, the crosshair, the tuning Changes card and the exit dialog. Text is egui's JetBrains Mono (theme.rs)
 //! on a background layer under the ribbon; only the texture preview stays in the UI batch,
 //! its atlas image lives there. The game does not use any of it.
 
@@ -9,6 +9,7 @@ use motorview::debug;
 use motorview::render::Camera;
 use motorview::glass_ui;
 use motorview::theme;
+use motorview::tune_changes::{Change, Key};
 use motorview::wire::Span;
 use motorview::ui::{Assets, Batch, Canvas, UiVertex, WHITE};
 
@@ -116,6 +117,10 @@ pub struct OverlayText {
     pub preview: bool,
     /// gizmo labels: view-space point, text, colour
     pub labels: Vec<(Vec3, String, [f32; 4])>,
+    /// labels farther than this (metres, the main view's far distance) are hidden; None: no limit (unlimited distance)
+    pub label_far: Option<f32>,
+    /// window rectangle (x, y, w, h in pixels) the rear mirror covers: it is a second camera, so no label is drawn over it
+    pub label_hide: Option<[f32; 4]>,
 }
 
 impl OverlayText {
@@ -189,6 +194,55 @@ impl Ink<'_> {
     }
 }
 
+/// How far (overlay pixels at the 720p scale) past the free area a gizmo label's box can sit and still be pinned to the edge.
+const LABEL_PIN: f32 = 60.0;
+
+/// How dark the view outside the Cine preview's frame is (0 = as drawn, 1 = black; #438 design choice, a passepartout).
+const PASSEPARTOUT: f32 = 0.6;
+/// Points between the Cine preview's frame and a panel beside it.
+pub const FRAME_GAP: f32 = 8.0;
+
+/// Slots on egui's background layer for the Cine preview's frame (#438), taken before the panels so they lie over it and
+/// filled by `preview_frame` once the panels have said how much of the window they take.
+pub struct FrameSlots(Vec<egui::layers::ShapeIdx>);
+
+/// Take the slots (call before the panels): the four dim sides, two letterbox bars and the fade.
+pub fn frame_slots(ctx: &egui::Context) -> FrameSlots {
+    let painter = ctx.layer_painter(LayerId::background());
+    FrameSlots((0..7).map(|_| painter.add(egui::Shape::Noop)).collect())
+}
+
+/// The Cine preview's frame (#438) in `slots`: `rect` = `[x, y, w, h]` window pixels (`cine::preview_frame`), the view outside
+/// it dimmed, the `letterbox` aspect's black bars inside it (rows as the render's, `letterbox_bar`) and black at `1 - fade` over it
+/// (the render multiplies the frame by `fade` in gamma space; a black overlay of that alpha is the same blend).
+pub fn preview_frame(ctx: &egui::Context, slots: &FrameSlots, size: (u32, u32), rect: [f32; 4], letterbox: Option<f32>, fade: Option<f32>) {
+    let ppp = ctx.pixels_per_point();
+    let (w, h) = (size.0 as f32 / ppp, size.1 as f32 / ppp);
+    let [x0, y0, rw, rh] = rect.map(|v| v / ppp);
+    let (x1, y1) = (x0 + rw, y0 + rh);
+    let black = |a: f32| Color32::from_black_alpha((a.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let r = |a: Pos2, b: Pos2, c: Color32| egui::Shape::rect_filled(Rect::from_min_max(a, b), 0.0, c);
+    let dim = black(PASSEPARTOUT);
+    let mut shapes = vec![
+        r(Pos2::new(0.0, 0.0), Pos2::new(w, y0), dim),
+        r(Pos2::new(0.0, y1), Pos2::new(w, h), dim),
+        r(Pos2::new(0.0, y0), Pos2::new(x0, y1), dim),
+        r(Pos2::new(x1, y0), Pos2::new(w, y1), dim),
+    ];
+    let bar = letterbox.map_or(0, |a| motorview::cine::letterbox_bar(rect[2].round() as u32, rect[3].round() as u32, a)) as f32 / ppp;
+    if bar > 0.0 {
+        shapes.push(r(Pos2::new(x0, y0), Pos2::new(x1, y0 + bar), Color32::BLACK));
+        shapes.push(r(Pos2::new(x0, y1 - bar), Pos2::new(x1, y1), Color32::BLACK));
+    }
+    if let Some(f) = fade.filter(|&f| f < 1.0) {
+        shapes.push(r(Pos2::new(x0, y0), Pos2::new(x1, y1), black(1.0 - f)));
+    }
+    let painter = ctx.layer_painter(LayerId::background());
+    for (i, idx) in slots.0.iter().enumerate() {
+        painter.set(*idx, shapes.get(i).cloned().unwrap_or(egui::Shape::Noop));
+    }
+}
+
 /// Draw the overlay text and the crosshair; `size` is the window in pixels, `fov_x` the view's field (labels), `margins` (top,
 /// right, bottom, left) the egui panels' pixels. True when the F3 card's copy button was clicked.
 pub fn paint(ctx: &egui::Context, size: (u32, u32), cam: &Camera, fov_x: f32, t: &OverlayText, crosshair: bool, (top, right, bottom, left): (f32, f32, f32, f32)) -> bool {
@@ -199,15 +253,26 @@ pub fn paint(ctx: &egui::Context, size: (u32, u32), cam: &Camera, fov_x: f32, t:
     let (w, h) = (size.0 as f32 / ppp, size.1 as f32 / ppp);
     let (top, right, bottom, left) = (top / ppp, right / ppp, bottom / ppp, left / ppp);
     for (p, text, c) in &t.labels {
-        let Some((x, y)) = debug::project(cam, size, fov_x, *p) else { continue };
-        let (x, y) = (x / ppp, y / ppp);
-        // a point under the ribbon, the panes or the status bar has no label
-        if x < left || x > w - right || y < top || y > h - bottom {
+        // CLASSIC and REMASTER alike: the main view's camera (`debug::project_any`)
+        let Some((x, y, depth)) = debug::project_any(cam, size, fov_x, *p) else { continue };
+        if t.label_far.is_some_and(|far| depth > far) || t.label_hide.is_some_and(|r| (r[0]..=r[0] + r[2]).contains(&x) && (r[1]..=r[1] + r[3]).contains(&y)) {
             continue;
         }
+        let (x, y) = (x / ppp, y / ppp);
         let tw = ink.width(text);
+        // the label's centre may sit this far (half its box) off the free area before it is dropped; inside that it is
+        // pinned to the edge and dimmed [design choice: farther off, a ring of pinned labels would fill the edges]
+        let (hw, hh) = (tw / 2.0 + 2.0 * u, ink.lh / 2.0);
+        let free = Rect::from_min_max(Pos2::new(left + hw, top + hh), Pos2::new((w - right - hw).max(left + hw), (h - bottom - hh).max(top + hh)));
+        let reach = Vec2::new(hw + LABEL_PIN * u, hh + LABEL_PIN * u);
+        if !free.expand2(reach).contains(Pos2::new(x, y)) {
+            continue;
+        }
+        let pinned = !free.contains(Pos2::new(x, y));
+        let (x, y) = (x.clamp(free.min.x, free.max.x), y.clamp(free.min.y, free.max.y));
+        let c = if pinned { [c[0], c[1], c[2], c[3] * 0.6] } else { *c };
         painter.rect_filled(Rect::from_min_size(Pos2::new(x - tw / 2.0 - 2.0 * u, y - ink.lh / 2.0), Vec2::new(tw + 4.0 * u, ink.lh)), 0.0, shade(115));
-        painter.text(Pos2::new(x - tw / 2.0, y - ink.lh / 2.0 + u), Align2::LEFT_TOP, text, ink.font.clone(), colour(*c));
+        painter.text(Pos2::new(x - tw / 2.0, y - ink.lh / 2.0 + u), Align2::LEFT_TOP, text, ink.font.clone(), colour(c));
     }
     let mut copy = false;
     if let Some(tl) = &t.telem {
@@ -225,7 +290,8 @@ pub fn paint(ctx: &egui::Context, size: (u32, u32), cam: &Camera, fov_x: f32, t:
         bottom_y = y - 4.0;
     }
     if crosshair {
-        let (c, r, th) = (Pos2::new(w / 2.0, h / 2.0), 8.0 * u, 2.0 * u);
+        // on the view axis: the window's centre, or the Cine preview frame's (the lens shift, #441)
+        let (c, r, th) = (Pos2::new((1.0 + cam.shift.x) * w / 2.0, (1.0 - cam.shift.y) * h / 2.0), 8.0 * u, 2.0 * u);
         for (col, o) in [(shade(153), u), (Color32::WHITE, 0.0)] {
             painter.rect_filled(Rect::from_center_size(c, Vec2::new(2.0 * (r + o), th + 2.0 * o)), 0.0, col);
             painter.rect_filled(Rect::from_center_size(c, Vec2::new(th + 2.0 * o, 2.0 * (r + o))), 0.0, col);
@@ -311,20 +377,235 @@ fn card(ctx: &egui::Context, t: &Telem, extra: &[Line], mut pos: Pos2) -> bool {
 /// The telemetry card's outer width, points (`.telem` in a 340 pt card).
 const CARD_W: f32 = 340.0;
 
-/// What the exit requester decided.
+/// What the Changes card asked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CardAct {
+    /// Copy as Markdown (`tune_changes::markdown`)
+    Copy,
+    /// a row's reset button
+    Reset(Key),
+    Close,
+}
+
+/// The Changes card's outer width, points.
+const CHANGES_W: f32 = 460.0;
+
+/// The tuning Changes card (#434), opened by the status bar's "N CHANGED" chip: its bottom left at `anchor`. One
+/// group per car / World / Camera, each row the property, original -> now and a reset button; camera values that
+/// tune.cfg holds come last, dimmed (an exit keeps them). Copy as Markdown and close in the header.
+pub fn changes_card(ctx: &egui::Context, list: &[Change], anchor: Pos2) -> Option<CardAct> {
+    let mut out = None;
+    let lost = list.iter().filter(|c| !c.saved).count();
+    egui::Area::new(Id::unique("motorview-changes")).order(Order::Foreground).pivot(Align2::LEFT_BOTTOM).fixed_pos(anchor).show(ctx, |ui| {
+        let fr = glass_ui::glass_frame(ctx).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 12 }).show(ui, |ui| {
+            ui.set_width(CHANGES_W - 28.0);
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("CHANGES").font(theme::glass_font(22.0)).color(theme::WHITE));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(format!("{lost} unsaved")).size(11.0).color(theme::DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if glass_ui::ibtn(ui, motorview::icons::CLOSE, false).on_hover_text("Close").clicked() {
+                        out = Some(CardAct::Close);
+                    }
+                    ui.add_space(6.0);
+                    if glass_ui::ibtn(ui, motorview::icons::COPY, false).on_hover_text("Copy as Markdown").clicked() {
+                        out = Some(CardAct::Copy);
+                    }
+                });
+            });
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("a car or track switch loses the car and world values; an exit, all but what tune.cfg holds").size(11.0).color(theme::DIM));
+            ui.add_space(4.0);
+            let mono = FontId::monospace(12.0);
+            egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| {
+                let order = list.iter().filter(|c| !c.saved).chain(list.iter().filter(|c| c.saved));
+                let mut group: Option<(&str, bool)> = None;
+                for c in order {
+                    if group != Some((c.group.as_str(), c.saved)) {
+                        group = Some((c.group.as_str(), c.saved));
+                        ui.add_space(8.0);
+                        let head = if c.saved { format!("{} · in tune.cfg", c.group) } else { c.group.clone() };
+                        ui.label(egui::RichText::new(head.to_uppercase()).font(theme::glass_font(11.0)).color(if c.saved { theme::DIM } else { theme::S1 }));
+                        ui.add_space(2.0);
+                    }
+                    let (val, now) = if c.saved { (theme::DIM, theme::TEXT) } else { (theme::DIM, theme::ORANGE_TEXT) };
+                    let (l, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), egui::Sense::hover());
+                    ui.painter().rect_filled(l, 0.0, theme::line(0.07));
+                    ui.horizontal(|ui| {
+                        ui.set_height(24.0);
+                        let (cap, _) = ui.allocate_exact_size(Vec2::new(140.0, 24.0), egui::Sense::hover());
+                        ui.painter().with_clip_rect(cap).text(Pos2::new(cap.left(), cap.center().y), Align2::LEFT_CENTER, &c.label, FontId::proportional(13.0), if c.saved { theme::DIM } else { theme::TEXT });
+                        ui.add(egui::Label::new(egui::RichText::new(&c.was).font(mono.clone()).color(val)).truncate());
+                        ui.label(egui::RichText::new("  →  ").font(mono.clone()).color(theme::DIM));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if reset_btn(ui).on_hover_text("back to the original").clicked() {
+                                out = Some(CardAct::Reset(c.key));
+                            }
+                            ui.add_space(8.0);
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(egui::RichText::new(&c.now).font(mono.clone()).color(now)).truncate());
+                            });
+                        });
+                    });
+                }
+            });
+        });
+        glass_ui::finish(ctx, &fr.response);
+    });
+    out
+}
+
+/// A row's reset: the undo arrow in a 22 pt square, lit on hover.
+fn reset_btn(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::click());
+    if r.hovered() {
+        ui.painter().rect_filled(rect, 5.0, theme::white(0.06));
+    }
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, motorview::icons::UNDO, FontId::proportional(14.0), if r.hovered() { theme::WHITE } else { theme::DIM });
+    r
+}
+
+/// What the requester decided.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Exit {
-    /// save the World Editor's fill, then exit (only offered with unsaved edits)
+    /// save the World Editor's fill (and copy the tuning changes, if any), then go on (only offered with unsaved edits)
     Save,
-    /// exit; unsaved edits are lost
+    /// copy the tuning changes as Markdown (the Changes card's button), then go on
+    Copy,
+    /// go on; unsaved edits and tuning changes are lost
     Discard,
     Cancel,
 }
 
-/// The exit requester (19.3, `requesterHTML`): a near-opaque card over a dark scrim, "EXIT MOTORVIEW?", and three
-/// buttons when the World Editor has unsaved edits (`unsaved` = its file name: Save & exit, the default, Discard,
-/// Cancel), else Exit (the default) and Cancel. None = still asking. Keys (Enter / Y, D, Esc / N) are the viewer's own.
-pub fn exit_dialog(ctx: &egui::Context, unsaved: Option<&str>) -> Option<Exit> {
+/// What the requester asks about.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum AskKind {
+    Exit,
+    /// switch to this track
+    Track(u32),
+    /// switch to this car
+    Car(u32),
+    /// close the World Editor while it holds unsaved edits (#473)
+    WorldClose,
+    /// Cine: close the open sequence (#438)
+    CineClose,
+    /// Cine: start a new sequence
+    CineNew,
+    /// Cine: open this file in place of the sequence
+    CineOpen(std::path::PathBuf),
+}
+
+impl AskKind {
+    /// The Cine editor's steps: they lose only the sequence, never the tuning changes.
+    pub fn is_cine(&self) -> bool {
+        matches!(self, AskKind::CineClose | AskKind::CineNew | AskKind::CineOpen(_))
+    }
+}
+
+/// One question of the requester: what is about to happen and what it would lose (#434).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Ask {
+    pub kind: AskKind,
+    /// the World Editor's fill file name while it holds edits that are not saved (exit and closing the editor)
+    pub fill: Option<String>,
+    /// the Cine sequence's file name while it holds edits that are not saved (#438)
+    pub seq: Option<String>,
+    /// tuning changes (physics, gravity, paint, camera values) that the step would lose
+    pub changes: usize,
+}
+
+impl Ask {
+    /// Something would be lost: the requester offers Discard.
+    pub fn has_loss(&self) -> bool {
+        self.fill.is_some() || self.seq.is_some() || self.changes > 0
+    }
+
+    /// The answer of Enter / Y and of the highlighted button.
+    pub fn default_choice(&self) -> Exit {
+        if self.fill.is_some() || self.seq.is_some() {
+            Exit::Save
+        } else if self.changes > 0 {
+            Exit::Copy
+        } else {
+            Exit::Discard
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self.kind {
+            AskKind::Exit => "EXIT MOTORVIEW?",
+            AskKind::Track(_) => "SWITCH TRACK?",
+            AskKind::Car(_) => "SWITCH CAR?",
+            AskKind::WorldClose => "CLOSE WORLD EDITOR?",
+            AskKind::CineClose => "CLOSE SEQUENCE?",
+            AskKind::CineNew => "NEW SEQUENCE?",
+            AskKind::CineOpen(_) => "OPEN ANOTHER SEQUENCE?",
+        }
+    }
+
+    /// The step in the button and the hint: "exit", "switch", "close", "start the new one", "open".
+    fn go(&self) -> &'static str {
+        match self.kind {
+            AskKind::Exit => "exit",
+            AskKind::Track(_) | AskKind::Car(_) => "switch",
+            AskKind::WorldClose | AskKind::CineClose => "close",
+            AskKind::CineNew => "continue",
+            AskKind::CineOpen(_) => "open",
+        }
+    }
+
+    fn primary(&self) -> (&'static str, String) {
+        let go = self.go().to_uppercase();
+        match self.default_choice() {
+            Exit::Save => (motorview::icons::SAVE, format!("SAVE & {go}")),
+            Exit::Copy => (motorview::icons::COPY, format!("COPY & {go}")),
+            _ => (motorview::icons::EXIT, go),
+        }
+    }
+
+    fn text(&self) -> String {
+        let n = self.changes;
+        let tuning = format!("{n} tuning change{}", if n == 1 { "" } else { "s" });
+        let go = self.go();
+        // what is unsaved, as one phrase (the fill and the sequence can both be)
+        let mut lost: Vec<String> = Vec::new();
+        if let Some(f) = &self.fill {
+            lost.push(format!("the world editor has unsaved changes in {f}"));
+        }
+        if let Some(q) = &self.seq {
+            lost.push(format!("the Cine sequence {q} has unsaved changes"));
+        }
+        if lost.is_empty() {
+            return match (n > 0, &self.kind) {
+                (true, AskKind::Exit) => format!("{tuning} would be lost. Enter / Y: copy them as Markdown and exit, D: discard, Esc / N: cancel."),
+                (true, _) => format!("Switching restarts the race and drops {tuning}. Enter / Y: copy them as Markdown and switch, D: discard, Esc / N: cancel."),
+                (false, _) => format!("Enter / Y: {go}, Esc / N: cancel."),
+            };
+        }
+        // the World Editor alone keeps its #434 wording
+        if let (Some(f), None, AskKind::Exit | AskKind::Track(_) | AskKind::Car(_)) = (&self.fill, &self.seq, &self.kind) {
+            return if n > 0 {
+                format!("The world editor has unsaved changes in {f}, and {tuning} would be lost. Enter / Y: save the fill, copy the changes and exit, D: discard, Esc / N: cancel.")
+            } else {
+                format!("The world editor has unsaved changes in {f}. Save them before the viewer closes? Enter / Y: save and exit, D: discard, Esc / N: cancel.")
+            };
+        }
+        let mut head = lost.join(", and ");
+        head.replace_range(..1, &head[..1].to_uppercase());
+        if n > 0 {
+            format!("{head}, and {tuning} would be lost. Enter / Y: save, copy the changes and {go}, D: discard, Esc / N: cancel.")
+        } else {
+            format!("{head}. Enter / Y: save and {go}, D: discard, Esc / N: cancel.")
+        }
+    }
+}
+
+/// The requester (19.3, `requesterHTML`): a near-opaque card over a dark scrim, the title (exit or a car / track
+/// switch), and three buttons when something would be lost (the default: Save & exit with an unsaved fill, else Copy &
+/// exit / switch; then Discard, Cancel), else Exit (the default) and Cancel. None = still asking. Keys (Enter / Y, D,
+/// Esc / N) are the viewer's own.
+pub fn requester(ctx: &egui::Context, ask: &Ask) -> Option<Exit> {
     let mut out = None;
     let frame = egui::Frame::new()
         .fill(Color32::from_rgba_unmultiplied(16, 28, 45, 247))
@@ -338,25 +619,18 @@ pub fn exit_dialog(ctx: &egui::Context, unsaved: Option<&str>) -> Option<Exit> {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(motorview::icons::WARN).size(26.0).color(theme::ORANGE_TEXT));
             ui.add_space(12.0);
-            ui.label(egui::RichText::new("EXIT MOTORVIEW?").font(theme::glass_font(28.0)).color(theme::WHITE));
+            ui.label(egui::RichText::new(ask.title()).font(theme::glass_font(28.0)).color(theme::WHITE));
         });
         ui.add_space(14.0);
-        let text = match unsaved {
-            Some(f) => format!("The world editor has unsaved changes in {f}. Save them before the viewer closes? Enter / Y: save and exit, D: discard, Esc / N: cancel."),
-            None => "Enter / Y: exit, Esc / N: cancel.".to_string(),
-        };
-        ui.add(egui::Label::new(egui::RichText::new(text).size(15.0).color(theme::TEXT)));
+        ui.add(egui::Label::new(egui::RichText::new(ask.text()).size(15.0).color(theme::TEXT)));
         ui.add_space(24.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
-            if unsaved.is_some() {
-                if glass_ui::req_button(ui, motorview::icons::SAVE, "SAVE & EXIT", true).clicked() {
-                    out = Some(Exit::Save);
-                }
-                if glass_ui::req_button(ui, motorview::icons::EXIT, "DISCARD", false).clicked() {
-                    out = Some(Exit::Discard);
-                }
-            } else if glass_ui::req_button(ui, motorview::icons::EXIT, "EXIT", true).clicked() {
+            let (icon, label) = ask.primary();
+            if glass_ui::req_button(ui, icon, &label, true).clicked() {
+                out = Some(ask.default_choice());
+            }
+            if ask.has_loss() && glass_ui::req_button(ui, motorview::icons::EXIT, "DISCARD", false).clicked() {
                 out = Some(Exit::Discard);
             }
             if glass_ui::req_button(ui, motorview::icons::CLOSE, "CANCEL", false).clicked() {
@@ -388,5 +662,47 @@ mod tests {
             md,
             "**FPS 60** · track 2\n\n| | |\n|---|---|\n| camera | 1.00, 2.50, -3.00 |\n| speed | x1.00 · 15.0 m/s |\n| target | 0.00, 0.00, 0.00 (12.3 m) |\n| time | 1.500 s, prop frame 3.0 |\n\n- shading view: normals (F10)"
         );
+    }
+
+    fn ask(kind: AskKind, fill: bool, seq: bool, changes: usize) -> Ask {
+        Ask { kind, fill: fill.then(|| "track 2's fill".to_string()), seq: seq.then(|| "track01.cine".to_string()), changes }
+    }
+
+    #[test]
+    fn cine_ask_saves_by_default() {
+        let a = ask(AskKind::CineClose, false, true, 0);
+        assert!(a.has_loss() && a.default_choice() == Exit::Save);
+        assert_eq!(a.primary().1, "SAVE & CLOSE");
+        assert_eq!(a.text(), "The Cine sequence track01.cine has unsaved changes. Enter / Y: save and close, D: discard, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::CineOpen("a.cine".into()), false, true, 0).primary().1, "SAVE & OPEN");
+        assert_eq!(ask(AskKind::CineNew, false, true, 0).title(), "NEW SEQUENCE?");
+    }
+
+    #[test]
+    fn world_close_ask_saves_by_default() {
+        let a = ask(AskKind::WorldClose, true, false, 0);
+        assert!(a.has_loss() && a.default_choice() == Exit::Save);
+        assert_eq!(a.title(), "CLOSE WORLD EDITOR?");
+        assert_eq!(a.primary().1, "SAVE & CLOSE");
+        assert_eq!(a.text(), "The world editor has unsaved changes in track 2's fill. Enter / Y: save and close, D: discard, Esc / N: cancel.");
+    }
+
+    #[test]
+    fn exit_ask_names_everything_lost() {
+        let a = ask(AskKind::Exit, true, true, 2);
+        assert_eq!(
+            a.text(),
+            "The world editor has unsaved changes in track 2's fill, and the Cine sequence track01.cine has unsaved changes, and 2 tuning changes would be lost. Enter / Y: save, copy the changes and exit, D: discard, Esc / N: cancel."
+        );
+        // the old wordings are kept
+        assert_eq!(ask(AskKind::Exit, true, false, 0).text(), "The world editor has unsaved changes in track 2's fill. Save them before the viewer closes? Enter / Y: save and exit, D: discard, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::Exit, false, false, 0).text(), "Enter / Y: exit, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::Exit, false, false, 1).text(), "1 tuning change would be lost. Enter / Y: copy them as Markdown and exit, D: discard, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::Exit, true, false, 3).text(), "The world editor has unsaved changes in track 2's fill, and 3 tuning changes would be lost. Enter / Y: save the fill, copy the changes and exit, D: discard, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::Car(2), false, false, 2).text(), "Switching restarts the race and drops 2 tuning changes. Enter / Y: copy them as Markdown and switch, D: discard, Esc / N: cancel.");
+        assert_eq!(ask(AskKind::Car(2), false, false, 2).primary().1, "COPY & SWITCH");
+        assert_eq!(ask(AskKind::Exit, false, false, 2).primary().1, "COPY & EXIT");
+        assert_eq!(ask(AskKind::Exit, true, false, 0).primary().1, "SAVE & EXIT");
+        assert!(!ask(AskKind::Exit, false, false, 0).has_loss());
     }
 }

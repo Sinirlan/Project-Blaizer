@@ -265,6 +265,7 @@ pub fn new_unlocks(codes: &[u32], flagged: &[bool], car_codes: &[u32], unlock: &
 }
 
 /// Small LCG with the Watcom rand() shape (15-bit results) [design choice: not the same seed].
+#[derive(Clone, Debug)]
 pub struct Rng(pub u32);
 
 impl Rng {
@@ -273,7 +274,7 @@ impl Rng {
         (self.0 >> 16) & 0x7fff
     }
 
-    fn below(&mut self, n: usize) -> usize {
+    pub fn below(&mut self, n: usize) -> usize {
         self.next() as usize % n.max(1)
     }
 }
@@ -371,10 +372,8 @@ impl League {
     /// A new league (0x44f8d0): every place a distinct random profile, then a random place of
     /// Division 3 becomes you, with your car as all four CarDivisionN.
     pub fn create(name: Option<&str>, profiles: &[Profile], me: &Profile, rng: &mut Rng, date: u32) -> League {
-        let name = match name.map(str::trim).filter(|n| !n.is_empty()) {
-            Some(n) => clip(n, 15),
-            None => format!("League{}{}", (b'A' + (rng.next() % 25) as u8) as char, (b'A' + (rng.next() % 25) as u8) as char),
-        };
+        // CLASSIC 0x44f8d0: no caller passes a null name, the unnamed ones say "Default" (0x450057, 0x450e43) [O]
+        let name = name.map(str::trim).filter(|n| !n.is_empty()).map_or_else(|| "Default".to_string(), |n| clip(n, 15));
         let mut pool: Vec<usize> = (0..profiles.len()).collect();
         let places = (0..PLACES)
             .map(|_| {
@@ -386,6 +385,12 @@ impl League {
         let at = DIV_START[3] + rng.below(DIV_SIZE[3]);
         l.places[at] = Place { human: true, p: me.clone(), ..Place::default() };
         l
+    }
+
+    /// "League" + two random letters, the name 0x44f8d0 would give a null name (dead code in the original, 0x44f920) [O].
+    /// Only the REMASTER New league flow still uses it, for an empty name or Esc [design choice].
+    pub fn random_name(rng: &mut Rng) -> String {
+        format!("League{}{}", (b'A' + (rng.next() % 25) as u8) as char, (b'A' + (rng.next() % 25) as u8) as char)
     }
 
     pub fn division_of(i: usize) -> usize {
@@ -664,6 +669,12 @@ pub fn index_after_delete(current: usize, deleted: usize, left: usize) -> usize 
     at.min(left.saturating_sub(1))
 }
 
+/// The current league after a won final, once the file is gone and the list reloaded: the last league whose name is the
+/// won league's, else the first one (0x450f3b..0x450f87, `0x485b74` compares case-insensitively) [O].
+pub fn current_after_win(names: &[&str], won: &str) -> usize {
+    names.iter().rposition(|n| n.eq_ignore_ascii_case(won)).unwrap_or(0)
+}
+
 pub fn save_last(persist: bool, file: &str) {
     let Some(p) = last_path(persist) else { return };
     let r = p.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&p, format!("LastLeague {file}\n")));
@@ -904,9 +915,23 @@ mod tests {
         nicks.sort();
         nicks.dedup();
         assert_eq!(nicks.len(), 25);
-        assert!(l.name.starts_with("League") && l.name.len() == 8);
+        assert_eq!(l.name, "Default");
         let back = League::parse(l.to_text().as_bytes(), &l.file, &profiles(), &me());
         assert_eq!(back, l);
+    }
+
+    #[test]
+    fn current_league_after_a_win() {
+        // the last league of the won league's name (any case), else the first file
+        assert_eq!(current_after_win(&["Alpha", "Fast", "fast", "Zed"], "FAST"), 2);
+        assert_eq!(current_after_win(&["Alpha", "Zed"], "Fast"), 0);
+        assert_eq!(current_after_win(&[], "Fast"), 0);
+    }
+
+    #[test]
+    fn random_league_name_is_league_and_two_letters() {
+        let n = League::random_name(&mut Rng(3));
+        assert!(n.starts_with("League") && n.len() == 8);
     }
 
     #[test]

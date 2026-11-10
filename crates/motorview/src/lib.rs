@@ -35,6 +35,7 @@ pub mod texpack;
 pub mod theme;
 pub mod timeline;
 pub mod tune;
+pub mod tune_changes;
 pub mod ui;
 pub mod app_icon;
 pub mod ui_font;

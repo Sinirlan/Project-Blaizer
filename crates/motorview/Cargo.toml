@@ -28,6 +28,8 @@ lyon_tessellation = "1"
 exr = "1.74.2"
 half = "2.7.1"
 miniz_oxide = "0.8.9"
+# Lap Analysis (#429 phase 4): the system file dialog (same version and features as motorinstall)
+rfd = "0.15"
 gltf = { version = "1.4.1", default-features = false, features = ["import", "utils", "names"] }
 
 [build-dependencies]

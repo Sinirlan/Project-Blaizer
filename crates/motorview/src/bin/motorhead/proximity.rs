@@ -5,10 +5,13 @@
 //! `»` field, projected with the camera and extruded by stacking slices (`Batch::glass_glyph`).
 //! APPROX of the plan's mesh pass: no depth test, so a wall in front of the arrow doesn't
 //! hide it (they sit by your bumper, where little comes between).
+//! #374: every pose here is where the car is drawn (`Race::view_pose`), like the camera, not the
+//! latest physics tick, or the arrows jump along their axis by up to a tick's travel each frame.
 
 use crate::front::RaceState;
 use glam::{Vec2, Vec3};
 use motor_sim::car::Car;
+use motor_sim::session::ViewPose;
 use motorview::drive::CamMode;
 use motorview::ui::Batch;
 use motorview::ui_font::HudFont;
@@ -39,10 +42,10 @@ const EYE_NEAR: f32 = 0.3;
 /// The game's horizontal field of view (render.rs FOV_X).
 const FOV_X: f32 = 90.0;
 
-/// A car's footprint (PhyCorner FL, FR, BR, BL) on the ground plane, world x/z.
-fn footprint(car: &Car) -> [Vec2; 4] {
+/// A car's footprint (PhyCorner FL, FR, BR, BL) on the ground plane, world x/z, at its drawn pose `v`.
+fn footprint(car: &Car, v: &ViewPose) -> [Vec2; 4] {
     car.p.corners.map(|c| {
-        let p = car.pos + car.rot * c;
+        let p = v.pos + v.rot * c;
         Vec2::new(p.x, p.z)
     })
 }
@@ -66,11 +69,12 @@ fn gap(a: &[Vec2; 4], b: &[Vec2; 4]) -> f32 {
 }
 
 /// The opponents that should show an arrow, nearest first: (racer, gap).
-fn candidates(r: &RaceState) -> Vec<(usize, f32)> {
+fn candidates(r: &RaceState, aspect: f32) -> Vec<(usize, f32)> {
     let race = &r.sess.race;
     let me = &race.racers[r.sess.focus].car;
-    let mine = footprint(me);
-    let fwd = me.rot * Vec3::Z;
+    let mv = race.view_pose(r.sess.focus);
+    let mine = footprint(me, &mv);
+    let fwd = mv.rot * Vec3::Z;
     let fwd = Vec2::new(fwd.x, fwd.z).normalize_or(Vec2::Y);
     let centre = mine.iter().copied().sum::<Vec2>() * 0.25;
     let mut out: Vec<(usize, f32)> = race
@@ -79,11 +83,12 @@ fn candidates(r: &RaceState) -> Vec<(usize, f32)> {
         .enumerate()
         .filter(|(i, rc)| *i != r.sess.focus && rc.progress.eliminated_ms.is_none())
         .filter_map(|(i, rc)| {
-            let theirs = footprint(&rc.car);
+            let tv = race.view_pose(i);
+            let theirs = footprint(&rc.car, &tv);
             let to = (theirs.iter().copied().sum::<Vec2>() * 0.25 - centre).normalize_or(-fwd);
             let g = gap(&mine, &theirs);
             let behind = to.dot(fwd) < FRONT_HALF.to_radians().cos();
-            (g < RANGE && behind && !on_screen(r, rc.car.pos)).then_some((i, g))
+            (g < RANGE && behind && !on_screen(r, tv.pos, aspect)).then_some((i, g))
         })
         .collect();
     out.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -91,22 +96,23 @@ fn candidates(r: &RaceState) -> Vec<(usize, f32)> {
     out
 }
 
-/// Whether a car (its origin) is in front of the eye and inside the view's 90° horizontal
-/// field of view: those you can see get no arrow (the user's rule: only cars behind you that
-/// you can't see). The vertical extent isn't tested, as the window's aspect isn't known
-/// here; a car beside or behind you leaves the view sideways or behind the eye.
-fn on_screen(r: &RaceState, p: Vec3) -> bool {
+/// Whether a car (its origin) is in front of the eye and inside the view's horizontal field of view (90° at 4:3 and
+/// narrower, wider on a wider window: Vert+, `render::field_aspect`, #479): those you can see get no arrow (the user's
+/// rule: only cars behind you that you can't see). The vertical extent isn't tested; a car beside or behind you leaves
+/// the view sideways or behind the eye. `aspect` = window width / height.
+fn on_screen(r: &RaceState, p: Vec3, aspect: f32) -> bool {
     let cam = &r.cam;
     let d = Vec3::new(p.x, p.y, -p.z) - cam.pos;
     let z = d.dot(cam.forward());
-    z > EYE_NEAR && d.dot(cam.right()).abs() < z * (FOV_X * 0.5).to_radians().tan()
+    let across = (FOV_X * 0.5).to_radians().tan() * aspect / motorview::render::field_aspect(true, aspect);
+    z > EYE_NEAR && d.dot(cam.right()).abs() < z * across
 }
 
-/// Per frame: fade each opponent's arrow towards shown / hidden.
-pub fn update(r: &mut RaceState, dt: f32) {
+/// Per frame: fade each opponent's arrow towards shown / hidden. `aspect` = window width / height.
+pub fn update(r: &mut RaceState, dt: f32, aspect: f32) {
     let n = r.sess.race.racers.len();
     r.prox.resize(n, 0.0);
-    let shown = candidates(r);
+    let shown = candidates(r, aspect);
     for (i, a) in r.prox.iter_mut().enumerate() {
         let target = if shown.iter().any(|x| x.0 == i) { 1.0 } else { 0.0 };
         let step = dt / FADE;
@@ -114,7 +120,7 @@ pub fn update(r: &mut RaceState, dt: f32) {
     }
 }
 
-/// Canvas point of a game-space point (90° horizontal field of view, as `nameplates`).
+/// Canvas point of a game-space point (90° across at 4:3, Vert+ on a wider canvas, as `hud::plate_points`).
 fn project(r: &RaceState, w: f32, h: f32, p: Vec3) -> Option<[f32; 2]> {
     let cam = &r.cam;
     let (f, rt) = (cam.forward(), cam.right());
@@ -124,7 +130,7 @@ fn project(r: &RaceState, w: f32, h: f32, p: Vec3) -> Option<[f32; 2]> {
     if z < EYE_NEAR {
         return None;
     }
-    let focal = w * 0.5;
+    let focal = if w > h * 4.0 / 3.0 { h * 2.0 / 3.0 } else { w * 0.5 };
     Some([w * 0.5 + d.dot(rt) / z * focal, h * 0.5 - d.dot(up) / z * focal])
 }
 
@@ -137,14 +143,15 @@ pub fn draw(r: &RaceState, b: &mut Batch) {
     let k = LENGTH / (bbox[2] - bbox[0]).max(1) as f32; // metres per field source px
     let race = &r.sess.race;
     let me = &race.racers[r.sess.focus].car;
-    let mine = footprint(me);
+    let mv = race.view_pose(r.sess.focus);
+    let mine = footprint(me, &mv);
     // the footprint in body space: its centre and half sizes
     let cs = me.p.corners;
     let mid = cs.iter().copied().sum::<Vec3>() * 0.25;
     let half = cs.iter().fold(Vec2::ZERO, |m, c| m.max(Vec2::new((c.x - mid.x).abs(), (c.z - mid.z).abs())));
     let (ax, az) = (half.x + OUT, half.y + OUT);
     let ride = me.p.ride_height();
-    let up = me.rot * Vec3::Y;
+    let up = mv.rot * Vec3::Y;
     let eye = Vec3::new(r.cam.pos.x, r.cam.pos.y, -r.cam.pos.z);
     let (w, h) = (b.canvas.w, b.canvas.h);
     for (i, rc) in race.racers.iter().enumerate() {
@@ -152,16 +159,16 @@ pub fn draw(r: &RaceState, b: &mut Batch) {
         if i == r.sess.focus || alpha <= 0.0 || rc.progress.eliminated_ms.is_some() {
             continue;
         }
-        let theirs = footprint(&rc.car);
+        let theirs = footprint(&rc.car, &race.view_pose(i));
         let g = gap(&mine, &theirs);
         // their bearing in your body frame, onto the ellipse
         let c = theirs.iter().copied().sum::<Vec2>() * 0.25;
-        let to = me.rot.transpose() * (Vec3::new(c.x, 0.0, c.y) - me.pos);
+        let to = mv.rot.transpose() * (Vec3::new(c.x, 0.0, c.y) - mv.pos);
         let dir = Vec2::new(to.x, to.z).normalize_or(Vec2::NEG_Y);
         let t = 1.0 / ((dir.x / ax).powi(2) + (dir.y / az).powi(2)).sqrt();
-        let at = me.pos + me.rot * Vec3::new(mid.x + dir.x * t, ride + LIFT, mid.z + dir.y * t);
+        let at = mv.pos + mv.rot * Vec3::new(mid.x + dir.x * t, ride + LIFT, mid.z + dir.y * t);
         // glyph frame: x = its point (outward), y = across (the glyph's down), z = up
-        let o = me.rot * Vec3::new(dir.x, 0.0, dir.y);
+        let o = mv.rot * Vec3::new(dir.x, 0.0, dir.y);
         let l = up.cross(o);
         let v = eye - at;
         let view = [v.dot(o), v.dot(l), v.dot(up)];

@@ -35,7 +35,8 @@ pub struct CarInfo {
     pub colours: [u32; 4],
     /// +0x39, copied into the car array `+0x24`; meaning [U].
     pub w39: u32,
-    /// +0x3d, control type 1 / 2 / 3 from the input device bits `0x705ac9` (2, 1, 4) [O].
+    /// +0x3d, control type 1 / 2 / 3 from the device byte of the TurnLeft binding code, `0x705ac9`
+    /// (2 keyboard, 1 mouse, 4 joystick) [O].
     pub control: u32,
 }
 

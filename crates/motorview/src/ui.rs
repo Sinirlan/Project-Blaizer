@@ -904,22 +904,6 @@ impl<'a> Batch<'a> {
         }
     }
 
-    /// An image cut into horizontal bands, each shifted sideways by `offsets[k]` pixels
-    /// (cycled): the menu's digital-glitch flicker.
-    pub fn image_glitch(&mut self, name: &str, x: f32, y: f32, band: f32, offsets: &[f32]) -> f32 {
-        let Some(r) = self.assets.atlas.get(name) else { return 0.0 };
-        let (w, h) = (r.w as f32, r.h as f32);
-        let mut top = 0.0;
-        let mut k = 0;
-        while top < h && !offsets.is_empty() {
-            let bh = band.min(h - top);
-            self.quad(x + offsets[k % offsets.len()], y + top, w, bh, r, [0.0, top / h, 1.0, (top + bh) / h], WHITE);
-            top += bh;
-            k += 1;
-        }
-        w
-    }
-
     /// A MENU.SPR sprite frame (frame clamped to what exists).
     pub fn menu(&mut self, sprite: &str, frame: usize, x: f32, y: f32) -> f32 {
         let n = self.assets.frames(sprite).max(1);
@@ -1114,6 +1098,21 @@ impl<'a> Batch<'a> {
             cx += (g.advance + style.tracking) * kg;
         }
         cx - x
+    }
+
+    /// How many vertices the batch holds (with `rotate_from`: what is drawn after this point).
+    pub fn vert_len(&self) -> usize {
+        self.verts.len()
+    }
+
+    /// Turn the vertices from `from` on (quads and text drawn since `vert_len`) by `angle` radians about `pivot` (canvas
+    /// px), as CSS `rotate()` in this y-down space: -π/2 stands text up, reading upwards (a chart's vertical caption, #429).
+    pub fn rotate_from(&mut self, from: usize, pivot: [f32; 2], angle: f32) {
+        let (s, c) = angle.sin_cos();
+        for v in self.verts.iter_mut().skip(from) {
+            let (dx, dy) = (v.pos[0] - pivot[0], v.pos[1] - pivot[1]);
+            v.pos = [pivot[0] + dx * c - dy * s, pivot[1] + dx * s + dy * c];
+        }
     }
 
     /// REMASTER Glass HUD (#294): `font_text` with a vertical gradient over the capitals' box:

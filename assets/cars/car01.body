@@ -21,6 +21,33 @@
 # over the windscreen), Ogflight 120 / 121, Ogblight 10 / 11.
 Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0
 
+# Design choice (third pass): the rounded fold alone is a plate through flat facets, so the
+# bonnet and the nose stayed flat between the folds. The fold row (the cage points on the
+# bonnet-to-nose fold, |x| 0.245-0.589, y 0.707-0.810, z 1.592-1.744, the vents' tips included)
+# rises 3 cm and the fenders' nose corners (|x| 0.843, y 0.848, z 1.466) 1.5 cm before the
+# curved zones, so the fold grows to 27 deg and `round=0.35` spreads it into a dome over the
+# bonnet and the nose, as in the cinematic render. 3.5 cm without the corners notched the
+# fenders' silhouette at the nose; 2.5 cm was a flatter dome.
+Push lo=0.2,0.69,1.58 hi=0.6,0.82,1.76 by=0,0.03,0
+Push lo=0.75,0.8,1.4 hi=0.9,0.9,1.5 by=0,0.015,0
+
+# Design choice (fifth pass, the user's request: a straight, smooth fender edge over the front
+# wheels, raised like the cinematic render's humps). Over the front arch the fender's outer fold
+# (chamfer to side, F: |x| 0.931 y 0.841 z 1.185, 0.929 0.825 1.314, 0.913 0.784 1.462) lay at or
+# under the arch lip's circle (y 0.83 over the hub at z 1.25: the tyre, the 0.035 clearance and
+# the 0.02 lip), so the lip broke through the fold and the edge read jagged; the skin over the
+# arch was 2-6 cm thick. F rises 3.5-4.5 cm (most over the hub) and clears the lip by 4.3-5 cm;
+# the top corners over it (T: |x| 0.866 0.860 0.843 at z 1.185 1.344 1.466) 1-2 cm, so each
+# chamfer quad stays flat (its corners' rises cancel) and the fender humps over the wheel. The
+# bonnet's edge (|x| 0.571-0.589) and the mirror base stay. With the stiff fender springs below,
+# T at 2.5-4.5 cm and F at 3.5-5 cm made an 8 cm hump.
+Push lo=0.86,0.905,1.18 hi=0.872,0.917,1.19 by=0,0.01,0
+Push lo=0.855,0.882,1.338 hi=0.866,0.894,1.35 by=0,0.02,0
+Push lo=0.837,0.857,1.46 hi=0.849,0.869,1.472 by=0,0.01,0
+Push lo=0.925,0.835,1.18 hi=0.937,0.847,1.19 by=0,0.035,0
+Push lo=0.923,0.819,1.308 hi=0.935,0.831,1.32 by=0,0.045,0
+Push lo=0.907,0.778,1.456 hi=0.919,0.79,1.468 by=0,0.035,0
+
 # [O] the mirror glass is the grey 146 146 146 quad on the back of each housing (118 / 119,
 # |x| 0.888-1.090, y 0.896-0.983, z 0.510-0.558)
 MirrorGlass rgb=146,146,146
@@ -56,19 +83,71 @@ Vent from=0,0,0 lo=0.77,0.48,-0.76 hi=0.97,0.92,-0.5 rgb=3,3,5 frame=0.01 inset=
 # - the bonnet vents 169 / 170 and 223 / 224 (|x| 0.319-0.571, y 0.707-0.898, z 0.999-1.744):
 #   louvres
 Vent from=0,0,0 lo=0.3,0.7,0.98 hi=0.58,0.9,1.75 rgb=3,3,6 frame=0.008 inset=0.025 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
+# - the orange lower nose under each headlight 161 / 214 (|x| 0.254-0.818, y 0.229-0.407,
+#   z 1.817-2.026, n 0.35 0 0.94: angled back across the nose corner). Design choice after the
+#   cinematic render of the Kobra X3 (#179, second pass), which has a pair of intakes there: a
+#   panel 4.5 cm in from the face's edges, recessed with a honeycomb and one upright blade, so
+#   it reads as two slots. Slats run along game x and poked out of this angled face at its
+#   outer end.
+Panel from=192,78,0 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 frame=0.045 rgb=4,4,1
+Vent from=4,4,1 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 rgb=3,3,7 frame=0.006 inset=0.035 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=1
 
 # [O] The front fenders are a box of crisp facets (top 151 / 180, a 45 deg chamfer 146 / 185 and the
 # side 147 / 186, folds 40-54 deg) that fan out at the nose corner into 148 / 150 / 181 / 187
 # (folds 13-25 deg, and 40 between 148 and 150), where the chamfer fades into the nose. Unlike
 # the other cars' fenders these are creases, not a Gouraud fan (only 36 cage edges at 10-20 deg,
-# the fewest). Design choice: a curved zone over the four corner facets only (centroids |x|
-# 0.75-0.89, y 0.73-0.85, z 1.40-1.62), so they become one rounded panel and the chamfer lines
-# stay creases. A zone over the whole fender with folds under 30 deg rounded left the chamfer
-# creases ending inside it: the far fender came out mottled and 14 more non-manifold edges.
-Smooth from=75,91,34 lo=0.73,0.7,1.38 hi=0.9,0.86,1.65 max_deg=45 step=0.025 loose=0 round=0.1
+# the fewest). The Classic body shades them round all the same, and the cinematic render of the
+# Kobra X3 is round humps over the wheels, a bonnet and nose rolled over the stripe and rounded
+# rear quarters (#179, second pass). Design choice: two curved zones over the paint, the white
+# stripes and the orange (each face keeps its colour), every fold up to 60 deg rounded:
+# - front: the fenders' top, chamfer and nose corner (|x| 0.55-0.915, z 0.6-1.9, y to 0.96
+#   since the fifth pass, below; the vertical sides over the arch, |x| 0.93, stay out: rounded into the arch
+#   lips they made 8 non-manifold edges there) and the bonnet and nose over the stripe (|x| <
+#   0.6, z 1.15-2.05). The nose's side faces (212 / 213 / 216 on the right) stay out too: cut by the zone, the
+#   lower nose's edge to them got cut points a hair off the line, which the panel above threw
+#   out of the face as spikes.
+# - rear: the rear fenders, the deck beside the spine and the tail (|x| 0.3-1.0, z < -0.75;
+#   the spine, |x| 0.24, stays a ridge).
+# The bonnet vents' black faces 169 / 223 are in the zone too (third pass, the user's request:
+# their front tips (|x| 0.319, y 0.707, z 1.744) sit on the bonnet-to-nose fold, and as fixed
+# outline corners they pinched the plate there at any `round` over 0.1; the vent recess finds
+# the faired triangles by colour and box as before). The fender box is split in three so the
+# black arch tunnels (17-46, centroid y under 0.76 or |x| under 0.8) stay out: the fenders' top
+# (|x| 0.55-0.915, y 0.8+), their outer side (|x| 0.85+) and the nose corner 181 / 235 (|x|
+# 0.7-0.8, y 0.7-0.8, z 1.6+); the bonnet box starts at z 1.3 so the tunnels' inner walls 25 /
+# 43 (centroid z 1.27) stay out. Same paint faces as the two boxes before (checked face by
+# face); 170 / 224 (the vents' rear halves, z under 1.3) stay flat under the cowl.
+# `round=0.35`: 0.1 left the bonnet-to-nose fold (22 deg at z 1.744, 158-162 / 208-216 to the
+# bonnet) a visible crease between two flat panels, which read concave next to the cinematic
+# render's domed bonnet and nose; 0 dented the bonnet. The zone step
+# moves the left headlight's top edge across weld cells: 1-3 more 3-face edges there (5, 6, 7
+# at a step of 0.026, 0.025, 0.024), where the cage already has one; no crack in close-ups.
+# Fifth pass (the user's request): the fenders' top 180 / 234 (centroid y 0.900) had stayed out
+# of the 0.895 box, a flat facet pinned with the chamfer between two creases, so the boxes reach
+# y 0.96 (only 180 / 234 join; the mirror faces stay out by z), and `round` is per box: 0.35 on
+# the bonnet and the nose corner, 0.12 on the fenders' boxes. With 0.35 the fenders became one
+# plane from the top to the side fold and sagged 5-8 cm under the cage over the arch; as their
+# own zone at 0.1 they met the bonnet in a crease along the vents. One plate keeps that seam
+# smooth; the points on both take the stiff springs, so the bonnet beside the vents' tips sits
+# up to 9 cm higher than the soft plate left it, near the cage there.
+Smooth from=75,91,34;255,255,255;192,78,0;0,0,0 lo=0,0.45,1.3;0.55,0.8,0.6;0.85,0.55,0.6;0.7,0.7,1.6 hi=0.6,0.92,2.05;0.915,0.96,1.9;0.915,0.96,1.9;0.8,0.8,1.9 max_deg=60 step=0.025 loose=0 round=0.35;0.12;0.12;0.35
+Smooth from=75,91,34;255,255,255;192,78,0 lo=0.3,0.4,-2.1 hi=1.0,1.01,-0.75 max_deg=60 step=0.025 loose=0 round=0.1
 
 # Every edge cut and every face remeshed at 4 cm, like the other base bodies.
 # `seams=1` (#387, as the Avalanche's, #177): [O] the original meets a long edge with two or more
 # shorter ones in places (T-junctions); cutting the open edges at those corners first closes the
 # seam. Mesh check, open edges 5,244 -> 5,039, no new defect.
 Refine step=0.04 seams=1
+
+# Design choice (fourth pass, the user's request): the fenders' outer flank between the arch's
+# front lip and the headlight's corner (faces 242 / 199 on the right: |x| 0.82-0.93, y 0.58-0.79,
+# z 1.46-1.82) leaned in at its bottom (n y -0.14), so from the front the silhouette had a dent
+# halfway between the fender's corner and the lamp. The refined cage bulges out by up to 5 cm
+# there: full from |x| 0.85 out, peaking at y 0.65 and z 1.62 (the arch's front corner), none at
+# the white stripe's bottom (y 0.45), over the fender's top (y 0.85), behind z 1.3 or at the
+# headlight's corner (z 1.80), so the lamp and its housing stay put. 3 cm only straightened the
+# dent. Mesh check unchanged (non-manifold 6). Rounding the side panels round the arch in the
+# curved zone was tried and dropped: the panel behind the arch (237) sagged into a pillow, and
+# the strips over the arch's top (197 / 199) made 3-7 non-manifold slivers against the arch lip
+# at every zone step from 0.022 to 0.026.
+Warp by=0.05,0,0 x=0.7,0;0.85,1 y=0.45,0;0.65,1;0.85,0 z=1.3,0;1.62,1;1.80,0

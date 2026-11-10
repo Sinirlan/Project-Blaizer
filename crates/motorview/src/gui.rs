@@ -119,13 +119,10 @@ pub fn wheel_drag<N: Numeric>(ui: &mut egui::Ui, v: &mut N, range: Option<RangeI
     r
 }
 
-/// Wheel notches over a hovered widget step `v`. Reads the raw wheel events: egui's own scroll
-/// delta turns Shift+wheel into horizontal scrolling. Consumes the scroll so a panel's
-/// `ScrollArea` stays put.
-fn apply_wheel<N: Numeric>(ui: &mut egui::Ui, r: &mut egui::Response, v: &mut N, lo: f64, hi: f64) {
-    if !r.hovered() || !r.enabled() || r.dragged() {
-        return;
-    }
+/// The wheel notches of this frame (points of a touchpad scaled to notches, up = positive) and whether Shift is held.
+/// Reads the raw wheel events: egui's own scroll delta turns Shift+wheel into horizontal scrolling. Consumes the scroll
+/// so a panel's `ScrollArea` stays put.
+fn take_wheel(ui: &mut egui::Ui) -> (f32, bool) {
     let (mut amount, mut fine) = (0.0, false);
     ui.input_mut(|i| {
         for e in &i.events {
@@ -138,6 +135,32 @@ fn apply_wheel<N: Numeric>(ui: &mut egui::Ui, r: &mut egui::Response, v: &mut N,
         }
         i.smooth_scroll_delta = egui::Vec2::ZERO;
     });
+    (amount, fine)
+}
+
+/// Whole wheel notches over the hovered widget `r` this frame, wheel down = positive (the next entry of a list); the
+/// part of a notch a touchpad has not finished yet is kept for the next frames.
+pub fn wheel_notches(ui: &mut egui::Ui, r: &egui::Response) -> i32 {
+    if !r.hovered() || !r.enabled() {
+        return 0;
+    }
+    let (amount, _) = take_wheel(ui);
+    if amount == 0.0 {
+        return 0;
+    }
+    let id = r.id.with("wheel_list");
+    let total = -amount + ui.data_mut(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let notches = total.trunc();
+    ui.data_mut(|d| d.insert_temp(id, total - notches));
+    notches as i32
+}
+
+/// Wheel notches over a hovered widget step `v`.
+fn apply_wheel<N: Numeric>(ui: &mut egui::Ui, r: &mut egui::Response, v: &mut N, lo: f64, hi: f64) {
+    if !r.hovered() || !r.enabled() || r.dragged() {
+        return;
+    }
+    let (amount, fine) = take_wheel(ui);
     if amount == 0.0 {
         return;
     }

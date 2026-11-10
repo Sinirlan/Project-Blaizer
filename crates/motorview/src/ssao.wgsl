@@ -14,6 +14,8 @@ struct U {
     q: vec4<f32>,
     // full-size width, height; z: 1 when the scene is in linear light
     s: vec4<f32>,
+    // xy: the projection's lens shift in NDC (render.rs `Camera::shift`, the Cine preview; 0 elsewhere)
+    o: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var depth: DEPTH_TEX;
@@ -41,7 +43,7 @@ fn view_pos(px: vec2<i32>) -> vec3<f32> {
     let q = clamp_px(px);
     let z = lin(textureLoad(depth, q, 0));
     let ndc = (vec2<f32>(q) + 0.5) / u.s.xy * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
-    return vec3<f32>(ndc.x * z / u.p.x, ndc.y * z / u.p.y, z);
+    return vec3<f32>((ndc.x - u.o.x) * z / u.p.x, (ndc.y - u.o.y) * z / u.p.y, z);
 }
 
 fn ign(p: vec2<f32>) -> f32 {

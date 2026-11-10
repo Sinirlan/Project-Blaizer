@@ -66,7 +66,8 @@ impl Stats {
 
 /// The nearest point of the closed lap polyline to `p` (x, z): its arc length and distance. `from` = the segment the
 /// last point was on, to search a window round it; `None` searches everything.
-fn project(prof: &TrackProfile, p: [f32; 3], from: Option<usize>) -> (f32, f32, usize) {
+/// The outline must have points (`analyse` and `lap_compare::read` check for 8).
+pub(crate) fn project(prof: &TrackProfile, p: [f32; 3], from: Option<usize>) -> (f32, f32, usize) {
     let n = prof.outline.len();
     let step = prof.length / n as f32;
     let one = |i: usize| {
@@ -87,12 +88,14 @@ fn project(prof: &TrackProfile, p: [f32; 3], from: Option<usize>) -> (f32, f32, 
     }
 }
 
-/// The unwrapped arc length (m, 0 at the start line, negative on the grid) of block `k` at every record.
-fn progress_of(mde: &Mde, k: usize, prof: &TrackProfile) -> Vec<f32> {
+/// The unwrapped arc length (m, 0 at the start line) of each point of a run, in order: a jump of more than half a lap
+/// between two points is a crossing of the line. The first point counts as behind the line (negative) when it lies on the
+/// second half of the lap: the grid, or the run-up to a lap. Also `lap_compare`'s ghosts and replays.
+pub(crate) fn unwrap_arcs(prof: &TrackProfile, points: impl Iterator<Item = [f32; 3]>) -> Vec<f32> {
     let len = prof.length;
-    let (mut out, mut at, mut lap, mut prev) = (Vec::with_capacity(mde.records.len()), None, 0.0f32, 0.0f32);
-    for (i, r) in mde.records.iter().enumerate() {
-        let (s, _, seg) = project(prof, r.cars[k].pos, at);
+    let (mut out, mut at, mut lap, mut prev) = (Vec::new(), None, 0.0f32, 0.0f32);
+    for (i, p) in points.enumerate() {
+        let (s, _, seg) = project(prof, p, at);
         at = Some(seg);
         if i == 0 {
             // the grid is behind the line
@@ -108,6 +111,29 @@ fn progress_of(mde: &Mde, k: usize, prof: &TrackProfile) -> Vec<f32> {
         out.push(s + lap * len);
     }
     out
+}
+
+/// The unwrapped arc length (m, 0 at the start line, negative on the grid) of block `k` at every record.
+fn progress_of(mde: &Mde, k: usize, prof: &TrackProfile) -> Vec<f32> {
+    unwrap_arcs(prof, mde.records.iter().map(|r| r.cars[k].pos))
+}
+
+/// Block `k`'s unwrapped arc length at every record and the ends of the laps it completed (ms on the file's clock; lap 1
+/// from the green light). Every record must hold block `k` (`analyse` checks).
+pub(crate) fn car_laps(mde: &Mde, k: usize, prof: &TrackProfile) -> (Vec<f32>, Vec<f64>) {
+    let (h, len) = (&mde.header, prof.length);
+    let p = progress_of(mde, k, prof);
+    // the ends of the laps, ms on the file's clock
+    let mut ends: Vec<f64> = (1..=h.laps).map_while(|l| crossing(&mde.records, &p, l as f32 * len)).collect();
+    // the recorder stops at the flag, up to a record short of the line: carry the last metres on at the last speed
+    let n = p.len();
+    let (end, last) = (h.laps as f32 * len, p[n - 1]);
+    if ends.len() + 1 == h.laps as usize && last < end && end - last <= EDGE {
+        let (a, b) = (&mde.records[n - 2], &mde.records[n - 1]);
+        let v = ((p[n - 1] - p[n - 2]) / (b.ms.saturating_sub(a.ms)).max(1) as f32).max(1e-3);
+        ends.push(b.ms as f64 + ((end - last) / v) as f64);
+    }
+    (p, ends)
 }
 
 /// When `target` (m) is first reached, ms on the `.MDE` clock.
@@ -155,7 +181,8 @@ pub fn speed_trace(mde: &Mde, k: usize, points: usize) -> Vec<f32> {
 pub fn analyse(mde: &Mde, prof: &TrackProfile) -> Option<Stats> {
     let h = &mde.header;
     let slots = h.active_slots();
-    if mde.records.len() < 2 || slots.is_empty() || prof.outline.len() < 8 || h.laps == 0 {
+    // a damaged or crafted file can name more cars than its records hold
+    if mde.records.len() < 2 || slots.is_empty() || prof.outline.len() < 8 || h.laps == 0 || mde.records.iter().any(|r| r.cars.len() < slots.len()) {
         return None;
     }
     let me = slots.iter().position(|&s| s == h.player as usize).unwrap_or(0);
@@ -164,17 +191,7 @@ pub fn analyse(mde: &Mde, prof: &TrackProfile) -> Option<Stats> {
     let mut cars = Vec::new();
     let mut mine_ends = Vec::new();
     for (k, &slot) in slots.iter().enumerate() {
-        let p = progress_of(mde, k, prof);
-        // the ends of the laps, ms on the file's clock
-        let mut ends: Vec<f64> = (1..=h.laps).map_while(|l| crossing(&mde.records, &p, l as f32 * len)).collect();
-        // the recorder stops at the flag, up to a record short of the line: carry the last metres on at the last speed
-        let n = p.len();
-        let (end, last) = (h.laps as f32 * len, p[n - 1]);
-        if ends.len() + 1 == h.laps as usize && last < end && end - last <= EDGE {
-            let (a, b) = (&mde.records[n - 2], &mde.records[n - 1]);
-            let v = ((p[n - 1] - p[n - 2]) / (b.ms.saturating_sub(a.ms)).max(1) as f32).max(1e-3);
-            ends.push(b.ms as f64 + ((end - last) / v) as f64);
-        }
+        let (p, ends) = car_laps(mde, k, prof);
         let laps_ms: Vec<u32> = ends.iter().enumerate().map(|(l, &t)| (t - if l == 0 { go } else { ends[l - 1] }).round().max(0.0) as u32).collect();
         let finish_ms = (ends.len() == h.laps as usize).then(|| (ends[ends.len() - 1] - go).round().max(0.0) as u32);
         let last = *p.last().unwrap_or(&0.0);

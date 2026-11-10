@@ -4,6 +4,7 @@
 
 pub const CAMERA: &str = "\u{e064}";
 pub const VIDEO: &str = "\u{e1a5}";
+pub const VOLUME: &str = "\u{e1ab}";
 pub const RESET: &str = "\u{e148}";
 pub const NEXT_CAMERA: &str = "\u{e17c}";
 pub const MIRROR: &str = "\u{e6be}";
@@ -31,6 +32,7 @@ pub const SUN: &str = "\u{e178}";
 pub const MOON: &str = "\u{e11e}";
 pub const FOG: &str = "\u{e214}";
 pub const CLOUD: &str = "\u{e088}";
+pub const BUILDING: &str = "\u{e290}";
 pub const SHADOW: &str = "\u{e1cb}";
 pub const ZAP: &str = "\u{e1b4}";
 pub const WIND: &str = "\u{e1b0}";

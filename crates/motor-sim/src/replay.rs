@@ -36,6 +36,12 @@ const MAGIC: &[u8; 4] = b"MHR3";
 const MAGIC_V2: &[u8; 4] = b"MHR2";
 const MAGIC_V1: &[u8; 4] = b"MHR1";
 const FRAME_BYTES: usize = 18;
+/// `validate`'s limits (design choice): more cars than any race has, a frame longer than any hitch, a tick far above any
+/// display, a race longer than two hours.
+const MAX_CARS: usize = 16;
+const MAX_FRAME_S: f32 = 1.0;
+const MAX_TICK_HZ: f32 = 1000.0;
+const MAX_SECONDS: f64 = 7200.0;
 
 /// Everything needed to rebuild the race a recording belongs to.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +67,47 @@ pub struct Header {
     /// race time in ms once the player finished
     pub race_ms: Option<u32>,
     pub best_lap_ms: Option<u32>,
+}
+
+impl Header {
+    /// The header alone, from the start of a file (a listing needs only the first few KB; the frames are not
+    /// read or checked). #429's Lap Analysis lists race replays this way.
+    pub fn peek(d: &[u8]) -> Result<Header, String> {
+        Header::read(&mut Reader { d, o: 0 })
+    }
+
+    fn read(r: &mut Reader) -> Result<Header, String> {
+        let version = match r.take(4)? {
+            m if m == MAGIC => 3,
+            m if m == MAGIC_V2 => 2,
+            m if m == MAGIC_V1 => 1,
+            _ => return Err("not a Motorhead recording".into()),
+        };
+        let track = r.u32()?;
+        let laps = r.u32()?;
+        let flags = r.u8()?;
+        let (kind, value) = (r.u8()?, r.u8()?);
+        let row = match kind {
+            0 => AiRow::Difficulty(match value {
+                0 => Difficulty::Easy,
+                1 => Difficulty::Medium,
+                3 => Difficulty::Beginner,
+                _ => Difficulty::Hard,
+            }),
+            _ => AiRow::Division(value as u32),
+        };
+        let player = Some(r.u8()? as i8).filter(|&p| p >= 0).map(|p| p as usize);
+        let n = r.u8()? as usize;
+        let cars = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>, _>>()?;
+        let track_name = r.string()?;
+        let nick = r.string()?;
+        let car_name = r.string()?;
+        let drivers = if version >= 2 { (0..r.u8()?).map(|_| r.string()).collect::<Result<Vec<_>, _>>()? } else { Vec::new() };
+        let tick_hz = if version >= 3 { Some(r.f32()?).filter(|&h| h > 0.0) } else { None };
+        let race_ms = Some(r.u32()?).filter(|&t| t > 0);
+        let best_lap_ms = Some(r.u32()?).filter(|&t| t > 0);
+        Ok(Header { track, laps, catchup: flags & 1 != 0, manual: flags & 2 != 0, rules: if flags & 4 != 0 { Rules::Elimination } else { Rules::Normal }, row, player, cars, track_name, nick, car_name, drivers, tick_hz, race_ms, best_lap_ms })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -173,35 +220,7 @@ impl Recording {
 
     pub fn from_bytes(d: &[u8]) -> Result<Recording, String> {
         let mut r = Reader { d, o: 0 };
-        let version = match r.take(4)? {
-            m if m == MAGIC => 3,
-            m if m == MAGIC_V2 => 2,
-            m if m == MAGIC_V1 => 1,
-            _ => return Err("not a Motorhead recording".into()),
-        };
-        let track = r.u32()?;
-        let laps = r.u32()?;
-        let flags = r.u8()?;
-        let (kind, value) = (r.u8()?, r.u8()?);
-        let row = match kind {
-            0 => AiRow::Difficulty(match value {
-                0 => Difficulty::Easy,
-                1 => Difficulty::Medium,
-                3 => Difficulty::Beginner,
-                _ => Difficulty::Hard,
-            }),
-            _ => AiRow::Division(value as u32),
-        };
-        let player = Some(r.u8()? as i8).filter(|&p| p >= 0).map(|p| p as usize);
-        let n = r.u8()? as usize;
-        let cars = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>, _>>()?;
-        let track_name = r.string()?;
-        let nick = r.string()?;
-        let car_name = r.string()?;
-        let drivers = if version >= 2 { (0..r.u8()?).map(|_| r.string()).collect::<Result<Vec<_>, _>>()? } else { Vec::new() };
-        let tick_hz = if version >= 3 { Some(r.f32()?).filter(|&h| h > 0.0) } else { None };
-        let race_ms = Some(r.u32()?).filter(|&t| t > 0);
-        let best_lap_ms = Some(r.u32()?).filter(|&t| t > 0);
+        let header = Header::read(&mut r)?;
         let count = r.u32()? as usize;
         if r.d.len() - r.o != count * FRAME_BYTES {
             return Err("recording is truncated".into());
@@ -213,7 +232,6 @@ impl Recording {
             let input = Input { throttle, brake, steer, shift_up: bits & 1 != 0, shift_down: bits & 2 != 0, handbrake: bits & 4 != 0, hold: false };
             frames.push(Frame { dt, input, respawn: resp.checked_sub(1).map(|s| s as usize), skip: bits & 8 != 0, hand: (bits >> 4).checked_sub(1).map(|h| h as usize) });
         }
-        let header = Header { track, laps, catchup: flags & 1 != 0, manual: flags & 2 != 0, rules: if flags & 4 != 0 { Rules::Elimination } else { Rules::Normal }, row, player, cars, track_name, nick, car_name, drivers, tick_hz, race_ms, best_lap_ms };
         Ok(Recording { header, frames })
     }
 
@@ -251,6 +269,40 @@ impl Recording {
         }
         let lap_ms = race.racers[slot].progress.last_lap_ms.unwrap_or(0);
         Ok(GhostTrack { poses, lap_ms })
+    }
+
+    /// Whether the recording can be replayed safely: a damaged or crafted file could name a slot that is not in the race
+    /// (`Race::respawn` indexes it) or carry frames that are not numbers or would run for days. `from_bytes` reads such
+    /// files as they are; the Lap Analysis checks them before re-simulating (#429, design choice).
+    pub fn validate(&self) -> Result<(), String> {
+        let h = &self.header;
+        let n = h.cars.len();
+        if n == 0 || n > MAX_CARS {
+            return Err(format!("the recording has {n} cars"));
+        }
+        if h.player.is_some_and(|p| p >= n) {
+            return Err("the player's slot is not in the race".into());
+        }
+        if h.tick_hz.is_some_and(|hz| !(hz.is_finite() && hz <= MAX_TICK_HZ)) {
+            return Err("the physics tick is out of range".into());
+        }
+        let mut total = 0.0f64;
+        for f in &self.frames {
+            if !(f.dt.is_finite() && (0.0..=MAX_FRAME_S).contains(&f.dt)) {
+                return Err("a frame's length is out of range".into());
+            }
+            if ![f.input.throttle, f.input.brake, f.input.steer].iter().all(|v| v.is_finite()) {
+                return Err("a frame's input is not a number".into());
+            }
+            if f.respawn.is_some_and(|s| s >= n) || f.hand.is_some_and(|s| s >= n) {
+                return Err("a frame names a car that is not in the race".into());
+            }
+            total += f.dt as f64;
+        }
+        if total > MAX_SECONDS {
+            return Err("the recording is too long".into());
+        }
+        Ok(())
     }
 
     /// Length of the recording in seconds.
@@ -357,6 +409,11 @@ impl GhostTrack {
 
     pub fn load(path: &Path) -> Result<(GhostTrack, u32), String> {
         Self::from_bytes(&std::fs::read(path).map_err(|e| e.to_string())?)
+    }
+
+    /// The lap time of the first recorded pose (0 or a frame after it, by how the lap was saved).
+    pub fn start_ms(&self) -> f64 {
+        self.poses.first().map_or(0.0, |p| p.clock_ms)
     }
 
     /// The ghost at race clock `ms`, interpolated; `None` before the first and after the last frame.

@@ -91,6 +91,8 @@ pub struct ConstsPage {
     shader_due: bool,
     /// Rebuild shaders was pressed: the viewer calls `Gpu::rebuild_shaders` and passes the result to `rebuilt`
     pub shader_req: bool,
+    /// tune.cfg was written: the live values are what it holds now (`tune::Tune::cam_saved`, #434)
+    pub saved: bool,
 }
 
 impl ConstsPage {
@@ -199,7 +201,10 @@ impl ConstsPage {
         ui.horizontal_wrapped(|ui| {
             if ui.button(format!("{} Save tune.cfg", ic::SAVE)).on_hover_text("keep the live values that differ from the source (motorview and the game load them at start)").clicked() {
                 self.msg = Some(match save_overrides() {
-                    Ok(m) => (m, false),
+                    Ok(m) => {
+                        self.saved = true;
+                        (m, false)
+                    }
                     Err(e) => (e, true),
                 });
             }

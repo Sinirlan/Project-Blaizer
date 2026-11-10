@@ -6,7 +6,7 @@
 //! Faces are in car-local game space; the edits keep shared edges shared (new points go into
 //! every face along the cut edge), so the body stays welded.
 
-use super::body::Face;
+use super::body::{Face, weld_key};
 use glam::Vec3;
 
 /// Cut a corner off the faces of colour `from` at `corner` (game space, mirrored to -x too).
@@ -179,6 +179,20 @@ pub struct Push {
     pub by: [f32; 3],
 }
 
+/// REMASTER (#465): every face reaching into a box (x as |x|: both sides) cut by the plane
+/// `axis` (0 x, 1 y, 2 z) = `at` (for x: at +`at` and -`at`), the cut points put into every face
+/// along the cut edges, so the cage stays welded. A `Smooth` zone rounds or keeps a fold per
+/// cage edge, so a fold that is to stay a crease over part of its length and round over the
+/// rest (the ASC's scoop lips, running back to the rear arch) is cut where that changes, and
+/// each piece's box says which (`Smooth::max_degs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slice {
+    pub lo: [f32; 3],
+    pub hi: [f32; 3],
+    pub axis: usize,
+    pub at: f32,
+}
+
 /// Rebuild the faces lying wholly inside a box as a plate of even thickness: the upward faces
 /// (the skin) stay, the rest (the original's tapering walls) go, and the skin gets a copy
 /// `thickness` under it (each corner moved along the skin's normal, mitred at the creases),
@@ -276,6 +290,48 @@ pub fn push(faces: &mut [Face], pushes: &[Push]) {
     }
 }
 
+/// Apply the slices (before the pushes, so a pushed corner bends a face only up to the cut).
+pub fn slice(faces: &mut Vec<Face>, slices: &[Slice]) {
+    /// how close (m) a face must come to the box to count as reaching into it
+    const ON: f32 = 1e-5;
+    for s in slices {
+        let reaches = |f: &Face| {
+            let lo = |i: usize| f.pts.iter().map(|p| p[i]).fold(f32::MAX, f32::min);
+            let hi = |i: usize| f.pts.iter().map(|p| p[i]).fold(f32::MIN, f32::max);
+            let (x0, x1) = (lo(0), hi(0));
+            let (ax0, ax1) = if x0 < 0.0 && x1 > 0.0 { (0.0, x1.max(-x0)) } else { (x0.abs().min(x1.abs()), x0.abs().max(x1.abs())) };
+            ax1 > s.lo[0] + ON && ax0 < s.hi[0] - ON && (1..3).all(|i| hi(i) > s.lo[i] + ON && lo(i) < s.hi[i] - ON)
+        };
+        let planes: &[f32] = if s.axis == 0 { &[s.at, -s.at] } else { &[s.at] };
+        let mut made: Vec<[f32; 3]> = Vec::new();
+        let mut out = Vec::with_capacity(faces.len());
+        for f in faces.drain(..) {
+            if !reaches(&f) {
+                out.push(f);
+                continue;
+            }
+            let mut pieces = vec![f];
+            for &c in planes {
+                let mut next = Vec::new();
+                for g in pieces {
+                    for g in super::diffuser::convex_pieces(g) {
+                        match super::diffuser::split(&g, s.axis, c, &mut made) {
+                            Some((a, b)) => next.extend([a, b]),
+                            None => next.push(g),
+                        }
+                    }
+                }
+                pieces = next;
+            }
+            out.extend(pieces);
+        }
+        // the neighbours take the cut points on their edges
+        made.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])).then(a[2].total_cmp(&b[2])));
+        made.dedup_by(|a, b| weld_key(*a) == weld_key(*b));
+        *faces = out.iter().map(|f| super::diffuser::close_t(f, &made)).collect();
+    }
+}
+
 /// REMASTER (#388): a smooth bulge of the finished cage. Every point moves by `by` (m) times
 /// three weights, one per axis: `x` of |x| (the points on the other side move mirrored), `y` of
 /// y, `z` of z, each a table of `(coordinate, weight)` interpolated along a smooth curve with
@@ -324,6 +380,22 @@ fn table_weight(t: &[[f32; 2]], v: f32) -> f32 {
     let s = (v - a[0]) / h;
     let (s2, s3) = (s * s, s * s * s);
     (2.0 * s3 - 3.0 * s2 + 1.0) * a[1] + (s3 - 2.0 * s2 + s) * m0 + (3.0 * s2 - 2.0 * s3) * b[1] + (s3 - s2) * m1
+}
+
+/// Where `p` (game space) lands after the warps, applied in order like `warp`. The warp is a pure
+/// function of position, so the added parts built from the unwarped cage (lamp insides, vent
+/// slats, the lit strips, the halo anchors) follow the body through it (the Serpent's tail lamps
+/// sit in its rear bulge).
+pub fn warp_point(p: [f32; 3], warps: &[Warp]) -> [f32; 3] {
+    let mut p = p;
+    for w in warps {
+        let k = table_weight(&w.x, p[0].abs()) * table_weight(&w.y, p[1]) * table_weight(&w.z, p[2]);
+        if k != 0.0 {
+            let side = if p[0] < 0.0 { -1.0 } else { 1.0 };
+            p = [p[0] + w.by[0] * side * k, p[1] + w.by[1] * k, p[2] + w.by[2] * k];
+        }
+    }
+    p
 }
 
 /// Apply the warps; the moved faces get their plane normals again.
@@ -582,6 +654,24 @@ mod tests {
         let moved: Vec<[f32; 3]> = faces.iter().flat_map(|f| f.pts.iter().copied()).filter(|p| p[2] != 0.0).collect();
         assert!(moved.iter().all(|p| same(*p, [0.5, 0.0, -0.2]) || same(*p, [-0.5, 0.0, -0.2])), "{moved:?}");
         assert_eq!(moved.len(), 4);
+    }
+
+    /// two quads side by side along z, sliced across the first one: the plane cuts it in two, the
+    /// cut point goes into the neighbour's edge too (still welded), and a face out of the box stays
+    #[test]
+    fn slice_cuts_and_closes() {
+        let quad = |x0: f32, x1: f32, rgb: [u8; 3]| face(&[[x0, 0.5, -1.0], [x1, 0.5, -1.0], [x1, 0.5, 1.0], [x0, 0.5, 1.0]], rgb);
+        let mut faces = vec![quad(0.0, 1.0, [1, 1, 1]), quad(1.0, 2.0, [2, 2, 2]), quad(3.0, 4.0, [3, 3, 3])];
+        slice(&mut faces, &[Slice { lo: [0.0, 0.0, -2.0], hi: [1.0, 1.0, 2.0], axis: 2, at: 0.25 }]);
+        assert_eq!(faces.len(), 4);
+        assert_eq!(faces.iter().filter(|f| f.rgb == [1, 1, 1]).count(), 2);
+        // the neighbour got the cut point (1, 0.5, 0.25) on its edge
+        let nb = faces.iter().find(|f| f.rgb == [2, 2, 2]).unwrap();
+        assert_eq!(nb.pts.len(), 5);
+        assert!(nb.pts.iter().any(|p| (p[0] - 1.0).abs() < 1e-6 && (p[2] - 0.25).abs() < 1e-6));
+        assert_eq!(faces.iter().find(|f| f.rgb == [3, 3, 3]).unwrap().pts.len(), 4);
+        // both pieces of the cut quad end at the cut point too
+        assert!(faces.iter().filter(|f| f.rgb == [1, 1, 1]).all(|f| f.pts.iter().any(|p| (p[0] - 1.0).abs() < 1e-6 && (p[2] - 0.25).abs() < 1e-6)));
     }
 
     /// a tapering shell (sloped top, a tall back wall, a short front wall) becomes a slab of

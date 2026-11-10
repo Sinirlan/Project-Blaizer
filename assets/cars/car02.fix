@@ -1,0 +1,3 @@
+# car02 'Adder Mk2': hand fixes of the generated body (#292, tools/blender/motorhead_body.py)
+# frame: game car-local metres before the ride-height drop; at = where the point is, by = how far it moved
+# a fix moves the nearest generated point within 2 mm; '# stale' lines matched no point at the last import

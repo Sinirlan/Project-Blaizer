@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/motor-data", "crates/motorview", "crates/motor-sim", "crates/motor-audio", "crates/motor-tune", "crates/motorinstall", "crates/motor-version"]
 
 [workspace.package]
-version = "0.9.1-alpha"
+version = "0.9.2"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 

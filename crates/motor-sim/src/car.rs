@@ -230,7 +230,8 @@ pub struct Input {
 }
 
 /// Digital (keyboard) steering as the game builds it each frame (0x45bf34 / 0x45bfd6):
-/// a fresh press gives half lock; holding ramps by 0.6/s towards full lock; release is 0.
+/// a fresh press gives half lock; holding ramps by 0.6/s towards full lock; release is 0. Both keys held
+/// steer right (the original's TurnRight query overwrites TurnLeft's).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SteerKeys {
     value: f32,
@@ -253,9 +254,11 @@ impl SteerKeys {
     pub fn update(&mut self, left: bool, right: bool, dt: f32) -> f32 {
         let prev = self.value;
         let (half, held, ramp) = (STEER_HALF.get(), STEER_HELD.get(), STEER_RAMP.get());
+        // CLASSIC 0x45a79a..0x45a7ef: TurnRight's query runs after TurnLeft's and overwrites its value at
+        // 0x714721, so with both keys held the right key wins (#415) [O static].
         self.value = match (left, right) {
-            (false, true) if prev > held => (prev + dt * ramp).min(1.0),
-            (false, true) => half,
+            (_, true) if prev > held => (prev + dt * ramp).min(1.0),
+            (_, true) => half,
             (true, false) if prev < -held => (prev - dt * ramp).max(-1.0),
             (true, false) => -half,
             _ => 0.0,
@@ -752,6 +755,15 @@ impl Car {
         (self.pos, self.rot, self.vel, self.ang) = (pos, rot, vel, ang);
         (self.prev_vel, self.prev_ang) = prev.unwrap_or((vel, ang));
         self.start = Pose { pos, rot, scale: Vec3::ONE };
+    }
+
+    /// Set the pose to one of the original's (a trace row of `origreplay`, a snapshot pair of
+    /// motorview `--car-states`, #275): `model` = the model origin (the matrix position, `ride
+    /// height` above the body origin along the up axis), `rot` columns = the matrix rows X, Y, Z
+    /// (right, up, forward), then as `set_state`.
+    pub fn set_traced_pose(&mut self, model: Vec3, rot: Mat3, vel: Vec3, ang: Vec3, prev: Option<(Vec3, Vec3)>) {
+        let ride = self.p.ride_height();
+        self.set_state(model - rot * Vec3::new(0.0, ride, 0.0), rot, vel, ang, prev);
     }
 
     /// Set the engine and gearbox to a recorded state (`origreplay`, #271): the manual flag P[0xe],
@@ -1529,6 +1541,24 @@ fn orthonormalize(m: Mat3) -> Mat3 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// 0x45a79a..0x45a7ef: both steering keys held is the right key alone (#415).
+    #[test]
+    fn steer_keys_both_held_is_right() {
+        let dt = 0.02;
+        let mut k = SteerKeys::default();
+        assert_eq!(k.update(true, true, dt), STEER_HALF.get());
+        let ramped = k.update(true, true, dt);
+        assert!((ramped - (STEER_HALF.get() + dt * STEER_RAMP.get())).abs() < 1e-6);
+        // right alone then both: the ramp continues
+        assert!(k.update(false, true, dt) > ramped);
+        assert!(k.update(true, true, dt) > ramped);
+        // left then both: a fresh right press
+        let mut k = SteerKeys::default();
+        assert!(k.update(true, false, dt) < 0.0);
+        assert_eq!(k.update(true, true, dt), STEER_HALF.get());
+        assert_eq!(k.update(false, false, dt), 0.0);
+    }
 
     fn hit(impulse: f32, metric: f32, point: usize) -> WorldHit {
         WorldHit { impulse, material: 0, metric, point }

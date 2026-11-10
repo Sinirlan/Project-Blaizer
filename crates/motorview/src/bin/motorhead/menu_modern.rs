@@ -42,6 +42,12 @@ mod league_load;
 mod league_table;
 #[path = "menu_modern/replays.rs"]
 pub(crate) mod replays;
+// REMASTER Lap Analysis (#429): the screen and its model
+#[path = "menu_modern/analysis.rs"]
+mod analysis;
+#[path = "menu_modern/analysis_data.rs"]
+mod analysis_data;
+pub(crate) use analysis_data::{Analysis, Want};
 #[path = "menu_modern/rankings.rs"]
 mod rankings;
 #[path = "menu_modern/sound_device.rs"]
@@ -456,6 +462,10 @@ impl Game {
             (Device::PlayStation, 10) => ('\u{21A1}', CYAN_G),
             (Device::Xbox, 8) => ('\u{21FB}', CYAN_G),
             (Device::PlayStation, 8) => ('\u{21E8}', CYAN_G),
+            // kind 17: the Ghost screen's ANALYSE (#429): the F cap, the pad's Y / triangle (it arrives as F5)
+            (Device::Keyboard, 17) => ('\u{FF26}', CYAN_G),
+            (Device::Xbox, 17) => ('\u{21D1}', YELLOW),
+            (Device::PlayStation, 17) => ('\u{21E1}', [0.4, 0.85, 0.6, 1.0]),
             (Device::Keyboard, _) => ('\u{FF32}', CYAN_G),
             (Device::Xbox, 0) => ('\u{227A}', CYAN_G),
             (Device::Xbox, 1) => ('\u{227C}', CYAN_G),
@@ -639,7 +649,7 @@ impl Game {
                 Self::frost(&mut m, rect, 10.0, px);
                 b.mesh(&m);
                 // headings (end with ':') in orange, the names lit; the original's 0x99 is an o-umlaut, missing in the Label face: plain o
-                let lines: Vec<&String> = g.credits.iter().collect();
+                let lines: Vec<&String> = g.credits_page().iter().collect();
                 let head = FontStyle::new(11.0, ORANGE_HI).tracking(1.0);
                 let name = FontStyle::new(9.5, LABEL_SEL).tracking(0.5);
                 let gap = 10.0;
@@ -2464,7 +2474,7 @@ mod tests {
     #[test]
     fn glyphs_in_atlas() {
         let devs = [Device::Keyboard, Device::Xbox, Device::PlayStation];
-        let mut want: Vec<char> = devs.iter().flat_map(|&d| (0..16).map(move |k| Game::glyph_for(d, k).0)).collect();
+        let mut want: Vec<char> = devs.iter().flat_map(|&d| (0..18).map(move |k| Game::glyph_for(d, k).0)).collect();
         for d in devs {
             for (_, p) in crate::controls::PAD_NAMES {
                 want.push(pad_glyph(p, d).0);

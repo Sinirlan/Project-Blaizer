@@ -192,6 +192,12 @@ impl Props {
 }
 
 impl Prop {
+    /// Whether the original samples the centreline tint for this object every frame (`0x455ef8` ->
+    /// `0x425ae0`): a rigid body without a motion (a motion lost on a hit counts as none) [O].
+    pub fn samples_tint(&self) -> bool {
+        matches!(self.kind, Kind::Body { .. }) && (self.motion.is_none() || self.lost)
+    }
+
     /// Body-frame velocity and angular velocity of a body (rad/s; zero for scenery and sleepers).
     pub fn velocity(&self) -> (Vec3, Vec3) {
         (self.dynamics.vel, self.dynamics.ang)

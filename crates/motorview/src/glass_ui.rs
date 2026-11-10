@@ -102,7 +102,7 @@ fn galley(ui: &Ui, s: impl ToString, font: FontId, color: Color32) -> Arc<Galley
 }
 
 /// `rgba(143,208,255,a)`: sector-1 at alpha `a` (lit fills, rims).
-fn s1(a: f32) -> Color32 {
+pub fn s1(a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(143, 208, 255, (a * 255.0 + 0.5) as u8)
 }
 
@@ -155,28 +155,60 @@ pub fn tool(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> Response {
     tool_styled(ui, icon, caption, on, false)
 }
 
+/// A tool that is set but not shown ("set, not shown": a Remaster option while Classic is drawn, #432): on = a dashed
+/// outline and dim ink instead of the lit fill, off = as `tool`.
+pub fn tool_muted(ui: &mut Ui, icon: &str, caption: &str, on: bool) -> Response {
+    tool_look(ui, icon, caption, on, false, true)
+}
+
 /// A tool of the World palette: armed = orange (`.tool.armed`).
 pub fn tool_styled(ui: &mut Ui, icon: &str, caption: &str, on: bool, armed: bool) -> Response {
+    tool_look(ui, icon, caption, on, armed, false)
+}
+
+fn tool_look(ui: &mut Ui, icon: &str, caption: &str, on: bool, armed: bool, muted: bool) -> Response {
     let cap = galley(ui, caption, FontId::proportional(11.0), Color32::PLACEHOLDER);
     let w = (cap.size().x + 10.0).max(TOOL_W);
     let (rect, r) = ui.allocate_exact_size(Vec2::new(w, TOOL_H), Sense::click());
     let hot = r.hovered() || r.is_pointer_button_down_on();
     let (fill, rim) = match (armed, on, hot) {
         (true, _, _) => (theme::ORANGE.gamma_multiply(0.08), theme::ORANGE),
+        (_, true, _) if muted => (theme::white(if hot { 0.05 } else { 0.0 }), theme::line(0.3)),
         (_, true, _) => (s1(if hot { 0.2 } else { 0.14 }), s1(0.75)),
         (_, _, true) => (theme::white(0.05), theme::line(0.32)),
         _ => (Color32::TRANSPARENT, Color32::TRANSPARENT),
     };
     let (text, icon_ink) = match (armed, on) {
         (true, _) => (theme::ORANGE, theme::ORANGE),
+        (_, true) if muted => (theme::DIM, theme::DIM.gamma_multiply(0.75)),
         (_, true) => (theme::NAME, theme::S1),
         _ => (theme::TEXT, theme::TEXT),
     };
-    ui.painter().rect(rect, theme::RADIUS_TOOL, fill, Stroke::new(1.0, rim), StrokeKind::Inside);
+    if muted && on && !armed {
+        // dashed rim (egui has no dashed rect stroke: the four sides as dashes)
+        ui.painter().rect_filled(rect, theme::RADIUS_TOOL, fill);
+        let pts = [rect.left_top(), rect.right_top(), rect.right_bottom(), rect.left_bottom(), rect.left_top()];
+        ui.painter().extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, rim), 4.0, 3.0));
+    } else {
+        ui.painter().rect(rect, theme::RADIUS_TOOL, fill, Stroke::new(1.0, rim), StrokeKind::Inside);
+    }
     // icon 20 over caption 11, a 6 gap, centred: 8.5 from the top
     ui.painter().text(Pos2::new(rect.center().x, rect.top() + 18.5), Align2::CENTER_CENTER, icon, FontId::proportional(20.0), ink(ui, icon_ink));
     ui.painter().galley(Pos2::new(rect.center().x - cap.size().x / 2.0, rect.top() + 34.5), cap, ink(ui, text));
     r
+}
+
+/// The body of the Remaster tab's leading "Classic view" group (#432): two dim lines saying the settings after it are
+/// not drawn in Classic, and a Switch tool (`key` in its caption). True when Switch was clicked.
+pub fn classic_note(ui: &mut Ui, key: &str) -> bool {
+    ui.spacing_mut().item_spacing.x = 8.0;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.add_space(8.0);
+        ui.label(RichText::new("Set here, not shown").size(12.0).color(theme::ORANGE_TEXT));
+        ui.label(RichText::new("in Classic").size(12.0).color(theme::DIM));
+    });
+    tool(ui, crate::icons::SPARKLES, &format!("Switch ({key})"), false).on_hover_text("show Remaster").clicked()
 }
 
 /// A value tile (`.vtile`): the caption over its value, a chevron for a choice, a meter for a slider. `open` = its
@@ -339,6 +371,12 @@ pub fn timeline(ui: &mut Ui, span: (f64, f64, f64), left: &str, tag: &str) -> Op
     ui.painter().galley(Pos2::new(rect.left() + 12.0, rect.top() + 9.0), l, Color32::PLACEHOLDER);
     ui.painter().galley(Pos2::new(rect.right() - 12.0 - t.size().x, rect.top() + 10.0), t, Color32::PLACEHOLDER);
     let bar = Rect::from_min_size(Pos2::new(rect.left() + 12.0, rect.top() + 9.0 + 12.0 + 8.0), Vec2::new(rect.width() - 24.0, 6.0));
+    scrub_bar(ui, bar, span)
+}
+
+/// The bar of a timeline: the run's span lit up to "now", an orange handle; a click or drag returns the time under
+/// the pointer. Shared by the shelf tile (`timeline`) and the transport strip (`timeline_strip`).
+fn scrub_bar(ui: &mut Ui, bar: Rect, span: (f64, f64, f64)) -> Option<f64> {
     let (start, now, end) = span;
     let f = if end > start { ((now - start) / (end - start)).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let p = ui.painter();
@@ -354,6 +392,24 @@ pub fn timeline(ui: &mut Ui, span: (f64, f64, f64), left: &str, tag: &str) -> Op
     }
     let k = ((hit.interact_pointer_pos()?.x - bar.left()) / bar.width()).clamp(0.0, 1.0) as f64;
     Some(start + (end - start) * k)
+}
+
+/// The timeline in one row, for the transport strip (#435): the clock `left` in mono, the bar filling the room
+/// between it and the dim `tag`. Same bar and hit logic as `timeline`.
+pub fn timeline_strip(ui: &mut Ui, span: (f64, f64, f64), left: &str, tag: &str) -> Option<f64> {
+    let l = galley(ui, left, FontId::monospace(12.0), theme::WHITE);
+    let t = galley(ui, tag.to_uppercase(), FontId::proportional(10.0), theme::DIM);
+    let room = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(room.max(120.0), 22.0), Sense::hover());
+    let mid = rect.center().y;
+    ui.painter().galley(Pos2::new(rect.left(), mid - l.size().y / 2.0), l.clone(), Color32::PLACEHOLDER);
+    ui.painter().galley(Pos2::new(rect.right() - t.size().x, mid - t.size().y / 2.0), t.clone(), Color32::PLACEHOLDER);
+    let x0 = rect.left() + l.size().x + 14.0;
+    let x1 = rect.right() - t.size().x - 14.0;
+    if x1 - x0 < 40.0 {
+        return None;
+    }
+    scrub_bar(ui, Rect::from_min_max(Pos2::new(x0, mid - 3.0), Pos2::new(x1, mid + 3.0)), span)
 }
 /// The track / car dropdown of the top bar (`.pick`): icon, the current number and name, a ▾. A click opens the
 /// list of every entry under the box (`row_item` rows, the current one marked) and a row returns its index; the
@@ -387,16 +443,154 @@ pub fn dropdown(ui: &mut Ui, icon: &str, names: &[&str], sel: usize, digits: usi
     let chev = if lit { theme::ORANGE } else { theme::DIM };
     ui.painter().text(Pos2::new(rect.right() - 10.0 - 7.0, cy), Align2::CENTER_CENTER, crate::icons::CHEVRON_DOWN, FontId::proportional(14.0), chev);
 
+    pick_list(ui, &resp, names, sel, ListOpts { digits: Some(digits), hold: open, width: Some(rect.width()), ..ListOpts::default() })
+}
+
+/// Choices with this many options or more are a dropdown, not a ◀ value ▶ stepper or a row of buttons (the motorview
+/// rule, #431; `re-notes/15-motorview-overhaul.md` "UI rules"). Fewer may stay a stepper or a segmented row.
+pub const DROPDOWN_MIN: usize = 5;
+/// A list with more entries than this gets a filter field.
+const FILTER_MIN: usize = 12;
+/// The most rows a list shows before it scrolls: a list that gets no filter field fits whole.
+const LIST_ROWS: f32 = FILTER_MIN as f32;
+
+/// How `pick_list` behaves.
+#[derive(Clone, Default)]
+pub struct ListOpts {
+    /// number the entries (`01  Name`), padded to this many digits
+    pub digits: Option<usize>,
+    /// the wheel over the closed box steps to the next / previous entry
+    pub wheel: bool,
+    /// hold the list open (a headless shot: `--ribbon-pick`)
+    pub hold: bool,
+    /// the list's width (default: the box's, at least 180)
+    pub width: Option<f32>,
+}
+
+/// The name of the choice a headless shot holds open (`--ribbon-pick NAME`), for the boxes that look at it.
+pub fn set_held(ctx: &Context, name: &str) {
+    ctx.data_mut(|d| d.insert_temp(Id::unique("glass_ui::held"), name.to_string()));
+}
+
+/// The shot holds the choice `name` (any of `names`, case-blind) open.
+pub fn is_held(ctx: &Context, names: &[&str]) -> bool {
+    ctx.data(|d| d.get_temp::<String>(Id::unique("glass_ui::held"))).is_some_and(|h| names.iter().any(|n| h.eq_ignore_ascii_case(n)))
+}
+
+fn list_open_id(anchor: &Response) -> Id {
+    egui::Popup::default_response_id(anchor)
+}
+
+/// The option list of a dropdown box `anchor` (a click-sensing response): opened by a click on the box, `row_item` rows
+/// under it with the current entry marked and scrolled to, a filter field on top for a long list (Enter picks the first
+/// match), closed by a pick, a press outside or Esc. Returns the picked entry's index (picking the current one does
+/// nothing), also when the wheel stepped it (`ListOpts::wheel`, wheel down = next).
+pub fn pick_list(ui: &mut Ui, anchor: &Response, names: &[&str], sel: usize, o: ListOpts) -> Option<usize> {
+    let sel = sel.min(names.len().saturating_sub(1));
+    let ctx = ui.ctx().clone();
+    let popup_id = list_open_id(anchor);
+    if o.hold {
+        egui::Popup::open_id(&ctx, popup_id);
+    }
     let mut picked = None;
-    egui::Popup::menu(&resp).width(rect.width()).show(|ui| {
+    if o.wheel && !egui::Popup::is_id_open(&ctx, popup_id) {
+        let n = crate::gui::wheel_notches(ui, anchor);
+        if n != 0 && !names.is_empty() {
+            picked = Some((sel as i32 + n).clamp(0, names.len() as i32 - 1) as usize);
+        }
+    }
+    let (seen_id, filter_id) = (popup_id.with("seen"), popup_id.with("filter"));
+    let w = o.width.unwrap_or_else(|| anchor.rect.width().max(180.0));
+    egui::Popup::menu(anchor).width(w).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
-        for (i, name) in names.iter().enumerate() {
-            if row_item(ui, "", &format!("{:0digits$}  {name}", i + 1), i == sel) {
-                picked = Some(i);
+        ui.set_min_width(w);
+        let first = !ctx.data(|d| d.get_temp::<bool>(seen_id)).unwrap_or(false);
+        ctx.data_mut(|d| d.insert_temp(seen_id, true));
+        let mut text = ctx.data(|d| d.get_temp::<String>(filter_id)).unwrap_or_default();
+        if names.len() > FILTER_MIN {
+            let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("filter").desired_width(f32::INFINITY));
+            if first {
+                r.request_focus();
             }
         }
+        let needle = text.trim().to_lowercase();
+        let shown: Vec<usize> = (0..names.len()).filter(|&i| needle.is_empty() || names[i].to_lowercase().contains(&needle)).collect();
+        if !needle.is_empty() && shown.is_empty() {
+            ui.label(RichText::new("no match").size(13.0).color(theme::DIM));
+        }
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        egui::ScrollArea::vertical().max_height((ROW_H + 2.0) * LIST_ROWS).auto_shrink([false, true]).show(ui, |ui| {
+            for &i in &shown {
+                let label = match o.digits {
+                    Some(d) => format!("{:0d$}  {}", i + 1, names[i]),
+                    None => names[i].to_string(),
+                };
+                let r = row_item_r(ui, "", &label, i == sel);
+                if first && i == sel {
+                    r.scroll_to_me(Some(egui::Align::Center));
+                }
+                if r.clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+        if enter && picked.is_none() {
+            picked = shown.first().copied();
+        }
+        if picked.is_some() {
+            egui::Popup::close_id(&ctx, popup_id);
+        }
+        ctx.data_mut(|d| d.insert_temp(filter_id, text));
     });
+    if !egui::Popup::is_id_open(&ctx, popup_id) {
+        ctx.data_mut(|d| {
+            d.remove::<bool>(seen_id);
+            d.remove::<String>(filter_id);
+        });
+    }
     picked.filter(|&i| i != sel)
+}
+
+/// Whether the list of the box `anchor` is open (the box draws its orange rim).
+pub fn list_is_open(ctx: &Context, anchor: &Response) -> bool {
+    egui::Popup::is_id_open(ctx, list_open_id(anchor))
+}
+
+/// The orange rim and glow of an open value tile, drawn over it after its list opened.
+pub fn tile_open_rim(ui: &Ui, rect: Rect) {
+    ui.painter().add(Shadow { offset: [0, 0], blur: 14, spread: 0, color: theme::ORANGE.gamma_multiply(0.35) }.as_shape(rect, theme::RADIUS_TOOL));
+    ui.painter().rect_stroke(rect, theme::RADIUS_TOOL, Stroke::new(1.0, theme::ORANGE), StrokeKind::Inside);
+}
+
+/// The dropdown box in `resp`'s rect: the shown text on the left, a ▾ on the right, then its list (`pick_list`).
+fn pick_box(ui: &mut Ui, resp: &Response, shown: &str, names: &[&str], sel: usize, o: ListOpts) -> Option<usize> {
+    let rect = resp.rect;
+    let lit = resp.hovered() || list_is_open(ui.ctx(), resp);
+    let rim = if lit { Stroke::new(1.0, theme::ORANGE) } else { Stroke::new(1.0, theme::line(0.16)) };
+    ui.painter().rect(rect, theme::RADIUS_TOOL, Color32::from_rgba_unmultiplied(2, 8, 18, 89), rim, StrokeKind::Inside);
+    let cy = rect.center().y;
+    let g = galley(ui, shown, theme::glass_font(15.0), ink(ui, theme::WHITE));
+    let clip = Rect::from_min_max(Pos2::new(rect.left() + 10.0, rect.top()), Pos2::new(rect.right() - 28.0, rect.bottom()));
+    ui.painter().with_clip_rect(clip).galley(Pos2::new(clip.left(), cy - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+    ui.painter().text(Pos2::new(rect.right() - 14.0, cy), Align2::CENTER_CENTER, crate::icons::CHEVRON_DOWN, FontId::proportional(13.0), if lit { theme::ORANGE } else { theme::DIM });
+    pick_list(ui, resp, names, sel, o)
+}
+
+/// A dropdown choice row of the flyout: the value in a box with a ▾ on the right (the `row_choice` of 5 or more
+/// options). The picked index.
+pub fn row_pick(ui: &mut Ui, icon: &str, name: &str, key: &str, names: &[&str], sel: usize, o: ListOpts) -> Option<usize> {
+    let sel = sel.min(names.len().saturating_sub(1));
+    let (_, ctl, r) = row_shell(ui, icon, name, key, Sense::hover(), 190.0);
+    let resp = ui.interact(Rect::from_center_size(ctl.center(), Vec2::new(ctl.width(), 28.0)), r.id.with("pick"), Sense::click());
+    pick_box(ui, &resp, names.get(sel).copied().unwrap_or(""), names, sel, o)
+}
+
+/// A dropdown box `w` wide (30 tall) for a long list (the World editor's texture pickers): the list has a filter field
+/// and the wheel steps. `held` = its name for `--ribbon-pick`. The picked index.
+pub fn choice_dropdown(ui: &mut Ui, w: f32, held: &str, names: &[&str], sel: usize) -> Option<usize> {
+    let sel = sel.min(names.len().saturating_sub(1));
+    let (_, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click());
+    pick_box(ui, &resp, names.get(sel).copied().unwrap_or(""), names, sel, ListOpts { wheel: true, hold: is_held(ui.ctx(), &[held]), width: Some(w.max(220.0)), ..ListOpts::default() })
 }
 
 /// What a shelf group's caption row asked for.
@@ -506,7 +700,8 @@ pub fn flyout(ctx: &Context, group: Rect, top: f32, title: &str, icon: &str, pag
 
 /// A settings row's frame: the label (icon, name, key cap) on the left, the control's rect on the right.
 fn row_shell(ui: &mut Ui, icon: &str, name: &str, key: &str, sense: Sense, ctl_w: f32) -> (Rect, Rect, Response) {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), sense);
+    harvest_row(name, key);
+    let (rect, r)= ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), sense);
     let hot = r.hovered() && ui.is_enabled();
     if hot {
         ui.painter().rect(rect, theme::RADIUS_TOOL, theme::ORANGE.gamma_multiply(0.05), Stroke::new(1.0, theme::ORANGE), StrokeKind::Inside);
@@ -545,6 +740,8 @@ pub fn row_check(ui: &mut Ui, icon: &str, name: &str, key: &str, on: bool) -> bo
 
 /// An action row: its key cap and a play mark on the right. True when clicked.
 pub fn row_action(ui: &mut Ui, icon: &str, name: &str, key: &str) -> bool {
+    // the key cap is drawn on the right, not by `row_shell`: a harvest takes the first record of a row
+    harvest_row(name, key);
     let (rect, ctl, r) = row_shell(ui, icon, name, "", Sense::click(), 120.0);
     let cy = rect.center().y;
     ui.painter().text(Pos2::new(ctl.right() - 6.0, cy), Align2::CENTER_CENTER, crate::icons::FORWARD, FontId::proportional(11.0), ink(ui, theme::DIM));
@@ -585,11 +782,47 @@ pub fn row_ctl(ui: &mut Ui, icon: &str, name: &str, key: &str, ctl_w: f32, edit:
 
 /// A list entry row (`lit` = the current one, blue). True when clicked.
 pub fn row_item(ui: &mut Ui, icon: &str, name: &str, lit: bool) -> bool {
+    row_item_r(ui, icon, name, lit).clicked()
+}
+
+/// A row of motorview's command search (#436): icon, name, the dim `hint` after it, the key cap on the right. `sel` =
+/// the row the arrows picked (the orange rim, as hovered), `dim` = it does not run now.
+pub fn cmd_row(ui: &mut Ui, icon: &str, name: &str, hint: &str, key: &str, sel: bool, dim: bool) -> Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_H), Sense::click());
+    let p = ui.painter();
+    let hot = sel || r.hovered();
+    if hot {
+        p.rect(rect, theme::RADIUS_TOOL, theme::ORANGE.gamma_multiply(0.05), Stroke::new(1.0, if sel { theme::ORANGE } else { theme::line(0.3) }), StrokeKind::Inside);
+    }
+    let fade = |c: Color32| if dim { c.gamma_multiply(0.5) } else { c };
+    let (label, glyph) = if sel { (theme::ORANGE, theme::ORANGE) } else { (theme::TEXT, theme::DIM) };
+    let cy = rect.center().y;
+    p.text(Pos2::new(rect.left() + 20.0, cy), Align2::CENTER_CENTER, icon, FontId::proportional(15.0), fade(glyph));
+    let x = rect.left() + 37.0;
+    let mut right = rect.right() - 10.0;
+    if !key.is_empty() {
+        let kg = galley(ui, key, theme::glass_font(11.0), theme::DIM);
+        let w = (kg.size().x + 10.0).max(18.0);
+        kcap_at(ui, Rect::from_min_size(Pos2::new(right - w, cy - 9.0), Vec2::new(w, 18.0)), kg, true);
+        right -= w + 10.0;
+    }
+    let g = galley(ui, name, theme::glass_font(15.0), fade(label));
+    let p = ui.painter().with_clip_rect(Rect::from_min_max(rect.min, Pos2::new(right, rect.bottom())));
+    p.galley(Pos2::new(x, cy - g.size().y / 2.0), g.clone(), Color32::PLACEHOLDER);
+    if !hint.is_empty() {
+        let hg = galley(ui, hint, FontId::proportional(12.0), fade(theme::DIM));
+        p.galley(Pos2::new(x + g.size().x + 10.0, cy - hg.size().y / 2.0), hg, Color32::PLACEHOLDER);
+    }
+    r
+}
+
+/// `row_item`, returning the row's response.
+pub fn row_item_r(ui: &mut Ui, icon: &str, name: &str, lit: bool) -> Response {
     let (rect, ctl, r) = row_shell(ui, icon, name, "", Sense::click(), 20.0);
     if lit {
         ui.painter().circle_filled(Pos2::new(ctl.right() - 6.0, rect.center().y), 4.0, theme::S1);
     }
-    r.clicked()
+    r
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -639,8 +872,67 @@ pub fn section_matched(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp(sect_hit_id()).unwrap_or(false))
 }
 
-/// A row labelled `label` passes the property search (no search, its section matched, or the label matches).
+/// A row or section seen by a harvest pass (motorview's command search, #436): `section` = the title of the section
+/// it is drawn in ("" = none), `label` = the row's label ("" = the section itself), `key` = its key cap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Harvested {
+    pub section: String,
+    pub label: String,
+    pub key: String,
+}
+
+thread_local! {
+    /// the harvest running (`harvest_begin`): the section being drawn and what was seen
+    static HARVEST: std::cell::RefCell<Option<(String, Vec<Harvested>)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Start recording the sections and rows drawn from now (`harvest_take` ends it). While it runs, a property row
+/// (`prow`) is recorded and not drawn, a settings row (`row_shell`) is recorded and drawn, and a dock section
+/// (`tune::section_counted`) records its title and runs its body unseen.
+pub fn harvest_begin() {
+    HARVEST.with(|h| *h.borrow_mut() = Some((String::new(), Vec::new())));
+}
+
+/// End the harvest: what it saw, in drawing order.
+pub fn harvest_take() -> Vec<Harvested> {
+    HARVEST.with(|h| h.borrow_mut().take()).map(|(_, v)| v).unwrap_or_default()
+}
+
+pub fn harvesting() -> bool {
+    HARVEST.with(|h| h.borrow().is_some())
+}
+
+/// The harvest enters the section `title` ("" = leaves it): records it.
+pub fn harvest_section(title: &str) {
+    HARVEST.with(|h| {
+        if let Some((cur, v)) = h.borrow_mut().as_mut() {
+            title.clone_into(cur);
+            if !title.is_empty() {
+                v.push(Harvested { section: title.to_string(), label: String::new(), key: String::new() });
+            }
+        }
+    });
+}
+
+/// Record a row while a harvest runs; true when one runs.
+fn harvest_row(label: &str, key: &str) -> bool {
+    HARVEST.with(|h| match h.borrow_mut().as_mut() {
+        Some((cur, v)) => {
+            if !label.is_empty() {
+                v.push(Harvested { section: cur.clone(), label: label.to_string(), key: key.to_string() });
+            }
+            true
+        }
+        None => false,
+    })
+}
+
+/// A row labelled `label` passes the property search (no search, its section matched, or the label matches). While a
+/// harvest runs the row is recorded and not shown.
 pub fn row_shown(ctx: &Context, label: &str) -> bool {
+    if harvest_row(label, "") {
+        return false;
+    }
     let f = filter(ctx);
     f.is_empty() || ctx.data(|d| d.get_temp(sect_hit_id()).unwrap_or(false)) || label.to_lowercase().contains(&f)
 }
@@ -682,8 +974,9 @@ fn head_tool(ui: &mut Ui, icon: &str, tip: &str) -> Response {
 }
 
 /// The dock header (`.insp-head`): the page icon (24), its name (Rajdhani Bold 22), a caption under it, and the
-/// reset / close tools. Returns (reset page, close).
-pub fn dock_header(ui: &mut Ui, icon: &str, name: &str, sub: &str) -> (bool, bool) {
+/// reset / close tools. `warn` tints the caption orange (a page whose settings are not drawn now, #432). Returns (reset
+/// page, close).
+pub fn dock_header(ui: &mut Ui, icon: &str, name: &str, sub: &str, warn: bool) -> (bool, bool) {
     let (mut reset, mut close) = (false, false);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = Vec2::new(12.0, 0.0);
@@ -693,7 +986,7 @@ pub fn dock_header(ui: &mut Ui, icon: &str, name: &str, sub: &str) -> (bool, boo
             ui.spacing_mut().item_spacing.y = 3.0;
             ui.label(RichText::new(name.to_uppercase()).font(theme::glass_font(22.0)).color(theme::WHITE));
             if !sub.is_empty() {
-                ui.label(RichText::new(sub.to_uppercase()).size(11.0).color(theme::DIM));
+                ui.label(RichText::new(sub.to_uppercase()).size(11.0).color(if warn { theme::ORANGE_TEXT } else { theme::DIM }));
             }
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -825,18 +1118,54 @@ pub fn label_room(ui: &Ui, ctl_w: f32) -> f32 {
     ui.available_width() - 28.0 - 6.0 - ctl_w - 8.0
 }
 
-/// A property row (`.prow`, 28 tall): the label on the left with the orange "changed from the file" dot before it,
-/// the control right-aligned, then the `unit` column (None = no unit column, as the swatch rows). A row the search
-/// text does not match is not drawn.
-pub fn prow(ui: &mut Ui, label: &str, modified: bool, unit: Option<&str>, ctl: impl FnOnce(&mut Ui)) {
-    let shown = row_shown(ui.ctx(), label);
-    ui.ctx().data_mut(|d| {
+/// A row labelled `label` is about to be drawn: true when the search lets it show. A shown row is counted for its
+/// section (`rows_drawn`) and remembered for `prow_cont`.
+pub fn row_counted(ctx: &Context, label: &str) -> bool {
+    let shown = row_shown(ctx, label);
+    ctx.data_mut(|d| {
         d.insert_temp(last_row_id(), shown);
         if shown {
             *d.get_temp_mut_or_insert_with(rows_id(), || 0usize) += 1;
         }
     });
-    if !shown {
+    shown
+}
+
+/// A row of an egui `Grid` (the Cine page's rows): the label, `ctl`, then `end_row`, drawn only when the search lets
+/// the row show, so the grid stays aligned.
+pub fn grid_row(ui: &mut Ui, label: &str, ctl: impl FnOnce(&mut Ui)) {
+    if row_counted(ui.ctx(), label) {
+        ui.label(label);
+        ctl(ui);
+        ui.end_row();
+    }
+}
+
+/// Content that is not a row (notes, lists, buttons) shows when there is no search or its section's own name matched.
+/// While a harvest runs it is hidden, like a row.
+pub fn unfiltered(ctx: &Context) -> bool {
+    !harvesting() && (filter(ctx).is_empty() || section_matched(ctx))
+}
+
+/// A property row (`.prow`, 28 tall): the label on the left with the orange "changed from the file" dot before it,
+/// the control right-aligned, then the `unit` column (None = no unit column, as the swatch rows). A row the search
+/// text does not match is not drawn.
+pub fn prow(ui: &mut Ui, label: &str, modified: bool, unit: Option<&str>, ctl: impl FnOnce(&mut Ui)) {
+    prow_at(ui, label, modified, unit, false, ctl);
+}
+
+/// A property row whose value is a line of text (`.prow` with a dim, truncated value): the text gets only the room
+/// right of the label, the full text is the hover.
+pub fn text_prow(ui: &mut Ui, label: &str, text: &str) {
+    prow_at(ui, label, false, None, true, |ui| {
+        ui.add(egui::Label::new(egui::RichText::new(text).color(theme::DIM)).truncate()).on_hover_text(text);
+    });
+}
+
+/// `prow`; with `after_label` the controls get the room right of the label only (for controls that fill what they
+/// are given, such as a truncating label), else the whole row (a wide control then draws over the label).
+fn prow_at(ui: &mut Ui, label: &str, modified: bool, unit: Option<&str>, after_label: bool, ctl: impl FnOnce(&mut Ui)) {
+    if !row_counted(ui.ctx(), label) {
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), PROW_H), Sense::hover());
@@ -850,8 +1179,13 @@ pub fn prow(ui: &mut Ui, label: &str, modified: bool, unit: Option<&str>, ctl: i
         p.circle_filled(Pos2::new(rect.left() + 17.0, cy), 5.0, theme::ORANGE.gamma_multiply(0.22));
     }
     let g = galley(ui, label, FontId::proportional(14.0), theme::TEXT);
+    let label_w = g.size().x;
     p.galley(Pos2::new(rect.left() + 28.0, cy - g.size().y / 2.0), g, Color32::PLACEHOLDER);
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(6.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    let mut room = rect.shrink2(Vec2::new(6.0, 0.0));
+    if after_label {
+        room.min.x = (rect.left() + 28.0 + label_w + 8.0).min(room.max.x);
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::right_to_left(egui::Align::Center)));
     child.spacing_mut().item_spacing.x = 4.0;
     if let Some(u) = unit {
         let (ur, _) = child.allocate_exact_size(Vec2::new(30.0, PROW_H), Sense::hover());
@@ -1102,24 +1436,6 @@ pub fn num_count(ui: &mut Ui, w: f32, v: &mut usize, range: std::ops::RangeInclu
     r
 }
 
-/// A choice box (`.choice`): a triangle, the value centred in Rajdhani 17, a triangle. -1 / 1 = a triangle was clicked.
-pub fn choice_box(ui: &mut Ui, w: f32, shown: &str, can_prev: bool, can_next: bool) -> i8 {
-    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::hover());
-    let cy = rect.center().y;
-    let mut out = 0;
-    for (left, on, d) in [(true, can_prev, -1), (false, can_next, 1)] {
-        let rc = Rect::from_center_size(Pos2::new(if left { rect.left() + 10.0 } else { rect.right() - 10.0 }, cy), Vec2::new(20.0, 24.0));
-        let tr = ui.interact(rc, r.id.with(("tri", left)), if on { Sense::click() } else { Sense::hover() });
-        tri_at(ui, rc, left, !on, tr.hovered(), None);
-        if tr.clicked() {
-            out = d;
-        }
-    }
-    let g = ui.painter().layout(shown.to_string(), theme::glass_font(16.0), ink(ui, theme::WHITE), w - 44.0);
-    ui.painter().galley(Pos2::new(rect.center().x - g.size().x / 2.0, cy - g.size().y / 2.0), g, Color32::PLACEHOLDER);
-    out
-}
-
 /// An outliner kind header (`.ol-kind`, 28 tall): chevron, icon, name in capitals, the count. Returns its response
 /// (a click flips the group); `open` draws the chevron down.
 pub fn kind_header(ui: &mut Ui, open: bool, icon: &str, name: &str, count: usize) -> Response {
@@ -1161,6 +1477,37 @@ pub fn piece_row(ui: &mut Ui, hidden: bool, sel: bool, name: &str, meta: &str) -
         ui.painter().galley(Pos2::new(rect.right() - 8.0 - m.size().x, cy - m.size().y / 2.0), m, Color32::PLACEHOLDER);
     }
     (r, eye.clicked())
+}
+
+/// One row of the Sim page's race table (#433, 26 tall): place, car, lap, gap, speed. `head` = the column captions
+/// (small capitals, no hover); otherwise `sel` = the followed car (orange rim like `piece_row`) and a click follows it.
+/// The car column takes what the three right-aligned ones leave and is clipped to it.
+pub fn race_row(ui: &mut Ui, head: bool, sel: bool, cells: [&str; 5]) -> Response {
+    const RIGHT: [f32; 3] = [56.0, 70.0, 48.0];
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), if head { 20.0 } else { 26.0 }), Sense::click());
+    let p = ui.painter();
+    if !head {
+        if sel {
+            p.rect(rect, 7.0, theme::ORANGE.gamma_multiply(0.06), Stroke::new(1.0, theme::ORANGE), StrokeKind::Inside);
+        } else if r.hovered() {
+            p.rect_filled(rect, 7.0, theme::white(0.04));
+        }
+    }
+    let cy = rect.center().y;
+    let (font, col) = if head { (FontId::proportional(10.0), theme::DIM) } else { (FontId::monospace(12.0), if sel { theme::ORANGE } else { theme::TEXT }) };
+    let cell = |ui: &Ui, text: &str, font: &FontId| galley(ui, if head { text.to_uppercase() } else { text.to_string() }, font.clone(), col);
+    let mut right = rect.right() - 8.0;
+    for (i, w) in RIGHT.iter().enumerate().rev() {
+        let g = cell(ui, cells[2 + i], &font);
+        ui.painter().galley(Pos2::new(right - g.size().x, cy - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+        right -= w;
+    }
+    let pos = cell(ui, cells[0], &font);
+    ui.painter().galley(Pos2::new(rect.left() + 10.0, cy - pos.size().y / 2.0), pos, Color32::PLACEHOLDER);
+    let name = galley(ui, cells[1], if head { font.clone() } else { theme::glass_font(14.0) }, col);
+    let clip = Rect::from_min_max(Pos2::new(rect.left() + 44.0, rect.top()), Pos2::new(right - 4.0, rect.bottom()));
+    ui.painter().with_clip_rect(clip).galley(Pos2::new(clip.left(), cy - name.size().y / 2.0), name, Color32::PLACEHOLDER);
+    if head { r.on_hover_cursor(egui::CursorIcon::Default) } else { r.on_hover_cursor(egui::CursorIcon::PointingHand) }
 }
 
 /// A requester button (`.btn`, 184 x 44): icon 20 and Rajdhani Bold 22 capitals. `sel` = the default / keyboard choice:

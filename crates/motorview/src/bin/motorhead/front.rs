@@ -7,12 +7,14 @@ use crate::controls::{task, Code, Controls, Device, DEFAULT_LAYOUT_NAME, PadIn, 
 use crate::league::{self, League, Locks, Outcome, Profile};
 use crate::hud_layout::{HudSettings, MapMode, INFO_CUSTOM, MAP_MODES, MARGIN_STEP, SCALE_RANGE, SCALE_STEP};
 use self::menu_modern::{Ask, PaintPick};
+pub(crate) use self::menu_modern::Want;
 use crate::movie::Movie;
+use crate::slide_fx;
 use crate::{hiscore, hud, stats};
 use glam::{Mat3, Mat4, Vec2, Vec3};
 use motor_sim::{Difficulty, Input, Pedals, Rules, SteerKeys};
 use motor_data::mde::{self, Mde};
-use motor_data::sprpos::SprPos;
+use motor_data::sprpos::{Slid, SprPos};
 use motor_sim::demo::DemoRecorder;
 use motor_sim::startcam;
 use motor_sim::replay::{GhostTrack, Header, LapRecorder, Recording};
@@ -210,6 +212,29 @@ const PIC_FADE_RATE: f32 = 3.0;
 const POINTS: [u32; 8] = [12, 10, 8, 6, 4, 3, 2, 1];
 /// Seconds to keep racing after you finish before the results (AI cars finish meanwhile).
 const RESULTS_AFTER: f32 = 12.0;
+
+/// CLASSIC attract demo (GameType 5): the main menu idles this long before an AI race starts
+/// (the original waits 30 000 ms, `0x46fb8d`, compared with the last input `0x46fd02`; design choice: 120 s)
+const ATTRACT_IDLE_S: f32 = 120.0;
+/// after a demo that ran to its end the next one follows after this long (10 000 ms, `0x470184`)
+const ATTRACT_REARM_S: f32 = 10.0;
+/// the demo race's laps (`0x4580af`: 25 laps, Hard, CatchUp off)
+const ATTRACT_LAPS: u32 = 25;
+
+/// The tracks the attract demo draws from (`0x4580d1..0x458118`): a regular track (Division n < 10) of tier
+/// 3 or below (so not OkkunSpeedway), and not the track raced last unless it is the only one.
+fn attract_tracks(divisions: &[u32], last: Option<usize>) -> Vec<usize> {
+    let all: Vec<usize> = (0..divisions.len()).filter(|&i| divisions[i] / 100 <= 3 && divisions[i] % 100 < 10).collect();
+    let fresh: Vec<usize> = all.iter().copied().filter(|&i| Some(i) != last).collect();
+    if fresh.is_empty() { all } else { fresh }
+}
+
+/// The settings the attract demo overrides while it runs (the original forces InfoDetail, CheckpointInfo
+/// and RoadMap to None, `0x4580aa..0x4581d6`); put back when it ends.
+struct AttractSaved {
+    game_type: GameType,
+    hud: (usize, usize, usize, HudSettings),
+}
 /// Backdrop track for the car preview.
 const GARAGE_TRACK: u32 = 1;
 /// Needle sweep rate towards the selected item (1/s, exponential).
@@ -264,6 +289,8 @@ pub enum Screen {
     /// single dial -> ghost mode: the "Ghost" screen (CLASSIC 0x462bc8, sprpos set 19), ghost race / replay race over the
     /// list of `Demos/*.MDE` recordings (demo.rs)
     Replays,
+    /// REMASTER Ghost screen -> ANALYSE: Lap Analysis, two laps of one track compared (#429; no Classic counterpart)
+    Analysis,
     /// main dial -> multi player: the original's first page (descriptor 6, sprpos set 9, 0x463f84); the lobby is story #7
     Multi,
 }
@@ -302,7 +329,24 @@ const DEMO_NAME_MAX: usize = 24;
 /// Knockout runs one lap fewer than the grid has cars (`Race::set_rules`); shown fixed on the Track screen.
 const KNOCKOUT_LAPS: u32 = 7;
 
+/// CLASSIC 0x46284c: a screen being left. The old screen keeps drawing with its clock `ms` counting down (no keys),
+/// then the switch to `to` happens (`sel`: the item the new screen starts on).
+#[derive(Clone, Copy)]
+struct Leave {
+    to: Screen,
+    sel: Option<usize>,
+    ms: f32,
+}
+
 impl Screen {
+    /// A Classic screen whose draw goes through the sliding sprpos lookups (`Game::sp`): it slides in and out.
+    fn slides(self) -> bool {
+        matches!(
+            self,
+            Screen::Main | Screen::Single | Screen::Options | Screen::League | Screen::LeagueTable | Screen::LeagueLoad | Screen::Track | Screen::Car | Screen::Graphics | Screen::Sound | Screen::Controls | Screen::Personal | Screen::Statistics | Screen::Rankings | Screen::Credits | Screen::Replays | Screen::Multi
+        )
+    }
+
     /// A screen that plays a movie (movie.rs).
     pub fn is_movie(self) -> bool {
         matches!(self, Screen::Intro | Screen::LeagueMovie)
@@ -338,6 +382,7 @@ impl Screen {
             "leagueload" => Screen::LeagueLoad,
             "leagueresults" => Screen::LeagueResults,
             "replays" => Screen::Replays,
+            "analysis" => Screen::Analysis,
             "multi" => Screen::Multi,
             _ => return None,
         })
@@ -830,6 +875,7 @@ impl PaintFinish {
     }
 }
 
+#[derive(Clone)]
 pub struct Settings {
     pub car: usize,
     pub track: usize,
@@ -1179,6 +1225,8 @@ pub struct RaceState {
     pub prox: Vec<f32>,
     /// REMASTER close minimap: the ground it shows across (m), eased by speed (`hud::map_zoom_update`)
     pub map_zoom: f32,
+    /// the map easter eggs (RuhrStadt club message, Atlantika roof scroller; #366, `eggs.rs`)
+    pub eggs: motor_sim::eggs::MapEggs,
     /// the player's laps already offered to the records, and the race
     rec_laps: u32,
     rec_finished: bool,
@@ -1282,7 +1330,11 @@ impl RaceState {
         }
         // #374: at the view time, so the ghost moves with the interpolated cars
         let now = self.sess.race.clock_ms - self.sess.race.view_lag() as f64 * 1000.0;
-        self.ghost.as_ref()?.pose_at(now - p.lap_start_ms as f64)
+        // #419: the view lags the sim clock by up to one tick, so on the grid (clock 0) and just after a lap starts
+        // the lap time is slightly negative (or before the first saved pose): show the ghost's first pose then,
+        // not nothing (it flickered)
+        let ghost = self.ghost.as_ref()?;
+        ghost.pose_at((now - p.lap_start_ms as f64).max(ghost.start_ms()))
     }
 
     /// REMASTER demo play (#346): the race was put at another moment. The lap and checkpoint the HUD last saw are
@@ -1336,16 +1388,11 @@ impl RaceState {
     /// CHEAT casper: the player's meshes of a view's `cars` move to the ghost list, drawn with the
     /// ghost pipeline; the body still lights the scene (`hidden`). Without the cheat (or in a view
     /// that leaves the car out) the lists come back as they are. (cars, hidden, ghost)
-    pub fn cheat_cars(&self, casper: bool, classic: bool, mut cars: Models, mut hidden: Models) -> (Models, Models, Models) {
+    pub fn cheat_cars(&self, casper: bool, mut cars: Models, mut hidden: Models) -> (Models, Models, Models) {
         let mut ghost = self.ghost_models();
-        // Ghost mode: the recorded cars. CLASSIC draws them as any car (the original never reads
-        // the remote flag in the renderer, 0x45a210); REMASTER keeps the ghost look
-        let demo = self.demo_models();
-        if classic {
-            cars.extend(demo);
-        } else {
-            ghost.extend(demo);
-        }
+        // Ghost mode: the recorded cars are remote cars, drawn by the ghost pipeline (CLASSIC: the original's remote
+        // look, 0x439533 / 0x43fca4, #253; REMASTER: the hologram), with no halos (0x43939b)
+        ghost.extend(self.demo_models());
         if let Some(slot) = self.casper_slot(casper) {
             let own = slot * CAR_MESHES..(slot + 1) * CAR_MESHES;
             let (mine, rest): (Vec<_>, Vec<_>) = cars.into_iter().partition(|(m, _)| own.contains(m));
@@ -1646,7 +1693,7 @@ pub(super) const CTL_TUNE_LABELS: [&str; 4] = ["Steering dead zone", "Trigger de
 /// Rows of the pause menu's Controls tab: the car tasks, the keyboard layout, the pad sliders.
 pub(super) const PAUSE_CTL_ROWS: usize = CAR_TASKS + 1 + 4;
 /// `Settings::pad_tune`: defaults and ranges in percent, the step of one ←/→
-const PAD_TUNE_DEFAULT: [u32; 4] = [15, 15, 100, 70];
+const PAD_TUNE_DEFAULT: [u32; 4] = [5, 15, 100, 70];
 pub(super) const PAD_TUNE_RANGE: [(u32, u32); 4] = [(0, 50), (0, 50), (50, 200), (0, 100)];
 const PAD_TUNE_STEP: u32 = 5;
 const DEFAULT_PAD: [Option<PadIn>; CAR_TASKS] = {
@@ -1680,13 +1727,22 @@ const RANKINGS_SET: usize = 11;
 /// The league screen's info box under the dial.
 const LEAGUE_SET: usize = 12;
 const STANDINGS_SET: usize = 16;
+/// The league load list's set (descriptor 11, init 0x46b9a4; New is set 13, Delete set 15).
+const LEAGUE_LOAD_SET: usize = 14;
 const REPLAYS_SET: usize = 19;
 const MULTI_SET: usize = 9;
 /// The options dial's set (init 0x466784, draw 0x4668a8): slots 9 / 10 / 11 = `tdif`, `difin`, `emh`.
 const OPTIONS_SET: usize = 7;
-/// `emh` frames per second of the difficulty word's roll, one per original menu frame [I: 30 per second,
-/// the step of `glitch`].
-const DIFF_ROLL_RATE: f32 = 30.0;
+/// The original's menu frames per second [I: 30; the menu video shows no more than that in its glitches and rolls].
+/// Everything the original counts in menu frames (glitches, turn overs, value rolls) runs at this rate.
+const MENU_FPS: f32 = 30.0;
+/// `emh` frames per second of the difficulty word's roll, one per original menu frame.
+const DIFF_ROLL_RATE: f32 = MENU_FPS;
+/// CLASSIC 0x46c446 / 0x46ce3a / 0x46ce62: the rolling `onoff` / `tman` sprites, one frame (0 .. 7) a menu frame
+/// towards 0 (manual / on) or 7 (auto / off): indices into `Game::rolls`.
+const ROLL_MANUAL: usize = 0;
+const ROLL_RECORD: usize = 1;
+const ROLL_CATCHUP: usize = 2;
 
 /// The camera options of the graphic options' Camera tab [design choice]: kept in the settings,
 /// applied when a race starts and live from the pause menu.
@@ -1721,6 +1777,18 @@ impl CamOpts {
             3 => CamMode::Bumper,
             4 if has_tv => CamMode::Tv,
             _ => CamMode::Chase,
+        }
+    }
+
+    /// the `start` index that picks `mode` (the inverse of `mode`; the goal camera is no choice)
+    fn start_of(mode: CamMode) -> Option<usize> {
+        match mode {
+            CamMode::Chase => Some(0),
+            CamMode::FarChase => Some(1),
+            CamMode::InCar => Some(2),
+            CamMode::Bumper => Some(3),
+            CamMode::Tv => Some(4),
+            CamMode::Goal => None,
         }
     }
 }
@@ -2085,7 +2153,7 @@ impl GfxRow {
             CheckpointInfo => "The split times shown when passing a checkpoint.",
             CheckpointDelay => "How long the checkpoint splits stay on screen.",
             RoadMap => "The track map in the corner of the screen.",
-            CamStart => "The camera a race starts in. During a race the camera keys switch between them; the TV camera needs a track with camera stations.",
+            CamStart => "The camera a race starts in. During a race the camera keys switch between them; the TV camera needs a track with camera stations. The camera you pick in a race is kept here.",
             CamMirror => "The rear view mirror at the top of the screen. The mirror key switches it during a race.",
             CamFreeLook => "The right stick of a gamepad orbits the chase camera round the car; letting go brings it back behind.",
             CamPullIn => "The chase camera moves closer to the car when a wall is in the way, instead of going through it.",
@@ -2430,6 +2498,13 @@ pub struct Game {
     /// cheat codes typed in the pause menu (cheats.rs)
     pub cheats: crate::cheats::Cheats,
     credits: Vec<String>,
+    /// CLASSIC 0x46dabb: the hidden credits page ("Code:" ... "Organizing:"), shown once the club message has appeared in
+    /// this session (`club_seen`, `[0x750828]`) or while Left Ctrl + Left Alt + Right Alt are held (`0x46dd82`)
+    credits_alt: Vec<String>,
+    pub club_seen: bool,
+    credits_keys: bool,
+    /// `Data/d3d/tullinge.iff`: the Atlantika roof scrolltext (plain text, `cha_InfoInit` `0x41212f`)
+    pub egg_text: Vec<u8>,
     /// `Data/sprpos.dta`: where the original puts the front end's text (motor_data::sprpos)
     sprpos: SprPos,
     /// the Personal screen's colour strip (`load_strip`)
@@ -2448,6 +2523,10 @@ pub struct Game {
     sound_roll: [f32; 18],
     sound_snap: bool,
     loop_frame: f32,
+    /// Car / Track screens: the rolling frames of `tman`, the record race `onoff` and the catch-up `onoff` (`ROLL_*`)
+    rolls: [f32; 3],
+    /// Classic menus: the settled slot drawer's counters (glitch, title turn over), stepped while drawing
+    settle: std::cell::RefCell<slide_fx::Settle>,
     pub cd_preview: Option<u32>,
     /// REMASTER Sound screen (#259): the tab shown (`SOUND_VOLUME` / `SOUND_SONGS`) and the seconds the preview has played
     sound_page: usize,
@@ -2462,6 +2541,8 @@ pub struct Game {
     /// no sound output is playing at all (set by `GameAudio::sync`; a headless shot with an empty `--sound-devices`)
     pub sound_silent: bool,
     arrows_held: (bool, bool),
+    /// the start camera changed in a race (#419): the settings are written on the next input frame
+    cam_dirty: bool,
     /// REMASTER pause menu: the Restart / Exit hold
     pub pause_hold: Hold,
     dial_carry: f32,
@@ -2475,6 +2556,8 @@ pub struct Game {
     pub screen: Screen,
     /// seconds on this screen, and overall
     pub t: f32,
+    /// CLASSIC 0x46284c leaving state (`[0x7511c0]`): the old screen slides out before the switch to `to`
+    leave: Option<Leave>,
     pub clock: f32,
     /// CLASSIC the Track screen's laps counter digits (ones, tens), see `roll_laps`
     laps_roll: [f32; 2],
@@ -2547,6 +2630,17 @@ pub struct Game {
     keep_display: Option<KeepDisplay>,
     /// the AI drives your car too
     pub demo: bool,
+    /// the attract demo (#210, GameType 5): the next or running race is the idle main menu's AI race
+    pub attract: bool,
+    /// the idle timer runs on the main menu (the window and `--idle`; off for every other headless shot)
+    pub attract_idle: bool,
+    /// seconds since the last input on the main menu, and the limit (120 s, 10 s after a demo that ran to its end)
+    idle_s: f32,
+    idle_limit: f32,
+    /// the track of the last race (the demo never repeats it) and the demo's pick
+    last_track: Option<usize>,
+    attract_track: usize,
+    attract_saved: Option<AttractSaved>,
     /// save settings to `settings_path()` whenever they change (interactive runs)
     persist: bool,
     /// the tracks with an unlock flag (`League/<Track>.FLG`); None = nothing is locked (headless
@@ -2616,6 +2710,10 @@ pub struct Game {
     league: usize,
     /// the New / Delete requester: (delete, selected button)
     league_req: Option<(bool, usize)>,
+    /// CLASSIC: the season movie being played is the final's; the Main menu follows it (not the League dial)
+    final_won: bool,
+    /// CLASSIC: the standings opened after a league race, so Enter goes on to the car screen
+    standings_next: bool,
     /// the name typed for a new league (`editing` row 2)
     league_name: String,
     /// the running league race: (place, grid slot) of each car
@@ -2634,6 +2732,8 @@ pub struct Game {
     ghost_mode: usize,
     /// the recording picked last (lower-case name), selected again when the screen reopens (0x462b1c: `DemoFileName`)
     ghost_last: Option<String>,
+    /// REMASTER Lap Analysis (#429): its sides, picker, requester, re-simulation and the session's caches
+    pub(crate) analysis: menu_modern::Analysis,
     /// the Ghost screen's "Delete demo file." requester: the selected button
     ghost_del: Option<usize>,
     /// the Multi page's refusal line
@@ -2661,7 +2761,6 @@ fn f(c: &motor_data::cfg::Config, k: &str) -> f32 {
     c.get(k).and_then(|e| e.f32(0)).unwrap_or(0.0)
 }
 
-/// The staff list stored in motor.exe ("Programming:" ... the line after "Produced by:").
 /// A volume one step (5 %) up (`d` > 0) or down, within 0..=100.
 fn step_volume(v: u32, d: i32) -> u32 {
     (v as i32 + d.signum() * 5).clamp(0, 100) as u32
@@ -2692,6 +2791,7 @@ fn step_cd_track(cur: u32, tracks: &[u32], d: i32) -> u32 {
     tracks[j]
 }
 
+/// The staff list stored in motor.exe ("Programming:" ... the line after "Produced by:").
 fn read_credits(root: &std::path::Path) -> Vec<String> {
     let Ok(exe) = motor_data::fs::read(root, "motor.exe") else { return Vec::new() };
     let Some(at) = exe.windows(12).position(|w| w == b"Programming:") else { return Vec::new() };
@@ -2711,6 +2811,14 @@ fn read_credits(root: &std::path::Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// The hidden credits page of `0x46dabb`: the 12 strings from "Code:" to the last name before the default page's
+/// "Programming:" (`0x4d6298..0x4d638c`).
+fn read_credits_alt(root: &std::path::Path) -> Vec<String> {
+    let Ok(exe) = motor_data::fs::read(root, "motor.exe") else { return Vec::new() };
+    let Some(at) = exe.windows(15).position(|w| w == b"Code:\0Atlan/CRG") else { return Vec::new() };
+    exe[at..].split(|&b| b == 0).take(12).map(|s| s.iter().map(|&b| b as char).collect()).collect()
 }
 
 /// A car horn from Sounds/CarHorns/*.chf.
@@ -2847,6 +2955,8 @@ impl Game {
         let laps = tracks.first().map_or(3, |t| t.laps);
         let horns = read_horns(&root);
         let credits = read_credits(&root);
+        let credits_alt = read_credits_alt(&root);
+        let egg_text = motor_data::fs::read(&root, "Data/d3d/tullinge.iff").unwrap_or_default();
         let strip = load_strip(&root);
         let sprpos = motor_data::fs::read(&root, "Data/sprpos.dta").ok().and_then(|d| SprPos::parse(&d).ok()).unwrap_or_default();
         let cd_tracks = crate::audio::cd_track_numbers(&root);
@@ -2863,6 +2973,10 @@ impl Game {
             sfx: Vec::new(),
             cheats: Default::default(),
             credits,
+            credits_alt,
+            club_seen: false,
+            credits_keys: false,
+            egg_text,
             sprpos,
             strip,
             cd_tracks,
@@ -2872,6 +2986,8 @@ impl Game {
             sound_roll: [0.0; 18],
             sound_snap: true,
             loop_frame: 0.0,
+            rolls: [0.0; 3],
+            settle: std::cell::RefCell::new(slide_fx::Settle::new(0x1998)),
             cd_preview: None,
             sound_page: SOUND_VOLUME,
             preview_t: 0.0,
@@ -2881,6 +2997,7 @@ impl Game {
             sound_device_failed: false,
             sound_silent: false,
             arrows_held: (false, false),
+            cam_dirty: false,
             pause_hold: Hold::default(),
             dial_carry: 0.0,
             ev_override: None,
@@ -2889,6 +3006,7 @@ impl Game {
             render_device: String::new(),
             screen: Screen::Main,
             t: 0.0,
+            leave: None,
             clock: 0.0,
             laps_roll: [0.0; 2],
             menu_fx,
@@ -2929,6 +3047,13 @@ impl Game {
             gfx: None,
             keep_display: None,
             demo: false,
+            attract: false,
+            attract_idle: false,
+            idle_s: 0.0,
+            idle_limit: ATTRACT_IDLE_S,
+            last_track: None,
+            attract_track: 0,
+            attract_saved: None,
             persist: false,
             flagged: None,
             controls,
@@ -2966,6 +3091,8 @@ impl Game {
             leagues: Vec::new(),
             league: 0,
             league_req: None,
+            final_won: false,
+            standings_next: false,
             league_name: String::new(),
             league_field: Vec::new(),
             replays: Vec::new(),
@@ -2975,6 +3102,7 @@ impl Game {
             ghost_row: 0,
             ghost_mode: 0,
             ghost_last: None,
+            analysis: Default::default(),
             ghost_del: None,
             multi_msg: None,
             ghost_demo: None,
@@ -3066,6 +3194,9 @@ impl Game {
             return;
         }
         for k in keys {
+            if self.input_seen() {
+                break;
+            }
             // Start keeps the text on the pad keyboard (Esc undoes it, as on the keyboard)
             if k.start && self.osk.is_some() {
                 self.osk_keep();
@@ -3084,6 +3215,9 @@ impl Game {
     /// the button for the pause menu stays Esc/Start. REMASTER: the modern pause menu takes no
     /// mouse input [design choice].
     pub fn menu_mouse(&mut self, k: KeyCode) {
+        if self.input_seen() {
+            return;
+        }
         let modern_pause = matches!(self.screen, Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam) && self.settings.view.modern_menu();
         if modern_pause || self.capture.is_some() || self.editing.is_some() || matches!(self.screen, Screen::Race | Screen::Loading) {
             return;
@@ -3145,7 +3279,7 @@ impl Game {
         (self.modern_dial()
             || matches!(
                 self.screen,
-                Screen::Graphics | Screen::Controls | Screen::Credits | Screen::Sound | Screen::Track | Screen::LeagueLoad | Screen::LeagueTable | Screen::Replays
+                Screen::Graphics | Screen::Controls | Screen::Credits | Screen::Sound | Screen::Track | Screen::LeagueLoad | Screen::LeagueTable | Screen::Replays | Screen::Analysis
             ))
             && self.settings.view.modern_menu()
     }
@@ -3159,11 +3293,49 @@ impl Game {
     }
 
     pub fn go(&mut self, s: Screen) {
+        self.go_sel(s, None);
+    }
+
+    /// Whether a Classic screen is sliding out (keys are ignored).
+    pub fn leaving(&self) -> bool {
+        self.leave.is_some()
+    }
+
+    /// CLASSIC 0x46284c: go to `s` (starting on item `sel`). A Classic menu slides out first for as long as it had
+    /// slid in (up to 150 ms); a later request while leaving replaces the target. APPROX: a screen at clock 0 switches at
+    /// once (the original draws one frame at slide 256 first).
+    fn go_sel(&mut self, s: Screen, sel: Option<usize>) {
+        if let Some(l) = &mut self.leave {
+            (l.to, l.sel) = (s, sel);
+            return;
+        }
+        let ms = (self.t * 1000.0).min(motor_data::sprpos::SLIDE_MS as f32);
+        if self.screen.slides() && !self.settings.view.modern_menu() && ms > 0.0 {
+            self.leave = Some(Leave { to: s, sel, ms });
+            return;
+        }
+        self.switch(s, sel);
+    }
+
+    /// The screen change itself (what `go` was before the slide-out).
+    fn switch(&mut self, s: Screen, sel: Option<usize>) {
+        self.leave = None;
+        if self.screen == Screen::Graphics {
+            self.gfx = None;
+        }
+        // REMASTER Lap Analysis (#429): only in the Glass menus and with a pair set up (`ana_from_ghost`), else the Ghost screen
+        let s = if s == Screen::Analysis && (!self.settings.view.modern_menu() || self.analysis.track.is_none()) { Screen::Replays } else { s };
+        if s != Screen::Analysis {
+            self.analysis.job = None;
+        }
         if s == Screen::Loading && self.screen != Screen::Loading {
             self.load_from = (self.screen, self.sel);
         }
         self.screen = s;
         self.t = 0.0;
+        // CLASSIC: every screen init clears the slot drawer's counters (0x750770, flags 0x7507f0)
+        *self.settle.borrow_mut() = slide_fx::Settle::new(self.rng.next() << 15 | self.rng.next());
+        self.rolls = self.roll_targets();
         if s == Screen::Loading {
             self.frozen = false;
             self.load_facts = Some(self.load_facts());
@@ -3246,6 +3418,10 @@ impl Game {
         }
         if s.is_movie() {
             self.next_movie();
+        }
+        if let Some(i) = sel {
+            self.sel = i;
+            self.snap_needle();
         }
     }
 
@@ -3435,7 +3611,8 @@ impl Game {
             }
         }
         if self.screen == Screen::LeagueMovie {
-            self.back_to_dial(Screen::League, 0);
+            let to_main = std::mem::take(&mut self.final_won);
+            self.league_race_over(to_main);
         } else {
             self.go(Screen::Main);
         }
@@ -3585,6 +3762,14 @@ impl Game {
         self.league = self.league.min(self.leagues.len() - 1);
     }
 
+    /// CLASSIC New league screen (0x46bb44): the name field opens with "League" typed in (0x46bc60), the league
+    /// itself is made after the question that follows Enter. Nothing exists before that, so Esc leaves no trace.
+    fn open_league_name(&mut self) {
+        self.league_name = "League".to_string();
+        self.editing = Some((2, String::new()));
+        self.osk_open();
+    }
+
     fn new_league(&mut self, name: Option<&str>) {
         // a new league starts in the ASC, the car every division allows (design choice)
         if let Some(i) = self.cars.iter().position(|c| c.name.eq_ignore_ascii_case("ASC")) {
@@ -3671,12 +3856,30 @@ impl Game {
     /// stay here, not after the movie like 0x453ccc, so quitting during the 4.5 min one loses nothing [design choice].
     fn leave_league_results(&mut self) {
         self.race = None;
+        // CLASSIC 0x46de12: after the final is won the front end opens on the Main menu, after any other league race on
+        // the standings; REMASTER keeps the League dial [design choice]
+        let to_main = self.league_outcome == Some(Outcome::Won) && !self.modern_requester();
         self.movie_queue = self.league_outcome.and_then(Outcome::movie).filter(|_| self.has_movies).into_iter().collect();
         self.close_league_results();
         if self.movie_queue.is_empty() {
+            self.league_race_over(to_main);
+        } else {
+            self.final_won = to_main;
+            self.go(Screen::LeagueMovie);
+        }
+    }
+
+    /// Where the front end opens after a league race (and its season movie). CLASSIC 0x46ddf4: the standings (0x4bded8),
+    /// whose Enter goes on to the car screen (0x46b5ec -> 0x4bde38) and Esc to the League dial; the Main menu after the
+    /// final is won. Confirmed in the original (2026-11-07, Division 3 race 1). REMASTER goes to the League dial [design choice].
+    fn league_race_over(&mut self, to_main: bool) {
+        if to_main {
+            self.go(Screen::Main);
+        } else if self.modern_requester() {
             self.back_to_dial(Screen::League, 0);
         } else {
-            self.go(Screen::LeagueMovie);
+            self.go(Screen::LeagueTable);
+            self.standings_next = true;
         }
     }
 
@@ -3723,7 +3926,17 @@ impl Game {
         }
         self.refresh_locks();
         if o == Outcome::Won {
+            // 0x453ccc deletes the file; the front end's reload then makes current the last league of the same name,
+            // else the first file (0x450f3b..0x450f87), and a "Default" one when none is left (0x450e32)
+            let won = self.leagues[self.league].name.clone();
             self.delete_league_at(self.league);
+            // the reload lists the files in name order, as the next start does
+            self.leagues.sort_by(|a, b| a.file.cmp(&b.file));
+            let names: Vec<&str> = self.leagues.iter().map(|l| l.name.as_str()).collect();
+            self.league = league::current_after_win(&names, &won);
+            if let Some(l) = self.current_league() {
+                league::save_last(self.persist, &l.file);
+            }
         } else {
             self.save_league();
         }
@@ -3750,6 +3963,9 @@ impl Game {
                 }
                 Err(e) => {
                     eprintln!("race: {e}");
+                    if self.attract {
+                        self.end_attract(false);
+                    }
                     self.go(Screen::Main);
                 }
             }
@@ -3771,6 +3987,9 @@ impl Game {
                 Err(e) => {
                     self.loading = None;
                     eprintln!("race: {e}");
+                    if self.attract {
+                        self.end_attract(false);
+                    }
                     self.go(Screen::Main);
                 }
             }
@@ -3852,13 +4071,16 @@ impl Game {
         let ghost_demo = self.ghost_demo.clone().filter(|_| self.game_type == GameType::GhostMode);
         let (track_idx, laps_set, catchup) = match &ghost_demo {
             Some(m) => (self.ghost_track(m)?, m.header.laps, m.header.catchup()),
+            // CLASSIC 0x4580aa: 25 laps, CatchUp off, on the drawn track
+            None if self.attract => (self.attract_track, ATTRACT_LAPS, false),
             None => (self.settings.track, self.settings.laps, self.settings.catchup),
         };
         let tr = &self.tracks[track_idx];
         // League (0x45193c): your division in grid order, each AI in its car for the division
         self.league_field.clear();
         let mut drivers = None;
-        let mut row = AiRow::Difficulty(self.settings.difficulty);
+        // the demo runs on Hard (0x4581a9: difficulty 2)
+        let mut row = AiRow::Difficulty(if self.attract { Difficulty::Hard } else { self.settings.difficulty });
         let mut human_slot = None;
         if let (GameType::League, Some(l)) = (self.game_type, self.leagues.get_mut(self.league)) {
             // your place drives the car you picked (the original keeps the one from creation)
@@ -3902,7 +4124,7 @@ impl Game {
             None if matches!(self.game_type, GameType::TimeAttack | GameType::GhostMode) => vec![car],
             None => lineup(car),
         };
-        let player = if self.demo { None } else { Some(human_slot.unwrap_or(ids.len() - 1)) };
+        let player = if self.ai_demo() { None } else { Some(human_slot.unwrap_or(ids.len() - 1)) };
         let mut paint = Vec::new();
         // REMASTER (#136, #351): your finishes go with your colours (the AI's and the recordings' paint is gloss)
         let mine = scene::CarPaint { colours: self.settings.car_colours, finish: self.settings.car_finish.map(PaintFinish::scene) };
@@ -3928,6 +4150,10 @@ impl Game {
             self.pending_upload = upload;
         }
         self.loaded = Loaded::Race;
+        self.last_track = Some(match &fin {
+            Finish::Race(f) => f.track_idx,
+            Finish::Watch(f) => f.track_idx,
+        });
         match fin {
             Finish::Race(RaceFinish { track_idx, track_n, track_name, car, ids, player, human_slot, is_league, row, catchup, rules }) => {
                 if rules != Rules::Normal {
@@ -3993,7 +4219,7 @@ impl Game {
                     (id == car).then_some(g)
                 });
                 let records = hiscore::Records::load(hiscore::dir(self.persist).as_deref(), &track_name, laps);
-                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, recording, notice: demo.is_some().then_some("Ghost play started!").or(demo_rec.is_some().then_some("Race recording started!")).map(|s| (4.0, s.to_string())), demo, demo_rec, demo_over: false, watch: None, pb: None, pending_respawn: None, pending_skip: false, playback: None, ghost, lap_rec: ta_ghost.then(LapRecorder::default), ghost_laps: 0, run: stats::Run::default() });
+                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, eggs: Default::default(), rec_laps: 0, rec_finished: false, recording, notice: demo.is_some().then_some("Ghost play started!").or(demo_rec.is_some().then_some("Race recording started!")).map(|s| (4.0, s.to_string())), demo, demo_rec, demo_over: false, watch: None, pb: None, pending_respawn: None, pending_skip: false, playback: None, ghost, lap_rec: ta_ghost.then(LapRecorder::default), ghost_laps: 0, run: stats::Run::default() });
                 self.steer = SteerKeys::default();
         self.pedals = Pedals::default();
                 self.controls.reset();
@@ -4013,7 +4239,7 @@ impl Game {
                 let pb = demo.as_ref().map(|d| Playback::new(&d.mde, self.tracks[track_idx].profile.as_ref()));
                 // design choice (#374): demo play on the fixed physics tick (the recorded car is posed at the view time)
                 sess.race.set_fixed_tick(Some(motor_sim::session::PHYSICS_HZ.get()));
-                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: None, recording: None, demo, demo_rec: None, demo_over: false, watch: Some(block), pb, notice: Some((4.0, "Demo play started!".into())), pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
+                self.race = Some(RaceState { sess, sounds: sounds.take(), track: track_idx, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, eggs: Default::default(), rec_laps: 0, rec_finished: false, playback: None, recording: None, demo, demo_rec: None, demo_over: false, watch: Some(block), pb, notice: Some((4.0, "Demo play started!".into())), pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
                 self.steer = SteerKeys::default();
         self.pedals = Pedals::default();
                 self.controls.reset();
@@ -4024,9 +4250,7 @@ impl Game {
 
     /// Back to a dial with this item selected.
     fn back_to_dial(&mut self, s: Screen, item: usize) {
-        self.go(s);
-        self.sel = item;
-        self.snap_needle();
+        self.go_sel(s, Some(item));
     }
 
     /// Items on the current dial: six on Single (with Knockout), five on the others.
@@ -4055,14 +4279,29 @@ impl Game {
     }
 
     /// CLASSIC 0x463538 / 0x46a300 / 0x46aacc / 0x4668a8: the needle angle (4096ths of a turn) of the
-    /// selected item, `8 x + y` of sprpos slot 0x18 + item. Single's sixth stop (Knockout, ours) is
-    /// halfway between time attack's and ghost mode's.
+    /// selected item, `8 x + y` of sprpos slot 0x18 + item, read through the sliding accessors
+    /// (0x4635a8), so while a screen slides in the needle chases a moving target [O]. Single's sixth
+    /// stop (Knockout, ours) is halfway between time attack's and ghost mode's.
     fn needle_target_q(&self) -> f32 {
-        let set = self.dial_layout().set;
-        let at = |k: usize| (self.sprpos.x(set, 0x18 + k) * 8 + self.sprpos.y(set, 0x18 + k)) as f32;
+        let (set, sp) = (self.dial_layout().set, self.sp());
+        let at = |k: usize| (sp.x(set, 0x18 + k) * 8 + sp.y(set, 0x18 + k)) as f32;
         let stop = if self.screen == Screen::Single { [0.0, 1.0, 2.0, 3.0, 3.5, 4.0][self.sel.min(5)] } else { self.sel.min(4) as f32 };
         let i = stop.floor() as usize;
         at(i) + (at((i + 1).min(4)) - at(i)) * stop.fract()
+    }
+
+    /// CLASSIC 0x4627e0: the slide factor (256 = the start positions, 0 = settled) from the screen's
+    /// clock `t` (0 on entry, `go`). The Glass menus do not slide (0).
+    fn slide(&self) -> i32 {
+        if self.settings.view.modern_menu() {
+            return 0;
+        }
+        motor_data::sprpos::slide_factor(self.leave.map_or(self.t * 1000.0, |l| l.ms) as u32)
+    }
+
+    /// `Data/sprpos.dta` as the Classic screens draw it this frame (`slide`).
+    fn sp(&self) -> Slid<'_> {
+        self.sprpos.slid(self.slide())
     }
 
     /// Put the needle on the selected item at once (screen entry; 0x481d40 does the same).
@@ -4143,9 +4382,7 @@ impl Game {
         }
         if back {
             self.cd_preview = None;
-            self.go(Screen::Options);
-            self.sel = 3; // sound options
-            self.snap_needle();
+            self.go_sel(Screen::Options, Some(3)); // sound options
             self.ev_override = None;
         }
     }
@@ -4202,9 +4439,7 @@ impl Game {
         }
         if back {
             self.sound_stop_preview();
-            self.go(Screen::Options);
-            self.sel = 3; // sound options
-            self.snap_needle();
+            self.go_sel(Screen::Options, Some(3)); // sound options
             self.ev_override = None;
         }
     }
@@ -4424,7 +4659,7 @@ impl Game {
         let d = &self.gfx.map_or(s.display, |e| e.display);
         let rgb = |c: [u8; 3]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
         (
-            self.screen,
+            self.leave.map_or(self.screen, |l| l.to),
             ((self.sel * 4 + self.gfx.map_or(0, |e| e.button)) * 8 + self.gfx.map_or(0, |e| e.page)),
             vec![
                 s.car as u32,
@@ -4608,7 +4843,10 @@ impl Game {
 
     /// Back to where the graphic options were opened: the options dial or the in-race menu.
     fn leave_graphics(&mut self) {
-        self.gfx = None;
+        // the Graphics screen needs its state while it slides out (`switch` drops it)
+        if self.screen != Screen::Graphics {
+            self.gfx = None;
+        }
         if matches!(self.screen, Screen::PauseGfx | Screen::PauseCam | Screen::PauseHud) {
             // REMASTER: Esc on the tab resumes the race; Classic: the GFX Options item
             if self.settings.view.modern_menu() {
@@ -4620,9 +4858,7 @@ impl Game {
             }
             return;
         }
-        self.go(Screen::Options);
-        self.sel = 1; // graphic options
-        self.snap_needle();
+        self.go_sel(Screen::Options, Some(1)); // graphic options
     }
 
     /// The selected screen, clamped to the connected ones.
@@ -4771,7 +5007,7 @@ impl Game {
         self.game_type = GameType::Single;
         let cam = Camera::looking(Vec3::ZERO, Vec3::NEG_Z);
         let records = hiscore::Records::load(None, &self.tracks[ti].name, h.laps);
-        self.race = Some(RaceState { sess, sounds: None, track: ti, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, rec_laps: 0, rec_finished: false, playback: Some((rec, 0)), recording: None, demo: None, demo_rec: None, demo_over: false, watch: None, pb: None, notice: None, pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
+        self.race = Some(RaceState { sess, sounds: None, track: ti, finished_for: None, lap_flash: None, split: None, sector_flash: None, last_lap: 1, last_cp: None, cam, records, ta_gaps: [None; 3], prox: Vec::new(), map_zoom: crate::hud::MAP_ZOOM_MIN, eggs: Default::default(), rec_laps: 0, rec_finished: false, playback: Some((rec, 0)), recording: None, demo: None, demo_rec: None, demo_over: false, watch: None, pb: None, notice: None, pending_respawn: None, pending_skip: false, ghost: None, lap_rec: None, ghost_laps: 0, run: stats::Run::default() });
         self.steer = SteerKeys::default();
         self.pedals = Pedals::default();
         self.controls.reset();
@@ -4978,7 +5214,15 @@ impl Game {
 
     fn save_settings(&self) {
         let Some(path) = settings_path().filter(|_| self.persist) else { return };
-        let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, self.settings.to_text(&self.car_ids(), &self.track_ids())));
+        // the attract demo's HUD overrides are not the player's settings
+        let mut own = None;
+        if let Some(sv) = &self.attract_saved {
+            let mut c = self.settings.clone();
+            (c.info_detail, c.checkpoint_info, c.road_map, c.hud) = sv.hud;
+            own = Some(c);
+        }
+        let settings = own.as_ref().unwrap_or(&self.settings);
+        let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&path, settings.to_text(&self.car_ids(), &self.track_ids())));
         if let Err(e) = saved {
             eprintln!("settings {}: {e}", path.display());
         }
@@ -5006,6 +5250,14 @@ impl Game {
     /// Handle a key press and queue the menu sound the original would play for it
     /// (menusound.cfg events).
     pub fn key(&mut self, k: KeyCode) {
+        // the attract demo ends on any key (design choice: the original stops on Enter / Esc only, 0x4286fd)
+        if self.input_seen() {
+            return;
+        }
+        // CLASSIC 0x46284c: no key handler while a screen slides out
+        if self.leave.is_some() {
+            return;
+        }
         // requesters take all keys while they are open
         if let Some(kd) = self.keep_display {
             let (r, ev) = requester_key(k, kd.sel);
@@ -5071,7 +5323,14 @@ impl Game {
                 Req::Pick(i) => {
                     self.league_req = None;
                     match (delete, i) {
-                        // the original makes the name itself unless one is typed (0x44f8d0)
+                        // CLASSIC 0x46bff0: the question comes after the name; Yes keeps the league (0x44f8d0 made it
+                        // when the screen opened), "No way!" deletes it again (0x44fff4)
+                        (false, 0) if !self.modern_requester() => {
+                            let name = std::mem::take(&mut self.league_name);
+                            self.new_league(Some(&name));
+                        }
+                        (false, _) if !self.modern_requester() => self.league_name.clear(),
+                        // REMASTER keeps its own order: the question, then a name (design choice)
                         (false, 0) => {
                             self.league_name.clear();
                             self.editing = Some((2, String::new()));
@@ -5227,9 +5486,13 @@ impl Game {
 
 
     pub fn preview_league_name(&mut self, text: &str) {
-        self.editing = Some((2, String::new()));
-        self.league_name.clear();
-        self.osk_open();
+        if self.modern_requester() {
+            self.editing = Some((2, String::new()));
+            self.league_name.clear();
+            self.osk_open();
+        } else {
+            self.open_league_name();
+        }
         self.type_text(text);
     }
 
@@ -5260,6 +5523,9 @@ impl Game {
 
     /// Characters typed into the row being edited (printable ASCII: the font has no more).
     pub fn type_text(&mut self, t: &str) {
+        if self.leave.is_some() {
+            return;
+        }
         if let Some(DemoSave { name: Some(n), .. }) = &mut self.demo_save {
             for c in t.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_')) {
                 if n.chars().count() < DEMO_NAME_MAX {
@@ -5295,9 +5561,21 @@ impl Game {
         let Some((row, old)) = self.editing.take() else { return };
         if row == 2 {
             match k {
+                // CLASSIC: Enter asks "Create this league" (Esc cancels [I: 0x46bff0 deletes the league made at 0x46bc60])
+                KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Escape if !self.modern_requester() => {
+                    if k == KeyCode::Escape {
+                        self.league_name.clear();
+                    } else {
+                        self.league_req = Some((false, 1));
+                    }
+                    self.sfx.push(Sfx::Menu(if k == KeyCode::Escape { ev::ESCAPE } else { ev::SELECT }));
+                }
+                // REMASTER: an empty name or Esc is a random "League??" [design choice]
                 KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Escape => {
                     let name = std::mem::take(&mut self.league_name);
-                    self.new_league((k != KeyCode::Escape).then_some(name.as_str()));
+                    let typed = (k != KeyCode::Escape && !name.trim().is_empty()).then_some(name);
+                    let name = typed.unwrap_or_else(|| League::random_name(&mut self.rng));
+                    self.new_league(Some(&name));
                     self.sfx.push(Sfx::Menu(if k == KeyCode::Escape { ev::ESCAPE } else { ev::SELECT }));
                 }
                 _ => {
@@ -5656,9 +5934,7 @@ impl Game {
             self.sync_controls();
         } else if matches!(k, KeyCode::Escape | KeyCode::Backspace) {
             if self.screen == Screen::Controls {
-                self.go(Screen::Options);
-                self.sel = 2; // control options
-                self.snap_needle();
+                self.go_sel(Screen::Options, Some(2)); // control options
             } else {
                 self.pause_resume();
             }
@@ -5751,6 +6027,67 @@ impl Game {
         self.race = None;
         self.pause_hold.clear();
         self.go(if watching { Screen::Replays } else { Screen::Main });
+    }
+
+    /// Any input: restart the main menu's idle count. An attract demo that is running (or loading) ends instead and
+    /// the input is used up (returns true); the menu is back with the full 120 s.
+    fn input_seen(&mut self) -> bool {
+        self.idle_s = 0.0;
+        if self.attract {
+            self.end_attract(false);
+            return true;
+        }
+        false
+    }
+
+    /// The attract demo (#210, GameType 5): a random regular track (`attract_tracks`; `track` picks one, the headless
+    /// `--track`), the HUD info off, the game type Single. `race_plan` builds the race from it.
+    pub fn begin_attract(&mut self, track: Option<usize>) {
+        let divs: Vec<u32> = self.tracks.iter().map(|t| t.division).collect();
+        let pool = attract_tracks(&divs, self.last_track);
+        self.attract_track = match track {
+            Some(t) => t,
+            None if pool.is_empty() => self.settings.track,
+            None => pool[self.rng.below(pool.len())],
+        };
+        let s = &mut self.settings;
+        self.attract_saved = Some(AttractSaved { game_type: self.game_type, hud: (s.info_detail, s.checkpoint_info, s.road_map, s.hud) });
+        (s.info_detail, s.checkpoint_info, s.road_map) = (0, 0, 0);
+        s.hud.apply_road_map(0);
+        self.game_type = GameType::Single;
+        self.attract = true;
+    }
+
+    /// The idle main menu starts the demo through the loading screen.
+    fn start_attract(&mut self) {
+        self.begin_attract(None);
+        self.go(Screen::Loading);
+    }
+
+    /// Leave the attract demo for the main menu: `finished` = it ran to its end, so the next one follows after 10 s
+    /// (`0x470184`), else after the full 120 s. No results, records, statistics or recording (the original clears
+    /// Record race for GameType 5, `0x41db24`).
+    fn end_attract(&mut self, finished: bool) {
+        if let Some(sv) = self.attract_saved.take() {
+            self.game_type = sv.game_type;
+            let s = &mut self.settings;
+            (s.info_detail, s.checkpoint_info, s.road_map, s.hud) = sv.hud;
+        }
+        self.attract = false;
+        self.idle_s = 0.0;
+        self.idle_limit = if finished { ATTRACT_REARM_S } else { ATTRACT_IDLE_S };
+        if self.loading.is_some() {
+            self.cancel_load();
+        } else {
+            self.race = None;
+            self.pause_hold.clear();
+            self.go(Screen::Main);
+        }
+    }
+
+    /// The AI drives the race by itself (the headless `--demo`, the attract demo).
+    fn ai_demo(&self) -> bool {
+        self.demo || self.attract
     }
 
     /// Headless shots: the pause menu on tab `i` of `PAUSE_TAB_SCREENS`.
@@ -5879,14 +6216,10 @@ impl Game {
                 if enter {
                     match (self.screen, self.sel) {
                         (Screen::Main, 0) => {
-                            self.go(Screen::Single);
-                            self.sel = 1; // single race
-                            self.snap_needle();
+                            self.go_sel(Screen::Single, Some(1)); // single race
                         }
                         (Screen::Main, 3) => {
-                            self.go(Screen::Options);
-                            self.sel = 1; // graphic options
-                            self.snap_needle();
+                            self.go_sel(Screen::Options, Some(1)); // graphic options
                         }
                         (Screen::Main, 1) => self.go(Screen::Multi),
                         (Screen::Main, 2) => self.go(Screen::Rankings),
@@ -5916,6 +6249,7 @@ impl Game {
                         (Screen::League, 0) => self.continue_league(),
                         (Screen::League, 1) => self.go(Screen::LeagueTable),
                         (Screen::League, 2) => self.go(Screen::LeagueLoad),
+                        (Screen::League, 3) if !self.modern_requester() => self.open_league_name(),
                         (Screen::League, 3) => self.league_req = Some((false, 1)),
                         (Screen::League, 4) => self.league_req = Some((true, 1)),
                         (Screen::Options, 3) => self.go(Screen::Sound),
@@ -5940,9 +6274,7 @@ impl Game {
                         Screen::Main => {}
                         Screen::Single | Screen::Options => {
                             let from = self.screen;
-                            self.go(Screen::Main);
-                            self.sel = if from == Screen::Single { 0 } else { 3 };
-                            self.snap_needle();
+                            self.go_sel(Screen::Main, Some(if from == Screen::Single { 0 } else { 3 }));
                         }
                         Screen::League => self.back_to_dial(Screen::Single, 2),
                         _ => {}
@@ -5972,13 +6304,12 @@ impl Game {
                 }
                 if back {
                     self.fix_locked();
-                    self.go(Screen::Single);
-                    self.sel = match self.game_type {
+                    let sel = match self.game_type {
                         GameType::TimeAttack => 3,
                         GameType::Knockout => 4,
                         _ => 1,
                     };
-                    self.snap_needle();
+                    self.go_sel(Screen::Single, Some(sel));
                 }
             }
             Screen::Car => {
@@ -6030,9 +6361,7 @@ impl Game {
             }
             Screen::Credits => {
                 if enter || back {
-                    self.go(Screen::Main);
-                    self.sel = 4;
-                    self.snap_needle();
+                    self.go_sel(Screen::Main, Some(4));
                 }
             }
             // the layout's tasks are read in drive(); these are fixed extras of ours
@@ -6183,9 +6512,7 @@ impl Game {
                     }
                 }
                 if back {
-                    self.go(Screen::Options);
-                    self.sel = 3; // sound options
-                    self.snap_needle();
+                    self.go_sel(Screen::Options, Some(3)); // sound options
                 }
             }
             Screen::Sound => self.sound_key(up, down, left, right, enter, back),
@@ -6223,9 +6550,7 @@ impl Game {
                     self.capture = Some(Capture { task: CLASSIC_TASKS[self.sel], pad: false, any: false });
                     self.controls.take_pressed();
                 } else if back || enter {
-                    self.go(Screen::Options);
-                    self.sel = 2; // control options
-                    self.snap_needle();
+                    self.go_sel(Screen::Options, Some(2)); // control options
                 }
             }
             Screen::Personal if self.settings.view.modern_menu() => self.personal_key(up, down, left, right, enter, back),
@@ -6286,9 +6611,7 @@ impl Game {
                     self.ev_override = e;
                 }
                 if back || (enter && back_row) {
-                    self.go(Screen::Options);
-                    self.sel = 0; // personal options
-                    self.snap_needle();
+                    self.go_sel(Screen::Options, Some(0)); // personal options
                 }
             }
             Screen::Statistics => {
@@ -6301,11 +6624,8 @@ impl Game {
                     self.stats_scroll = if down { (self.stats_scroll + 1).min(max) } else { self.stats_scroll.saturating_sub(1) };
                 }
                 if enter || back {
-                    self.go(Screen::Personal);
                     // the modern screen comes back on the tab it left (`go`)
-                    if !self.settings.view.modern_menu() {
-                        self.sel = PERSONAL_ROWS - 2;
-                    }
+                    self.go_sel(Screen::Personal, (!self.settings.view.modern_menu()).then_some(PERSONAL_ROWS - 2));
                 }
             }
             Screen::Results => {
@@ -6352,7 +6672,16 @@ impl Game {
                     }
                 }
                 if enter || back {
-                    self.back_to_dial(Screen::League, 1);
+                    if std::mem::take(&mut self.standings_next) {
+                        // after a league race: Enter = the next race's car screen, Esc = the dial (0x46b5ec)
+                        if enter {
+                            self.continue_league();
+                        } else {
+                            self.back_to_dial(Screen::League, 0);
+                        }
+                    } else {
+                        self.back_to_dial(Screen::League, 1);
+                    }
                 }
             }
             Screen::LeagueLoad => {
@@ -6387,6 +6716,7 @@ impl Game {
                 }
             }
             Screen::Replays if self.settings.view.modern_menu() => self.replays_key_modern(k),
+            Screen::Analysis => self.analysis_key_modern(k),
             Screen::Replays => {
                 // CLASSIC 0x462d4c: row 0 ghost race, 1 replay race, 2 the list. The ends stop with the
                 // end sound (9), Left / Right and Enter move the focus between the rows and the list
@@ -6528,9 +6858,7 @@ impl Game {
             self.load_rank_table();
         }
         if leave {
-            self.go(Screen::Main);
-            self.sel = 2; // rankings
-            self.snap_needle();
+            self.go_sel(Screen::Main, Some(2)); // rankings
         }
     }
 
@@ -6637,8 +6965,32 @@ impl Game {
 
     pub fn update(&mut self, dt: f32, keys: &HashSet<KeyCode>) {
         self.t += dt;
+        // CLASSIC 0x46284c: the clock counts down while leaving; the frame after it reaches 0 does the switch
+        if let Some(l) = &mut self.leave {
+            if l.ms <= 0.0 {
+                let l = *l;
+                self.switch(l.to, l.sel);
+            } else {
+                l.ms = (l.ms - dt * 1000.0).max(0.0);
+            }
+        }
+        self.credits_keys = [KeyCode::ControlLeft, KeyCode::AltLeft, KeyCode::AltRight].iter().all(|k| keys.contains(k));
         self.stats.play_s += dt as f64;
         self.clock += dt;
+        // the attract demo (#210): the main menu left alone starts an AI race. Every other screen puts the count and the
+        // 120 s limit back (0x46fb8d sets the timeout on entering the main dial, 1e9 elsewhere).
+        if self.screen == Screen::Main && !self.attract {
+            if self.attract_idle && self.confirm_exit.is_none() && self.keep_display.is_none() && self.loading.is_none() {
+                self.idle_s += dt;
+                if self.idle_s >= self.idle_limit {
+                    self.start_attract();
+                }
+            } else {
+                self.idle_s = 0.0;
+            }
+        } else if !self.attract {
+            (self.idle_s, self.idle_limit) = (0.0, ATTRACT_IDLE_S);
+        }
         let holo = self.holo_screen();
         if let (true, Loaded::MenuDrive, Some(d)) = (holo, self.loaded, &mut self.menu_drive) {
             d.sess.step(dt.min(0.05), Input::default());
@@ -6654,7 +7006,15 @@ impl Game {
             let step = DIFF_ROLL_RATE * dt;
             self.diff_roll += (want - self.diff_roll).clamp(-step, step);
         }
-        if self.screen == Screen::Sound && !self.settings.view.modern_menu() {
+        // CLASSIC 0x46c446 / 0x46ce3a: the transmission and on / off words roll one frame per menu frame
+        if matches!(self.screen, Screen::Car | Screen::Track) {
+            let step = MENU_FPS * dt;
+            let wants = self.roll_targets();
+            for (r, want) in self.rolls.iter_mut().zip(wants) {
+                *r += (want - *r).clamp(-step, step);
+            }
+        }
+        if self.screen == Screen::Sound && !self.settings.view.modern_menu() && self.leave.is_none() {
             self.sound_hold(dt, keys);
             self.sound_step(dt);
         }
@@ -6730,6 +7090,7 @@ impl Game {
         self.rumble_cmd = (0.0, 0.0);
         match self.screen {
             Screen::Loading if self.t > 0.05 => self.poll_load(),
+            Screen::Analysis => self.ana_poll(),
             Screen::Race => self.drive(dt, keys),
             Screen::Intro | Screen::LeagueMovie => {
                 let done = self.movie.as_mut().is_none_or(|m| {
@@ -6787,9 +7148,13 @@ impl Game {
             self.go(Screen::Pause);
             return;
         }
+        if std::mem::take(&mut self.cam_dirty) {
+            self.save_settings();
+        }
         let free_look = self.free_look.unwrap_or_else(|| self.controls.right_stick());
         let Some(r) = &mut self.race else { return };
-        // sticks and the mouse steer proportionally; keys use the game's half-lock ramp
+        // sticks and the mouse steer proportionally; keys use the game's half-lock ramp. The original also
+        // ramps a stick at full lock like a key (0x45bf34); not ported [design choice, #377]
         let (l, rt) = (c.value[task::TURN_LEFT], c.value[task::TURN_RIGHT]);
         let steer = if c.analog[task::TURN_LEFT] || c.analog[task::TURN_RIGHT] { rt - l } else { self.steer.update(l > 0.5, rt > 0.5, dt) };
         // CLASSIC 0x45a6e8 / 0x45be6a (#376): the player's pedals (throttle x1.1, key brake ramp, analog brake x1.1); the AI cars do not go through it
@@ -6822,6 +7187,7 @@ impl Game {
         // key switches to the TV camera on the next car (0x45aa45)
         // the camera keys are read only from the "3" on (0x45a868) and then end the start fly-by (0x45a8d7)
         let cam_keys = r.sess.race.pre_race_s() >= startcam::HOLD_S || !r.sess.flying();
+        let cam_before = r.sess.cam;
         if cam_keys && [task::CAMERA_VIEW, task::CHANGE_CAMERA, task::IN_CAR_VIEW, task::OUT_CAR_VIEW].iter().any(|&t| c.went_down[t]) {
             r.sess.fly_by = false;
         }
@@ -6843,6 +7209,14 @@ impl Game {
             // CLASSIC [O, #274 trace]: F2 always selects the chase view, a second press changes nothing;
             // REMASTER: a second press flips to our far chase (the original has only one distance)
             r.sess.cam = if remaster && r.sess.cam == CamMode::Chase { CamMode::FarChase } else { CamMode::Chase };
+        }
+        // design choice (#419): the camera picked in a race is the start camera from then on (kept in the settings)
+        if r.sess.cam != cam_before && !pb_ui && !r.watching() {
+            if let Some(i) = CamOpts::start_of(r.sess.cam).filter(|&i| i != self.settings.cam.start) {
+                self.settings.cam.start = i;
+                // written next frame (`r` borrows the race here)
+                self.cam_dirty = true;
+            }
         }
         if c.went_down[task::REAR_MIRROR] {
             // saved with the next settings save
@@ -6994,11 +7368,15 @@ impl Game {
         }
         // CLASSIC: demo races alternate 10 s in-car and 10 s TV camera from the start
         // (period 20 000 ms, 0x45a4f1..0x45bd5c)
-        if self.demo && !r.sess.race.tv_camera.is_empty() && r.sess.cam != CamMode::Goal {
+        if (self.demo || self.attract) && !r.sess.race.tv_camera.is_empty() && r.sess.cam != CamMode::Goal {
             let (now, was) = (r.sess.race.clock_ms, r.sess.race.clock_ms - dt as f64 * 1000.0);
             if (now / 10_000.0).floor() != (was / 10_000.0).floor() && now >= 0.0 {
                 r.sess.cam = if (now / 10_000.0).floor() as i64 % 2 == 0 { CamMode::InCar } else { CamMode::Tv };
             }
+        }
+        // CLASSIC 0x45a490: the attract demo posts "DEMO" while the clock's ms % 500 > 250 (blinks at 2 Hz)
+        if self.attract {
+            r.notice = (r.sess.race.clock_ms.rem_euclid(500.0) > 250.0).then(|| (1.0, "DEMO".to_string()));
         }
         // CLASSIC: the player's finish cuts to the goal camera until the results (gameplay
         // videos [O]; the camera keys still switch away from it)
@@ -7006,7 +7384,7 @@ impl Game {
             r.sess.cam = CamMode::Goal;
         }
         // Knockout: knocked out, you watch the leader
-        if r.sess.race.racers[player].progress.eliminated_ms.is_some() && r.sess.focus == player && !self.demo {
+        if r.sess.race.racers[player].progress.eliminated_ms.is_some() && r.sess.focus == player && !(self.demo || self.attract) {
             r.sess.focus = r.sess.race.standings()[0];
         }
         r.cam = r.sess.camera();
@@ -7080,12 +7458,20 @@ impl Game {
         if r.sector_flash.is_some_and(|x| x.0 <= 0.0) {
             r.sector_flash = None;
         }
-        crate::proximity::update(r, dt);
+        crate::proximity::update(r, dt, self.settings.display.size.0 as f32 / self.settings.display.size.1.max(1) as f32);
         crate::hud::map_zoom_update(r, dt);
+        // CLASSIC 0x412c0c: the map eggs test the followed car, only while the minimap is on (RoadMap not None)
+        let (me, d) = (&r.sess.race.racers[r.sess.focus], self.settings.display.size);
+        r.eggs.update(&self.tracks[r.track].name, me.car.pos, dt, self.settings.road_map != 0, self.egg_text.len(), 480.0 * d.0 as f32 / d.1.max(1) as f32);
+        self.club_seen |= r.eggs.active == motor_sim::eggs::Egg::Club;
         if !r.watching() && r.sess.race.racers[player].progress.done() {
             let w = r.finished_for.get_or_insert(0.0);
             *w += dt;
             if *w > RESULTS_AFTER || r.sess.race.all_finished() {
+                // the attract demo ran to its end: back to the menu, no results (the next one in 10 s)
+                if self.attract {
+                    return self.end_attract(true);
+                }
                 self.results = compute_results(&r.sess, self.game_type);
                 self.results_sheet = Some(motor_sim::sheet::RaceSheet::build(&r.sess.race));
                 self.save_recording();
@@ -7116,7 +7502,7 @@ impl Game {
             None => {}
         }
         if matches!(self.editing, Some((2, _))) {
-            // design choice: the original has no name entry (typed names are only a code path)
+            // CLASSIC 0x46bc68: a text field in the New league screen; ours is a requester over the dial [design choice]
             let cursor = if ((self.clock * 2.0) as u32).is_multiple_of(2) { "_" } else { " " };
             if self.modern_requester() {
                 // REMASTER: a text field with a caret (a pad types on the keyboard sheet, `osk_layer`)
@@ -7129,7 +7515,7 @@ impl Game {
                 }
             } else {
                 let line = format!("{}{cursor}", self.league_name);
-                out.push(self.text_requester_layer(["Name your league:", &line], ["Enter: ok", "Esc: random"], 0));
+                out.push(self.text_requester_layer(["Name your league:", &line], ["Enter: ok", "Esc: cancel"], 0));
             }
         }
         if let Some(ds) = &self.demo_save {
@@ -7293,6 +7679,7 @@ impl Game {
             Screen::LeagueResults if self.settings.view.modern_menu() && self.race.is_some() => self.results_modern(size),
             Screen::LeagueResults => vec![self.ui(self.menu_canvas(), |g, b| g.league_results(b))],
             Screen::Replays if self.settings.view.modern_menu() => self.replays_modern(size),
+            Screen::Analysis => self.analysis_modern(size),
             Screen::Replays => vec![self.ui(self.menu_canvas(), |g, b| g.replays_screen(b))],
             Screen::Multi => vec![self.ui(self.menu_canvas(), |g, b| g.multi_screen(b))],
         }
@@ -7303,12 +7690,13 @@ impl Game {
         // the podium emblem rides on this camera (`frame_parts`), so the mirror does not get it
         let mut parts = r.sess.frame_parts(&r.cam, false, self.settings.skid_marks, self.settings.view.skids_detailed());
         if self.settings.view.shadows && !self.settings.view.car_shadows() {
-            parts.shadows = r.sess.shadows_except(r.casper_slot(self.cheats.casper));
-            if let Some(d) = &r.demo {
+            parts.shadows = r.sess.shadows_except(&r.casper_slot(self.cheats.casper).into_iter().collect::<Vec<_>>());
+            // CLASSIC: a remote car casts no shadow (0x4391ad skips 0x438308) [O, #253]; REMASTER keeps them
+            if let Some(d) = r.demo.as_ref().filter(|_| self.settings.view.mode != RenderMode::Classic) {
                 d.shadows(&r.sess, motor_sim::demo::view_ms(&r.sess.race), &mut parts.shadows);
             }
         }
-        (parts.cars, parts.hidden, parts.ghost) = r.cheat_cars(self.cheats.casper, self.settings.view.mode == RenderMode::Classic, std::mem::take(&mut parts.cars), std::mem::take(&mut parts.hidden));
+        (parts.cars, parts.hidden, parts.ghost) = r.cheat_cars(self.cheats.casper, std::mem::take(&mut parts.cars), std::mem::take(&mut parts.hidden));
         parts
     }
 
@@ -7404,7 +7792,7 @@ impl Game {
         let (eye, at) = r.sess.mirror_view();
         let look = (at - eye).normalize_or(Vec3::Z);
         let cam = Camera::new(eye, look.x.atan2(-look.z), look.y.asin());
-        let (cars, hidden, ghost) = r.cheat_cars(self.cheats.casper, self.settings.view.mode == RenderMode::Classic, r.sess.models_hiding(Some(r.sess.focus)), r.sess.hidden_bodies(Some(r.sess.focus)));
+        let (cars, hidden, ghost) = r.cheat_cars(self.cheats.casper, r.sess.models_hiding(Some(r.sess.focus)), r.sess.hidden_bodies(Some(r.sess.focus)));
         let viewport = Some(canvas.to_window(size, x, TOP, W, H));
         let frame = self.ui(canvas, |_, b| {
             let c = [0.05, 0.05, 0.05, 1.0];
@@ -7450,55 +7838,97 @@ impl Game {
         }
     }
 
-    /// Whether an unselected label (or the screen title) is in a glitch this instant, and its
-    /// band offsets. The menu video shows a 1-2 frame horizontal scramble on some label every
-    /// few tenths of a second [O: frames 6-11, 15-16, 21 of game_menu_original.webm].
-    fn glitch(&self, salt: u32) -> Option<[f32; 6]> {
-        let slot = (self.clock * 30.0) as u32; // 1/30 s steps
-        let h = |n: u32| {
-            let mut x = n.wrapping_mul(0x9e37_79b9) ^ salt.wrapping_mul(0x85eb_ca6b);
-            x ^= x >> 15;
-            x = x.wrapping_mul(0x2c1b_3c6d);
-            x ^ (x >> 12)
-        };
-        // a glitch lasts one slot (2 frames of the 60 fps capture), ~0.75 per second per label
-        if h(slot) % 40 != 0 {
-            return None;
-        }
-        let r = h(slot ^ 0x5bd1_e995);
-        Some(std::array::from_fn(|k| ((r >> (k * 5)) % 13) as f32 - 6.0))
+    /// The frames the rolling words rest at: 0 = manual / on, 7 = auto / off.
+    fn roll_targets(&self) -> [f32; 3] {
+        let f = |on: bool| if on { 0.0 } else { 7.0 };
+        [f(self.settings.manual), f(self.settings.record_race), f(self.settings.catchup)]
     }
 
-    /// A label sprite with its pulse (selected) or occasional glitch (otherwise).
-    fn label(&self, b: &mut Batch, name: &str, x: f32, y: f32, selected: bool, salt: u32) -> f32 {
+    /// A label sprite drawn at slot `slot` of sprpos set `set`: its slide effect while the screen
+    /// slides, else its pulse (selected), with the drawer's random glitch.
+    #[allow(clippy::too_many_arguments)]
+    fn label(&self, b: &mut Batch, (set, slot): (usize, usize), name: &str, x: f32, y: f32, selected: bool) {
         let frame = self.glow(selected);
-        match (selected, self.glitch(salt)) {
-            (false, Some(off)) => b.image_glitch(&format!("m:{name}:0"), x, y, 3.0, &off),
-            _ => b.menu(name, frame, x, y),
+        if !self.slide_sprite(b, (set, slot), name, frame, x, y) {
+            b.menu(name, frame, x, y);
         }
     }
 
-    fn frame_common(&self, b: &mut Batch, title: &str, screen_box: &str, box_at: (f32, f32)) {
-        self.frame_at(b, title, screen_box, (34.0, 14.0), box_at, false);
+    /// CLASSIC 0x460880 while the screen slides (slide != 0): sprite `name` (frame `frame`) of slot `slot`
+    /// of sprpos set `set`, at (x, y), with the slot's slide effect (`slide_fx`). False when the screen has
+    /// settled: the caller draws the settled look.
+    #[allow(clippy::too_many_arguments)]
+    fn slide_sprite(&self, b: &mut Batch, (set, slot): (usize, usize), name: &str, frame: usize, x: f32, y: f32) -> bool {
+        let slide = self.slide();
+        if slide == 0 && self.settings.view.modern_menu() {
+            return false;
+        }
+        let key = format!("m:{name}:{}", frame.min(b.assets.frames(name).max(1) - 1));
+        let (w, h) = b.size(&key);
+        if slide == 0 {
+            // CLASSIC 0x460880 settled: the title / box turn over now and then, any slot glitches at random
+            let tick = (self.t * MENU_FPS) as u64;
+            let s = self.settle.borrow_mut().frame(slot, tick, h as u32);
+            let passes = slide_fx::settled_passes(s, slot, h as u32);
+            if passes.is_empty() {
+                return false;
+            }
+            slide_fx::blit(b, &key, x as i32, y as i32, w as i32, &passes);
+            return true;
+        }
+        let (effect, value) = self.sprpos.effect(set, slot);
+        // APPROX: the original's rand() and row seed (0x4addf4) run on from draw to draw; ours start from
+        // the screen clock and the slot, so a `--shot` is repeatable
+        let ms = (self.t * 1000.0) as u32;
+        let mut rng = league::Rng(ms.wrapping_mul(0x9e37_79b9) ^ ((set * 32 + slot) as u32).wrapping_mul(0x85eb_ca6b));
+        let mut seed = rng.next() << 15 | rng.next();
+        let passes = slide_fx::passes(effect, value, slide, slot, h as u32, &mut rng, &mut seed);
+        slide_fx::blit(b, &key, x as i32, y as i32, w as i32, &passes);
+        true
     }
 
-    /// The background, rings, the halftone panel (sprpos slot 1 = (0, 0)), the
-    /// screen title and its box at the given positions.
-    fn frame_at(&self, b: &mut Batch, title: &str, screen_box: &str, title_at: (f32, f32), box_at: (f32, f32), dots: bool) {
+    /// A sprite the original draws at a sprpos slot (0x460880): sliding with its effect, else plain.
+    #[allow(clippy::too_many_arguments)]
+    fn slot_menu(&self, b: &mut Batch, at: (usize, usize), name: &str, frame: usize, x: f32, y: f32) {
+        if !self.slide_sprite(b, at, name, frame, x, y) {
+            b.menu(name, frame, x, y);
+        }
+    }
+
+    /// How far a slot is from its resting place this frame (art the original places by a slot without
+    /// the slot drawer: the Track and Car pictures).
+    fn slot_shift(&self, set: usize, slot: usize) -> (f32, f32) {
+        let sp = self.sp();
+        ((sp.x(set, slot) - self.sprpos.x(set, slot)) as f32, (sp.y(set, slot) - self.sprpos.y(set, slot)) as f32)
+    }
+
+    /// `slot_menu` at the slot's own position.
+    fn slot_sprite(&self, b: &mut Batch, (set, slot): (usize, usize), name: &str, frame: usize) {
+        let sp = self.sp();
+        self.slot_menu(b, (set, slot), name, frame, sp.x(set, slot) as f32, sp.y(set, slot) as f32);
+    }
+
+    /// CLASSIC: the frame of a screen whose title and SCREEN box sit at two slots of its sprpos set
+    /// (the inits 0x46d9e0, 0x46c21c, 0x46cc5e, 0x465f1c, 0x466b0c, 0x4674ac, 0x468d8c, 0x469510,
+    /// 0x46ae2e, 0x46b987 list `dots`, then the two sprites, in slots 1, 2, 3; which of the two is
+    /// first varies per screen) [O].
+    fn frame_set(&self, b: &mut Batch, set: usize, title: &str, title_slot: usize, screen_box: &str, box_slot: usize) {
+        self.frame_at(b, set, (title, title_slot), (screen_box, box_slot));
+    }
+
+    /// The background, rings, the halftone panel (every init loads `dots` at slot 1 of the screen's sprpos
+    /// set: (0, 0) at rest, sliding in from the left), the screen title and its box at the given positions.
+    fn frame_at(&self, b: &mut Batch, set: usize, (title, title_slot): (&str, usize), (screen_box, box_slot): (&str, usize)) {
         b.image("bg:menu", 0.0, 0.0);
         // CLASSIC 0x46f060: the rings and line objects are skipped on the track and car screens
         if !matches!(title, "track" | "car") {
             self.menu_fx.draw(b);
         }
-        if dots {
-            b.menu("dots", 0, 0.0, 0.0);
-        }
-        // the title glitches now and then too
-        match self.glitch(0xdead) {
-            Some(off) => b.image_glitch(&format!("m:{title}:0"), title_at.0, title_at.1, 3.0, &off),
-            None => b.menu(title, 0, title_at.0, title_at.1),
-        };
-        b.menu(screen_box, 0, box_at.0, box_at.1);
+        // CLASSIC 0x7507f2 / 0x7507f3 etc.: the init flags the title and the box to turn over now and then
+        self.settle.borrow_mut().flag(&[title_slot, box_slot]);
+        self.slot_sprite(b, (set, 1), "dots", 0);
+        self.slot_sprite(b, (set, title_slot), title, 0);
+        self.slot_sprite(b, (set, box_slot), screen_box, 0);
         // the version ends where the original's `rs0.1` ended (x = 602 + its width, 640 px layout) [design choice, #338]
         let ver = motor_version::DISPLAY;
         let right = 602.0 + b.text_width("rs0.1", 0.75);
@@ -7507,18 +7937,16 @@ impl Game {
 
     /// CLASSIC: the frame of a dial screen, title and box at their sprpos slots.
     fn dial_frame(&self, b: &mut Batch, title: &str, screen_box: &str) {
-        let (l, sp) = (self.dial_layout(), &self.sprpos);
-        let at = |slot: usize| (sp.x(l.set, slot) as f32, sp.y(l.set, slot) as f32);
-        self.frame_at(b, title, screen_box, at(l.title), at(l.screen_box), true);
+        let l = self.dial_layout();
+        self.frame_at(b, l.set, (title, l.title), (screen_box, l.screen_box));
     }
 
     /// CLASSIC 0x463538 etc.: the ring `msel`, the item labels, the info brackets, all at their sprpos
     /// slots, then the needle (0x481e64: scale 2.6, width 3, colour 1) at slot 0x1e.
     fn dial(&self, b: &mut Batch, items: &[&str]) {
-        let (l, sp) = (self.dial_layout(), &self.sprpos);
+        let (l, sp) = (self.dial_layout(), self.sp());
         let at = |slot: usize| (sp.x(l.set, slot) as f32, sp.y(l.set, slot) as f32);
-        let (mx, my) = at(l.msel);
-        b.menu("msel", 0, mx, my);
+        self.slot_sprite(b, (l.set, l.msel), "msel", 0);
         // the original draws unavailable items like the others (no dimming)
         for (i, &name) in items.iter().enumerate() {
             if name == KNOCKOUT_LABEL {
@@ -7531,24 +7959,23 @@ impl Game {
                 b.text("knockout", x, y, 0.95, c);
                 continue;
             }
-            let (x, y) = at(l.first + i - usize::from(l.set == SINGLE_SET && i > 4));
-            self.label(b, name, x, y, i == self.sel, i as u32 + 1);
+            let slot = l.first + i - usize::from(l.set == SINGLE_SET && i > 4);
+            let (x, y) = at(slot);
+            self.label(b, (l.set, slot), name, x, y, i == self.sel);
         }
         if let Some(info) = l.info {
-            let (x, y) = at(info);
-            b.menu("info1", 0, x, y);
-            let (x, y) = at(info + 1);
-            b.menu("info2", 0, x, y);
+            self.slot_sprite(b, (l.set, info), "info1", 0);
+            self.slot_sprite(b, (l.set, info + 1), "info2", 0);
         }
         let (cx, cy) = at(0x1e);
         let [r, g, bl] = MENU_PALETTE[0];
         dial_needle(b, cx, cy, self.needle_q, 2.6, [r as f32 / 255.0, g as f32 / 255.0, bl as f32 / 255.0, 1.0]);
     }
 
-    /// Label sprite inside a bracket (glows when selected).
-    fn bracket_label(&self, b: &mut Batch, label: &str, x: f32, y: f32, selected: bool) {
-        let salt = label.bytes().fold(7u32, |a, c| a.wrapping_mul(31).wrapping_add(c as u32));
-        self.label(b, label, x, y, selected, salt);
+    /// Label sprite inside a bracket at its slot (glows when selected).
+    fn bracket_label(&self, b: &mut Batch, (set, slot): (usize, usize), label: &str, selected: bool) {
+        let sp = self.sp();
+        self.label(b, (set, slot), label, sp.x(set, slot) as f32, sp.y(set, slot) as f32, selected);
     }
 
     /// CLASSIC 0x46052c per frame: the laps counter's digits (ones first) close on the value, the
@@ -7569,8 +7996,9 @@ impl Game {
         }
     }
 
-    fn onoff(&self, b: &mut Batch, on: bool, x: f32, y: f32) {
-        b.menu("onoff", if on { 0 } else { 7 }, x, y);
+    /// The `onoff` sprite at its slot, rolling (`rolls[roll]`) between frame 0 "on" and 7 "off" (0x46c450).
+    fn onoff(&self, b: &mut Batch, at: (usize, usize), roll: usize) {
+        self.slot_sprite(b, at, "onoff", self.rolls[roll].round() as usize);
     }
 
     // ---------------------------------------------------------------- screens
@@ -7586,11 +8014,11 @@ impl Game {
         // CLASSIC 0x46a300: FONT1 rows from sprpos.dta set 10 (base = slots 10 + 20, row pitch =
         // slot 0x15's y, right column = its x, value columns = slot 0x16's x and y); labels in
         // colour 3, values in colour 1
-        let sp = &self.sprpos;
-        let at = |slot: usize, f: fn(&SprPos, usize, usize) -> i32| f(sp, SINGLE_SET, slot) as f32;
-        let (x0, y0) = (at(10, SprPos::x) + at(20, SprPos::x), at(10, SprPos::y) + at(20, SprPos::y));
-        let (col, pitch) = (at(0x15, SprPos::x), at(0x15, SprPos::y));
-        let (left_v, right_v) = (x0 + at(0x16, SprPos::x), x0 + col + at(0x16, SprPos::y));
+        let sp = self.sp();
+        let (ax, ay) = (|slot| sp.x(SINGLE_SET, slot) as f32, |slot| sp.y(SINGLE_SET, slot) as f32);
+        let (x0, y0) = (ax(10) + ax(20), ay(10) + ay(20));
+        let (col, pitch) = (ax(0x15), ay(0x15));
+        let (left_v, right_v) = (x0 + ax(0x16), x0 + col + ay(0x16));
         let [left, right] = self.single_info();
         for (i, ((lk, lv), (rk, rv))) in left.iter().zip(right.iter()).enumerate() {
             let y = y0 + i as f32 * pitch;
@@ -7634,21 +8062,19 @@ impl Game {
         self.dial(b, &OPTION_ITEMS);
         // CLASSIC 0x4668a8 via 0x460dd0: sprites 9..11 at their set-7 slots: the plain label (pulses
         // when selected), the line down to the box, and the value word in it
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(OPTIONS_SET, slot) as f32, sp.y(OPTIONS_SET, slot) as f32);
         let (lx, ly) = at(9);
-        self.label(b, "tdif", lx, ly, self.sel == 4, 5);
-        let (bx, by) = at(10);
-        b.menu("difin", 0, bx, by);
-        let (vx, vy) = at(11);
-        b.menu("emh", self.diff_roll.round() as usize, vx, vy);
+        self.label(b, (OPTIONS_SET, 9), "tdif", lx, ly, self.sel == 4);
+        self.slot_sprite(b, (OPTIONS_SET, 10), "difin", 0);
+        self.slot_sprite(b, (OPTIONS_SET, 11), "emh", self.diff_roll.round() as usize);
     }
 
     /// Graphic options in the original's text-list style: label, then the choices with the
     /// active one boxed in orange.
     fn graphics_screen(&self, b: &mut Batch) {
         // CLASSIC 0x4674f5: the Graphics screen's tag is scr4 ("Screen")
-        self.frame_common(b, "opt", "scr4", (463.0, 16.0));
+        self.frame_set(b, GRAPHICS_SET, "opt", 2, "scr4", 3);
         self.graphics_panel_fnt(b);
     }
 
@@ -7914,7 +8340,7 @@ impl Game {
         let v = &self.settings.view;
         let e = self.gfx.unwrap_or_else(|| GfxEdit::new(&self.settings));
         let d = &e.display;
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let (x0, y0) = (sp.x(GRAPHICS_SET, 4) as f32, sp.y(GRAPHICS_SET, 4) as f32);
         let (col, pitch) = (x0 + sp.x(GRAPHICS_SET, 0x18) as f32, sp.y(GRAPHICS_SET, 0x18) as f32);
         // page tabs, above the first row
@@ -8090,15 +8516,24 @@ impl Game {
         b.text("arrows: change    enter: select    esc: save, back", 130.0, y + 18.0, 0.75, DIM);
     }
 
+    /// The credits page to show: the hidden one after the club message or with the three keys held (`0x46dc15`, `0x46dd82`).
+    pub(super) fn credits_page(&self) -> &[String] {
+        if (self.club_seen || self.credits_keys) && !self.credits_alt.is_empty() {
+            &self.credits_alt
+        } else {
+            &self.credits
+        }
+    }
+
     fn credits_screen(&self, b: &mut Batch) {
-        self.frame_common(b, "credi", "scr9", (463.0, 16.0));
+        self.frame_set(b, CREDITS_SET, "credi", 3, "scr9", 2);
         // CLASSIC 0x46da44: centred at slot 0x18, one line = slot 0x19's y / 8; a heading (colour 3)
         // is followed by a blank line and its names (colour 1), a blank line before the next heading
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let (cx, y0) = (sp.x(CREDITS_SET, 0x18) as f32, sp.y(CREDITS_SET, 0x18) as f32);
         let pitch = (sp.y(CREDITS_SET, 0x19) / 8) as f32;
         let mut line = 0.0;
-        for (i, l) in self.credits.iter().enumerate() {
+        for (i, l) in self.credits_page().iter().enumerate() {
             let heading = l.ends_with(':');
             if heading {
                 line += if i > 0 { 1.0 } else { 0.0 };
@@ -8109,9 +8544,11 @@ impl Game {
     }
 
     fn track_screen(&self, b: &mut Batch) {
-        self.frame_common(b, "track", "scra", (20.0, 322.0));
+        self.frame_set(b, TRACK_SET, "track", 2, "scra", 3);
         let tr = &self.tracks[self.settings.track];
-        let (cx, cy, rx, ry) = TRACK_WINDOW;
+        // the picture (and so its window) slides with its slot 0x18
+        let (dx, dy) = self.slot_shift(TRACK_SET, 0x18);
+        let (cx, cy, rx, ry) = (TRACK_WINDOW.0 + dx, TRACK_WINDOW.1 + dy, TRACK_WINDOW.2, TRACK_WINDOW.3);
         b.clip_ellipse(cx, cy, rx, ry);
         // CLASSIC 0x46c3a7: faded by `PicFade`
         let shown = self.tracks.get(self.pic.shown).map_or(tr.n, |t| t.n);
@@ -8119,25 +8556,26 @@ impl Game {
         let tint = if self.track_locked() { self.pic.tint_dim(0.5) } else { self.pic.tint() };
         b.image_scaled(&format!("trk:{shown}"), cx - rx, cy - ry, rx * 2.0, ry * 2.0, tint);
         b.clip_none();
-        b.menu("trsel", 0, 285.0, 30.0);
+        // CLASSIC 0x46c5a2: the art is slots 4..0xa of set 2 (init 0x46c21c): trsel carop ttrac tlaps tcat onoff caro2
+        self.slot_sprite(b, (TRACK_SET, 4), "trsel", 0);
         self.track_outline(b, tr);
         // CLASSIC 0x46c5f3: the name centred at slot 0x13, the arrows alternate on a 256 ms clock
-        let (nx, ny) = (self.sprpos.x(TRACK_SET, 0x13) as f32, self.sprpos.y(TRACK_SET, 0x13) as f32);
+        let (nx, ny) = (self.sp().x(TRACK_SET, 0x13) as f32, self.sp().y(TRACK_SET, 0x13) as f32);
         menu_text(b, &tr.name, nx, ny, MENU_ORANGE, Align::Centre);
         self.name_arrows(b, nx, ny, b.fnt_width(&tr.name, 1.0), self.settings.track, self.locks().tracks);
         // CLASSIC 0x46c6de: "Not yet available" blinks (on while the 1024 ms clock is below 512) at slot 0x18, 5 px up
         if self.track_locked() && (self.clock * 1000.0) as u32 & 0x3ff < 0x200 {
-            menu_text(b, "Not yet available", self.sprpos.x(TRACK_SET, 0x18) as f32, self.sprpos.y(TRACK_SET, 0x18) as f32 - 5.0, MENU_ORANGE, Align::Centre);
+            menu_text(b, "Not yet available", self.sp().x(TRACK_SET, 0x18) as f32, self.sp().y(TRACK_SET, 0x18) as f32 - 5.0, MENU_ORANGE, Align::Centre);
         }
-        // rows: track + laps on one bracket pair, catch-up on the tall drop
-        b.menu("carop", 0, 16.0, 145.0);
-        b.menu("card", 0, 16.0, 225.0);
-        self.bracket_label(b, "ttrac", 26.0, 152.0, self.sel == 0);
-        self.bracket_label(b, "tlaps", 26.0, 189.0, self.sel == 1);
-        self.bracket_label(b, "tcat", 26.0, 230.0, self.sel == 2);
+        // rows: track + laps on one bracket pair, catch-up on the step down to the long line
+        self.slot_sprite(b, (TRACK_SET, 5), "carop", 0);
+        self.slot_sprite(b, (TRACK_SET, 0xa), "caro2", 0);
+        self.bracket_label(b, (TRACK_SET, 6), "ttrac", self.sel == 0);
+        self.bracket_label(b, (TRACK_SET, 7), "tlaps", self.sel == 1);
+        self.bracket_label(b, (TRACK_SET, 8), "tcat", self.sel == 2);
         // CLASSIC 0x46c72e: the laps counter at slot 0x12
-        flip_counter(b, self.sprpos.x(TRACK_SET, 0x12) as f32, self.sprpos.y(TRACK_SET, 0x12) as f32, &self.laps_roll);
-        self.onoff(b, self.settings.catchup, 222.0, 285.0);
+        flip_counter(b, self.sp().x(TRACK_SET, 0x12) as f32, self.sp().y(TRACK_SET, 0x12) as f32, &self.laps_roll);
+        self.onoff(b, (TRACK_SET, 9), ROLL_CATCHUP);
     }
 
     /// The blinking arrows beside the stepped name (0x46c5f3 / 0x46d170): the left one in the first
@@ -8167,7 +8605,7 @@ impl Game {
         let t = (self.clock as f64 * 1000.0) as u32;
         let yaw = t as f32 * 13.0 / 16.0;
         let pitch = (250.0 * (((yaw as u32 + 1024) & 0xfff) as f32 * std::f32::consts::TAU / 4096.0).sin()) as i32;
-        let (cx, cy) = (self.sprpos.x(TRACK_SET, 0x1e) as f32, self.sprpos.y(TRACK_SET, 0x1e) as f32);
+        let (cx, cy) = (self.sp().x(TRACK_SET, 0x1e) as f32, self.sp().y(TRACK_SET, 0x1e) as f32);
         let z = (1.0 - self.pic.b) * 3000.0 + 475.0;
         let pts = crate::menu_fx::project(&tr.outline, [pitch as u32, yaw as u32, 0], [0.0, 105.0, z], (cx, cy));
         for e in edges {
@@ -8211,7 +8649,9 @@ impl Game {
 
     /// Car select: the 3D car shows through a window in the menu layer.
     fn car_screen(&self, size: (u32, u32)) -> Vec<Layer> {
-        let (cx, cy, rx, ry) = CAR_WINDOW;
+        // the photo (and so its window) slides with its slot 0x1e
+        let (dx, dy) = self.slot_shift(CAR_SET, 0x1e);
+        let (cx, cy, rx, ry) = (CAR_WINDOW.0 + dx, CAR_WINDOW.1 + dy, CAR_WINDOW.2, CAR_WINDOW.3);
         let mut out = Vec::new();
         // REMASTER: the 3D car; CLASSIC (and a garage that did not load) shows the car's photo
         let garage = self.settings.view.mode == RenderMode::Remaster && self.loaded == Loaded::Garage;
@@ -8244,7 +8684,7 @@ impl Game {
             // CLASSIC 0x46d551: the car's photo (`_menuimg.TGA`, 324 x 270), centred at slot 0x1e of
             // set 3 and faded by `PicFade`, inside the ring
             if let Some(car) = g.cars.get(g.pic.shown).filter(|_| !garage) {
-                let (px, py) = (g.sprpos.x(CAR_SET, 0x1e) as f32, g.sprpos.y(CAR_SET, 0x1e) as f32);
+                let (px, py) = (g.sp().x(CAR_SET, 0x1e) as f32, g.sp().y(CAR_SET, 0x1e) as f32);
                 b.clip_ellipse(cx, cy, rx, ry);
                 // a browsed-but-locked car is drawn at 30 % (0x46d03d)
                 let tint = if g.car_locked() { g.pic.tint_dim(0.3) } else { g.pic.tint() };
@@ -8258,30 +8698,31 @@ impl Game {
                 b.rect(cx - rx, cy - ry, rx * 2.0, ry * 2.0, [0.0, 0.0, 0.0, if g.car_allowed() { 0.7 } else { 0.65 }]);
             }
             b.clip_outside(cx, cy, rx, ry);
-            g.frame_common(b, "car", "scr8", (474.0, 322.0));
+            g.frame_set(b, CAR_SET, "car", 2, "scr8", 3);
             b.clip_none();
             // CLASSIC 0x46cc84..: the ring (slot 4) and the thick rim arc (slot 5) at their sprpos slots
             for slot in [4, 5] {
-                b.menu(if slot == 4 { "carc" } else { "cars" }, 0, g.sprpos.x(CAR_SET, slot) as f32, g.sprpos.y(CAR_SET, slot) as f32);
+                g.slot_sprite(b, (CAR_SET, slot), if slot == 4 { "carc" } else { "cars" }, 0);
             }
             let car = &g.cars[g.settings.car];
             // CLASSIC 0x46d170: the name centred at slot 0x18 of set 3, with the blinking arrows
-            let (nx, ny) = (g.sprpos.x(CAR_SET, 0x18) as f32, g.sprpos.y(CAR_SET, 0x18) as f32);
+            let (nx, ny) = (g.sp().x(CAR_SET, 0x18) as f32, g.sp().y(CAR_SET, 0x18) as f32);
             menu_text(b, &car.name, nx, ny, MENU_ORANGE, Align::Centre);
             g.name_arrows(b, nx, ny, b.fnt_width(&car.name, 1.0), g.settings.car, g.locks().cars);
-            // rows: car + transmission, car horn (step line), record race (tall drop)
-            b.menu("carop", 0, 6.0, 148.0);
-            b.menu("caro2", 0, 6.0, 225.0);
-            b.menu("card", 0, 6.0, 263.0);
-            g.bracket_label(b, "tcar", 20.0, 155.0, g.sel == 0);
-            g.bracket_label(b, "ttran", 20.0, 192.0, g.sel == 1);
-            g.bracket_label(b, "thorn", 20.0, 232.0, g.sel == 2);
-            g.bracket_label(b, "trr", 20.0, 270.0, g.sel == 3);
-            let tr = if g.settings.manual { "manual" } else { "auto" };
-            b.menu_text(tr, 196.0, 202.0, if g.sel == 1 { ORANGE } else { WHITE });
+            // rows: car + transmission, car horn (step line), record race (tall drop); CLASSIC 0x46d106..0x46d12d:
+            // slots 1..0xd, 0x11..0x12, 0x1b, 0x1f of set 3 (init 0x46cc5e)
+            g.slot_sprite(b, (CAR_SET, 9), "carop", 0);
+            g.slot_sprite(b, (CAR_SET, 0x1f), "caro2", 0);
+            g.slot_sprite(b, (CAR_SET, 0x1b), "card", 0);
+            g.bracket_label(b, (CAR_SET, 0xa), "tcar", g.sel == 0);
+            g.bracket_label(b, (CAR_SET, 0xb), "ttran", g.sel == 1);
+            g.bracket_label(b, (CAR_SET, 0xc), "thorn", g.sel == 2);
+            g.bracket_label(b, (CAR_SET, 0xd), "trr", g.sel == 3);
+            // CLASSIC slot 0x11 `tman`: frame 0 "manual", 7 "auto", rolling through the blurred frames between (0x752a18)
+            g.slot_sprite(b, (CAR_SET, 0x11), "tman", g.rolls[ROLL_MANUAL].round() as usize);
             let horn = g.horns.get(g.settings.horn).map_or("horn", |h| h.name.as_str());
-            menu_text(b, horn, g.sprpos.x(CAR_SET, 0x13) as f32, g.sprpos.y(CAR_SET, 0x13) as f32, MENU_ORANGE, Align::Left);
-            g.onoff(b, g.settings.record_race, 206.0, 322.0);
+            menu_text(b, horn, g.sp().x(CAR_SET, 0x13) as f32, g.sp().y(CAR_SET, 0x13) as f32, MENU_ORANGE, Align::Left);
+            g.onoff(b, (CAR_SET, 0x12), ROLL_RECORD);
             if g.game_type == GameType::TimeAttack {
                 // DESIGN CHOICE: a text row under Record race (no original art for it)
                 let c = if g.sel == 4 { ORANGE } else { WHITE };
@@ -8292,15 +8733,15 @@ impl Game {
             // "Not yet available" comes first (0x46d266 / 0x46d5e5), then the league's division rule; the label sits 5 px up (0x46d281)
             let label = if g.car_locked() { Some("Not yet available") } else if !g.car_allowed() { Some("Not available in division") } else { None };
             if let Some(text) = label.filter(|_| (g.clock * 1000.0) as u32 & 0x3ff < 0x200) {
-                menu_text(b, text, g.sprpos.x(CAR_SET, 0x1e) as f32, g.sprpos.y(CAR_SET, 0x1e) as f32 - 5.0, MENU_ORANGE, Align::Centre);
+                menu_text(b, text, g.sp().x(CAR_SET, 0x1e) as f32, g.sp().y(CAR_SET, 0x1e) as f32 - 5.0, MENU_ORANGE, Align::Centre);
             }
             // CLASSIC 0x46d2d6..0x46d4ea: the three dials with their fill masks, then the labels
             let fills = gauge_fills(g.gauges);
             for (gauge, v) in GAUGES.iter().zip(fills) {
-                gauge.draw(b, &g.sprpos, v);
+                gauge.draw(g, b, v);
             }
             for gauge in &GAUGES {
-                gauge.draw_label(b, &g.sprpos);
+                g.slot_sprite(b, (CAR_SET, gauge.label_slot), gauge.label, 0);
             }
         }));
         out
@@ -8386,26 +8827,24 @@ impl Game {
     /// its length, rows 32 px apart with the current one in the boxes. The ambient volume has no dial
     /// here (it is in the pause menu's SFX options and the Remaster Sound screen).
     fn sound_screen(&self, b: &mut Batch) {
-        self.frame_common(b, "opt", "scr2", (463.0, 16.0));
+        self.frame_set(b, SOUND_SET, "opt", 2, "scr2", 3);
         self.sound_device_line(b);
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(SOUND_SET, slot) as f32, sp.y(SOUND_SET, slot) as f32);
+        // CLASSIC 0x46973d: slots 1..0x15 through 0x460880 (init 0x4695b4 copies `sndm` into slot 9 too)
         for (name, slot) in [("snd1", 4), ("snd4", 5), ("snd3", 6), ("sndm", 8), ("sndm", 9), ("sndt", 0xc), ("snda", 0xd), ("sndc", 0xe)] {
-            let (x, y) = at(slot);
-            b.menu(name, 0, x, y);
+            self.slot_sprite(b, (SOUND_SET, slot), name, 0);
         }
-        let (x, y) = at(0xa);
-        b.menu("onoff", self.loop_frame.round() as usize, x, y);
+        self.slot_sprite(b, (SOUND_SET, 0xa), "onoff", self.loop_frame.round() as usize);
         // the labels pulse by item: tsfx, tcdm, tcdl, sndb (slots 0xf..0x12)
         let s = &self.settings;
         for (name, slot) in [("tsfx", 0xf), ("tcdm", 0x10), ("tcdl", 0x11), ("sndb", 0x12)] {
             let (x, y) = at(slot);
-            self.label(b, name, x, y, self.sel == slot - 0xf, slot as u32);
+            self.label(b, (SOUND_SET, slot), name, x, y, self.sel == slot - 0xf);
         }
         let on_table = self.sel == SOUND_TABLE;
         for (name, slot) in [("sndak", 0x13), ("sndck", 0x14), ("sndtk", 0x15)] {
-            let (x, y) = at(slot);
-            b.menu(name, on_table as usize, x, y);
+            self.slot_sprite(b, (SOUND_SET, slot), name, on_table as usize);
         }
         // the needles (0x481d58), the CD music dial left (slot 0x19), the effects dial right (0x18)
         let colour = |item: usize| {
@@ -8461,13 +8900,13 @@ impl Game {
     /// the `selco` bracket), the ten tasks as a bracket tree (`ctrla` `[` and `ctrlb` `}` per row, the
     /// task's sprite, the control's name in FONT1). Left / Right choose which of the two the cursor is in.
     fn controls_screen(&self, b: &mut Batch) {
-        self.frame_at(b, "opt", "scr3", (34.0, 14.0), (463.0, 16.0), true);
-        let sp = &self.sprpos;
+        self.frame_set(b, CONTROLS_SET, "opt", 2, "scr3", 3);
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(CONTROLS_SET, slot) as f32, sp.y(CONTROLS_SET, slot) as f32);
         let l = self.controls.layout();
         // selco: frame 0 = the column has the cursor, 1 = the tree
         let (sx, sy) = at(4);
-        b.menu("selco", usize::from(self.ctl_tasks), sx, sy);
+        self.slot_menu(b, (CONTROLS_SET, 4), "selco", usize::from(self.ctl_tasks), sx, sy);
         // the column: the name in use at slot 4 + slot 0x15, the others slot 0x16 y apart, 4 each way
         let (nx, ny) = (sx + at(0x15).0, sy + at(0x15).1);
         let (pitch, window) = (at(0x16).1, (at(0x16).0 / 8.0) as usize);
@@ -8484,15 +8923,13 @@ impl Game {
         let (ox, row_pitch) = (bx + at(0x1d).0, at(0x1e).1);
         for (i, (&task, name)) in CLASSIC_TASKS.iter().zip(CLASSIC_LABELS).enumerate() {
             let y = by + i as f32 * row_pitch;
-            b.menu("ctrla", 0, bx, y);
-            b.menu("ctrlb", 0, cx, y);
+            // CLASSIC 0x468fd7 / 0x469023: the row's two bars are slots 0x18 / 0x19, the task sprite slot 5 + row
+            self.slot_menu(b, (CONTROLS_SET, 0x18), "ctrla", 0, bx, y);
+            self.slot_menu(b, (CONTROLS_SET, 0x19), "ctrlb", 0, cx, y);
             let on = self.ctl_tasks && self.sel == i;
             // the selected task's sprite pulses through its 8 frames, 512 ms a cycle (0x468f33)
             let frame = if on { (3.5 + 3.5 * (self.clock * std::f32::consts::TAU / 0.512).sin()) as usize } else { 0 };
-            match (on, self.glitch(0xc0 + i as u32)) {
-                (false, Some(off)) => b.image_glitch(&format!("m:{name}:0"), ox, y, 3.0, &off),
-                _ => b.menu(name, frame.min(7), ox, y),
-            };
+            self.slot_menu(b, (CONTROLS_SET, 5 + i), name, frame.min(7), ox, y);
             let key = match self.capture {
                 Some(c) if c.task == task => if ((self.clock * 3.0) as u32).is_multiple_of(2) { "?".to_string() } else { String::new() },
                 _ => l.bind[task].map_or("-".into(), |c| c.name()),
@@ -8504,14 +8941,14 @@ impl Game {
     /// Personal options: name, team, colours and the ten Key strings (config "Personal" block),
     /// then our own rows, in the graphic options' text-list style.
     fn personal_screen(&self, b: &mut Batch) {
-        self.frame_common(b, "opt", "scr1", (463.0, 16.0));
+        self.frame_set(b, PERSONAL_SET, "opt", 2, "scrd", 3);
         let s = &self.settings;
         // CLASSIC 0x466b70, sprpos set 17: labels at slot 0x14 x, the first row at its y, a row
         // `slot 0x15 y` below the other, the values at slot 0x15 x. Rows 0..=16 are the original's;
         // ours (Confirmations, Intro movies, Statistics, Back) follow in a column wide enough for
         // their labels. The menu canvas is 400 px tall, so only `PERSONAL_SLOTS` rows show at once and
         // the list scrolls with the cursor, as the graphic options' list does [design choice].
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let (lx, y0) = (sp.x(PERSONAL_SET, 0x14) as f32, sp.y(PERSONAL_SET, 0x14) as f32);
         let pitch = sp.y(PERSONAL_SET, 0x15) as f32;
         let vx = sp.x(PERSONAL_SET, 0x15) as f32;
@@ -8589,7 +9026,8 @@ impl Game {
 
     /// Statistics (stats.rs): four pages in the personal options' text-list style.
     fn statistics_screen(&self, b: &mut Batch) {
-        self.frame_common(b, "opt", "scr1", (463.0, 16.0));
+        // design choice: no original screen; Personal's title and box slots, the Options box (`scr1`)
+        self.frame_set(b, PERSONAL_SET, "opt", 2, "scr1", 3);
         let st = &self.stats;
         // CLASSIC: FONT1 in the menu colours on our own layout (the original has no such screen):
         // the page row as the personal options' rows, labels colour 3, values colour 1
@@ -8675,8 +9113,8 @@ impl Game {
     /// car column "----") is dead code in the original and opened by ours [design choice, RANK_LEAGUE].
     fn rankings_screen(&self, b: &mut Batch) {
         // CLASSIC 0x465f51: the Rankings init loads rank + scr6 ("Ranking" tag)
-        self.frame_common(b, "rank", "scr6", (463.0, 16.0));
-        let sp = &self.sprpos;
+        self.frame_set(b, RANKINGS_SET, "rank", 2, "scr6", 3);
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(RANKINGS_SET, slot) as f32, sp.y(RANKINGS_SET, slot) as f32);
         let v = self.rank;
         let league = v.kind == RANK_LEAGUE;
@@ -8704,8 +9142,7 @@ impl Game {
         let sel = used.get(self.sel.min(used.len() - 1)).copied();
         for (row, (sprite, frame, items, cur, n)) in rows.iter().enumerate() {
             let selected = sel == Some(row);
-            let (sx, sy) = at(4 + row);
-            b.menu(sprite, frame + if selected { 0 } else { 1 }, sx, sy);
+            self.slot_sprite(b, (RANKINGS_SET, 4 + row), sprite, frame + if selected { 0 } else { 1 });
             let (x, y) = (at(0x18 + row).0, at(0x18).1);
             if used.contains(&row) {
                 menu_list(b, items, *cur, x, y, *n, selected);
@@ -8713,8 +9150,7 @@ impl Game {
                 menu_text(b, "----", x, y, MENU_ORANGE, Align::Left);
             }
         }
-        let (hx, hy) = at(9);
-        b.menu("rankz", 0, hx, hy);
+        self.slot_sprite(b, (RANKINGS_SET, 9), "rankz", 0);
         let Some(t) = &self.rank_table else { return };
         let me = &self.settings.player_name;
         let lap_only = v.kind == 0;
@@ -8767,12 +9203,12 @@ impl Game {
         let Some([left, right]) = self.league_info_rows() else {
             return;
         };
-        let sp = &self.sprpos;
-        let g = |f: fn(&SprPos, usize, usize) -> i32, slot: usize| f(sp, LEAGUE_SET, slot) as f32;
-        let (x0, y0) = (g(SprPos::x, 0xb) + g(SprPos::x, 0x14), g(SprPos::y, 0xb) + g(SprPos::y, 0x14));
-        let pitch = g(SprPos::y, 0x15);
-        let (rx, lv) = (x0 + g(SprPos::x, 0x15), x0 + g(SprPos::x, 0x16));
-        let rv = rx + g(SprPos::y, 0x16);
+        let sp = self.sp();
+        let (gx, gy) = (|slot| sp.x(LEAGUE_SET, slot) as f32, |slot| sp.y(LEAGUE_SET, slot) as f32);
+        let (x0, y0) = (gx(0xb) + gx(0x14), gy(0xb) + gy(0x14));
+        let pitch = gy(0x15);
+        let (rx, lv) = (x0 + gx(0x15), x0 + gx(0x16));
+        let rv = rx + gy(0x16);
         for (i, ((lk, lval), (rk, rval))) in left.iter().zip(right.iter()).enumerate() {
             let y = y0 + i as f32 * pitch;
             menu_text(b, lk, x0, y, MENU_BLUE, Align::Left);
@@ -8794,17 +9230,17 @@ impl Game {
     /// at +5, 6, 7), the rows 14 px apart from y + 6 + 14. The original shows the nick only and
     /// colours a row by the player's car colour; ours: the human white [design choice].
     fn league_table(&self, b: &mut Batch) {
-        self.frame_common(b, "leagu", "scrc", (463.0, 16.0));
+        self.frame_set(b, STANDINGS_SET, "leagu", 3, "scrc", 2);
         let Some(l) = self.current_league() else { return };
-        let sp = &self.sprpos;
-        let g = |f: fn(&SprPos, usize, usize) -> i32, slot: usize| f(sp, STANDINGS_SET, slot) as f32;
+        let sp = self.sp();
+        let (gx, gy) = (|slot| sp.x(STANDINGS_SET, slot) as f32, |slot| sp.y(STANDINGS_SET, slot) as f32);
         let codes = self.track_codes();
         let d = self.league_div;
         let next = l.next_track(&codes).map_or("-".to_string(), |t| self.tracks[t].name.clone());
         let total = league::season_tracks(&codes, l.human_division()).len();
         let me = l.human().map(|i| &l.places[i]);
-        let (x0, y0, dx, dy) = (g(SprPos::x, 0x10), g(SprPos::y, 0x10), g(SprPos::x, 0x11), g(SprPos::y, 0x11));
-        let (vx, vx2) = (g(SprPos::x, 0x12), g(SprPos::x, 0x12) + dx);
+        let (x0, y0, dx, dy) = (gx(0x10), gy(0x10), gx(0x11), gy(0x11));
+        let (vx, vx2) = (gx(0x12), gx(0x12) + dx);
         for (label, x, row) in [("League name:", x0, 0.0), ("Races done:", x0 + dx, 0.0), ("Division:", x0, 1.0), ("Next track:", x0 + dx, 1.0), ("Player name:", x0, 2.0), ("Car:", x0 + dx, 2.0)] {
             menu_text(b, label, x, y0 + row * dy, MENU_BLUE, Align::Left);
         }
@@ -8816,8 +9252,8 @@ impl Game {
         menu_text(b, me.map_or("", |p| p.p.name.as_str()), vx, y(2.0), MENU_ORANGE, Align::Left);
         menu_text(b, me.map_or("", |p| p.p.cars[d].as_str()), vx2, y(2.0), MENU_ORANGE, Align::Left);
         // the division shown steps with left / right [design choice, no original]
-        menu_text(b, &format!("< Division {d} >"), 19.0, g(SprPos::y, 0x13) - 24.0, MENU_LAVENDER, Align::Left);
-        let (tx, ty, col) = (g(SprPos::x, 0x13), g(SprPos::y, 0x13), g(SprPos::x, 0x14));
+        menu_text(b, &format!("< Division {d} >"), 19.0, gy(0x13) - 24.0, MENU_LAVENDER, Align::Left);
+        let (tx, ty, col) = (gx(0x13), gy(0x13), gx(0x14));
         for (h, k) in [("Pos:", 0.0), ("Nick:", 1.0), ("Score:", 4.0), ("1", 5.0), ("2", 6.0), ("3", 7.0)] {
             menu_text(b, h, tx + col * k, ty, MENU_BLUE, Align::Left);
         }
@@ -8837,20 +9273,19 @@ impl Game {
     /// list has the focus the mode it acts on shows frame 4, the tab and the bar frame 0 (frame 1 otherwise) and the
     /// list is white (orange otherwise). The recording's details in the left column and the messages are ours.
     fn replays_screen(&self, b: &mut Batch) {
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(REPLAYS_SET, slot) as f32, sp.y(REPLAYS_SET, slot) as f32);
-        self.frame_at(b, "ghost", "scre", at(3), at(2), true);
+        self.frame_at(b, REPLAYS_SET, ("ghost", 3), ("scre", 2));
         let listed = self.ghost_row == 2;
         for (i, name) in ["tgr", "trpr"].into_iter().enumerate() {
             let (x, y) = at(4 + i);
             if listed && i == self.ghost_mode {
-                b.menu(name, 4, x, y);
+                self.slot_menu(b, (REPLAYS_SET, 4 + i), name, 4, x, y);
             } else {
-                self.label(b, name, x, y, self.ghost_row == i, i as u32 + 1);
+                self.label(b, (REPLAYS_SET, 4 + i), name, x, y, self.ghost_row == i);
             }
         }
-        let (tx, ty) = at(6);
-        b.menu("fghos", usize::from(!listed), tx, ty);
+        self.slot_sprite(b, (REPLAYS_SET, 6), "fghos", usize::from(!listed));
         let (lx, ly) = at(0x18);
         let names: Vec<String> = self.replays.iter().map(|(p, _)| demo_name(p)).collect();
         let items: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -8891,12 +9326,12 @@ impl Game {
     /// The Multi page, CLASSIC 0x463e04 (sprpos set 9): title `multi` at slot 3, the SCREEN box `scrb` at 2, the rows
     /// `tjoin` "join an existing game" and `tcrea` "create session" at 4 / 5. The refusal line is ours (story #7).
     fn multi_screen(&self, b: &mut Batch) {
-        let sp = &self.sprpos;
+        let sp = self.sp();
         let at = |slot: usize| (sp.x(MULTI_SET, slot) as f32, sp.y(MULTI_SET, slot) as f32);
-        self.frame_at(b, "multi", "scrb", at(3), at(2), true);
+        self.frame_at(b, MULTI_SET, ("multi", 3), ("scrb", 2));
         for (i, name) in ["tjoin", "tcrea"].into_iter().enumerate() {
             let (x, y) = at(4 + i);
-            self.label(b, name, x, y, self.sel == i, i as u32 + 1);
+            self.label(b, (MULTI_SET, 4 + i), name, x, y, self.sel == i);
         }
         if let Some(m) = &self.multi_msg {
             menu_text(b, m, at(4).0, at(5).1 + 44.0, MENU_ORANGE, Align::Left);
@@ -8904,9 +9339,9 @@ impl Game {
     }
 
     /// Load: the saved leagues, the selected one's details at the right. FONT1 on our layout (the
-    /// original's screen, set 13, is a list of sprites [I]).
+    /// original's screen, set 14 (0x46b9a4), is a list of sprites [O])).
     fn league_load(&self, b: &mut Batch) {
-        self.frame_common(b, "leagu", "scrc", (463.0, 16.0));
+        self.frame_set(b, LEAGUE_LOAD_SET, "leagu", 3, "scrc", 2);
         let codes = self.track_codes();
         for (i, l) in self.leagues.iter().enumerate().take(12) {
             let y = 92.0 + i as f32 * 18.0;
@@ -9171,9 +9606,10 @@ impl Gauge {
     /// part of it with menu-colour-4 pie wedges from the centre. `(1 - v) * 3740` units are covered,
     /// from the ring's end back towards 12 o'clock: whole segments first (segment i starts at
     /// `468 * (7 - i) + 3250` and spans 469 units), then one partial wedge ending at its segment's end.
-    fn draw(&self, b: &mut Batch, sp: &SprPos, v: f32) {
+    fn draw(&self, g: &Game, b: &mut Batch, v: f32) {
+        let sp = g.sp();
         let (x, y) = (sp.x(CAR_SET, self.slot) as f32, sp.y(CAR_SET, self.slot) as f32);
-        b.menu(self.sprite, 0, x, y);
+        g.slot_sprite(b, (CAR_SET, self.slot), self.sprite, 0);
         let (cx, cy) = (x + self.centre.0, y + self.centre.1);
         let pt = |k: i32| {
             let t = (k & 0xfff) as f32 * std::f32::consts::TAU / GAUGE_TURN;
@@ -9192,11 +9628,6 @@ impl Gauge {
             b.triangle([[cx, cy], pt(base), pt(base + 0x11d5)], LAVENDER);
             a -= GAUGE_SEG;
         }
-    }
-
-    /// The SPEED / ACC / GRIP tag at its slot, over the mask.
-    fn draw_label(&self, b: &mut Batch, sp: &SprPos) {
-        b.menu(self.label, 0, sp.x(CAR_SET, self.label_slot) as f32, sp.y(CAR_SET, self.label_slot) as f32);
     }
 }
 
@@ -9273,8 +9704,40 @@ fn compute_results(s: &Session, game_type: GameType) -> Vec<(usize, u32, Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_start_round_trips() {
+        for i in 0..CAM_STARTS.len() {
+            let o = CamOpts { start: i, ..CamOpts::default() };
+            assert_eq!(CamOpts::start_of(o.mode(true)), Some(i));
+        }
+        assert_eq!(CamOpts::start_of(CamMode::Goal), None);
+    }
     use motorview::render::{RenderAa, CLASSIC_MAX_DISTANCE, PostAa};
     use motorview::revmeter::RevMeterTune;
+
+    /// #210: the attract demo draws from the six regular tracks (Divisions 100 .. 301), never the bonus track (310) or
+    /// OkkunSpeedway (400), and never the track raced last unless it is the only one.
+    #[test]
+    fn attract_track_pool() {
+        // the shipped install in `Division` order: Goldbridge, RedRock, NeoCity, Atlantika, RuhrStadt, Olympos, NolbyHills, Okkun
+        let divs = [100, 101, 200, 201, 300, 301, 310, 400];
+        assert_eq!(attract_tracks(&divs, None), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(attract_tracks(&divs, Some(2)), vec![0, 1, 3, 4, 5]);
+        // the last track was a bonus track: nothing to leave out
+        assert_eq!(attract_tracks(&divs, Some(6)), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(attract_tracks(&[100], Some(0)), vec![0]);
+        assert!(attract_tracks(&[310, 400], None).is_empty());
+    }
+
+    /// The settings' pad defaults and `PadTune::default()` are the same numbers (stick dead zone 5 %, #377).
+    #[test]
+    fn pad_tune_defaults_agree() {
+        let t = PadTune::default();
+        let d = PAD_TUNE_DEFAULT.map(|x| x as f32 / 100.0);
+        assert_eq!((t.stick_dead, t.trigger_dead, t.steer_sens), (d[0], d[1], d[2]));
+        assert_eq!(PAD_TUNE_DEFAULT[0], 5);
+    }
 
     /// A volume steps 5 % at a time and stops at 0 and 100.
     #[test]

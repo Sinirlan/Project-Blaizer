@@ -10,7 +10,7 @@
 
 use super::lamps::Lamp;
 use super::aero::{Fins, Foil, Splitter, Wing};
-use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Thicken, Warp};
+use super::cuts::{Chamfer, MirrorCopy, Paint, Panel, Pick, Push, Slice, Thicken, Warp};
 use super::diffuser::Diffuser;
 use super::exhaust::Exhaust;
 use super::smooth::Smooth;
@@ -110,6 +110,8 @@ pub struct BodyStyle {
     /// (`super::cuts`)
     pub mirror_copies: Vec<MirrorCopy>,
     pub pushes: Vec<Push>,
+    /// cage faces cut by a plane before the pushes (`super::cuts::slice`, #465)
+    pub slices: Vec<Slice>,
     pub thickens: Vec<Thicken>,
     /// the mirror glass's colour tag: shaded as polished metal
     pub mirror_glass: Option<[u8; 3]>,
@@ -1009,14 +1011,32 @@ fn face_area(f: &Face) -> f32 {
 
 /// The refined body, or an empty list if nothing survives welding.
 pub fn body(faces: &[Face], st: &BodyStyle) -> Vec<Vertex> {
+    body_parts(faces, st).0
+}
+
+/// `tri`, and the triangle's cage face `f` in `src` if it was kept
+fn put(out: &mut Vec<Vertex>, src: &mut Vec<usize>, f: usize, t: [Vertex; 3]) {
+    let n = out.len();
+    tri(out, t);
+    if out.len() > n {
+        src.push(f);
+    }
+}
+
+/// `body`, and per triangle the index in `faces` of the face it was built from (a bevel strip's
+/// segment: the nearer face's; #292, the parts of the OBJ export).
+pub fn body_parts(faces: &[Face], st: &BodyStyle) -> (Vec<Vertex>, Vec<usize>) {
     // REMASTER: a face of no area (the arch tunnels' leftovers, outlines on a line) draws
     // nothing and bred strips and fans of nothing round it
-    let faces: Vec<Face> = faces.iter().filter(|f| face_area(f) > 1e-6).cloned().collect();
+    let keep: Vec<usize> = (0..faces.len()).filter(|&i| face_area(&faces[i]) > 1e-6).collect();
+    let faces: Vec<Face> = keep.iter().map(|&i| faces[i].clone()).collect();
     let faces = &faces[..];
     let cage = Cage::new(faces, st.smooth_deg);
     let look = Look::new(faces, &cage);
     let nf = cage.v.len();
     let mut out = Vec::new();
+    // per triangle of `out`, its cage face
+    let mut src: Vec<usize> = Vec::new();
 
     // Each face shrinks in its plane away from its crease edges by its own bevel width.
     let inward = |f: usize, k: usize| cage.n[f].cross((cage.at(f, k + 1) - cage.at(f, k)).normalize());
@@ -1234,12 +1254,12 @@ pub fn body(faces: &[Face], st: &BodyStyle) -> Vec<Vertex> {
                 })
                 .collect();
             for t in tris {
-                tri(&mut out, t.map(|i| vert[i]));
+                put(&mut out, &mut src, f, t.map(|i| vert[i]));
             }
             continue;
         }
         for t in triangulate(&flat) {
-            tri(&mut out, t.map(|i| look.vertex(f, p[f][i], normal[f][i])));
+            put(&mut out, &mut src, f, t.map(|i| look.vertex(f, p[f][i], normal[f][i])));
         }
     }
 
@@ -1361,8 +1381,8 @@ pub fn body(faces: &[Face], st: &BodyStyle) -> Vec<Vertex> {
                 .collect();
             for i in 0..segs {
                 let q = [sides[0][i], sides[1][i], sides[1][i + 1], sides[0][i + 1]].map(|r| look.vertex(owner(i), r.0, r.1));
-                tri(&mut out, [q[0], q[1], q[2]]);
-                tri(&mut out, [q[0], q[2], q[3]]);
+                put(&mut out, &mut src, owner(i), [q[0], q[1], q[2]]);
+                put(&mut out, &mut src, owner(i), [q[0], q[2], q[3]]);
             }
             // a ring point owns the fan wedge to the next point: so the reversed end's points
             // own the segment before them
@@ -1445,15 +1465,16 @@ pub fn body(faces: &[Face], st: &BodyStyle) -> Vec<Vertex> {
                     continue;
                 }
                 let o = r0.2;
-                tri(&mut out, [look.vertex(o, apex, an), look.vertex(o, r0.0, r0.1), look.vertex(o, r1.0, r1.1)]);
+                put(&mut out, &mut src, o, [look.vertex(o, apex, an), look.vertex(o, r0.0, r0.1), look.vertex(o, r1.0, r1.1)]);
             }
         }
     }
     // REMASTER: the insets of two faces round a corner, or a strip's end and a face's corner,
     // can land a fraction of a millimetre apart: the fans and strips between them were slivers
     // with an edge of nothing (the Titan's scoop frames, its exhaust recess)
-    merge_close(&mut out, MERGE);
-    out
+    merge_close(&mut out, Some(&mut src), MERGE);
+    let src = src.into_iter().map(|f| keep[cage.src[f].0]).collect();
+    (out, src)
 }
 
 /// points closer than this (m) are one (`merge_close`); the narrowest real detail, a clamped
@@ -1463,8 +1484,8 @@ const MERGE: f32 = 5e-4;
 /// Merge by distance: every point of the triangle list `tris` within `eps` of an earlier kept
 /// one moves onto it (a shared point moves alike in every triangle), unless that turns a
 /// triangle that stays over (or away from its normals) or flattens it; the triangles that
-/// collapse are dropped.
-fn merge_close(tris: &mut Vec<Vertex>, eps: f32) {
+/// collapse are dropped, and with them their entries of `tags` (one per triangle).
+fn merge_close(tris: &mut Vec<Vertex>, tags: Option<&mut Vec<usize>>, eps: f32) {
     let key = |p: [f32; 3]| p.map(f32::to_bits);
     let cell = |p: Vec3| (p / eps).floor().as_ivec3();
     let mut to: HashMap<[u32; 3], Vec3> = HashMap::new();
@@ -1506,13 +1527,20 @@ fn merge_close(tris: &mut Vec<Vertex>, eps: f32) {
         }
     }
     let mut out = Vec::with_capacity(tris.len());
-    for t in tris.as_chunks::<3>().0 {
+    let mut kept_tags = Vec::new();
+    for (i, t) in tris.as_chunks::<3>().0.iter().enumerate() {
         let moved = [0, 1, 2].map(|k| Vertex { pos: to[&key(t[k].pos)].to_array(), ..t[k] });
         if moved[0].pos != moved[1].pos && moved[1].pos != moved[2].pos && moved[2].pos != moved[0].pos {
             out.extend_from_slice(&moved);
+            if let Some(tg) = tags.as_deref() {
+                kept_tags.push(tg[i]);
+            }
         }
     }
     *tris = out;
+    if let Some(tg) = tags {
+        *tg = kept_tags;
+    }
 }
 
 #[cfg(test)]
@@ -1592,12 +1620,12 @@ mod tests {
     fn merge_close_collapses_without_flipping() {
         let v = |p: [f32; 3]| Vertex { pos: p, uv: [0.0; 2], color: [1.0; 4], layer: -1.0, normal: [0.0, 0.0, 1.0], env: 0.0 };
         let mut fan = vec![v([0.0, 0.0, 0.0]), v([1.0, 0.0, 0.0]), v([1.0, 0.0003, 0.0]), v([0.0, 0.0, 0.0]), v([1.0, 0.0003, 0.0]), v([1.0, 1.0, 0.0])];
-        merge_close(&mut fan, MERGE);
+        merge_close(&mut fan, None, MERGE);
         assert_eq!(fan.iter().map(|v| v.pos).collect::<Vec<_>>(), vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
         // the thin triangle's tip would cross its base onto the earlier point below it
         let mut thin = vec![v([0.5, -0.0001, 0.0]), v([0.5, -1.0, 0.0]), v([0.6, -1.0, 0.0]), v([0.0, 0.0, 0.0]), v([1.0, 0.0, 0.0]), v([0.5, 0.0003, 0.0])];
         let before: Vec<[f32; 3]> = thin.iter().map(|v| v.pos).collect();
-        merge_close(&mut thin, MERGE);
+        merge_close(&mut thin, None, MERGE);
         assert_eq!(thin.iter().map(|v| v.pos).collect::<Vec<_>>(), before);
     }
 
@@ -1639,7 +1667,7 @@ mod tests {
     /// faces out
     #[test]
     fn cube_bevels_inside() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let v = body(&cube(), &st);
         for p in v.iter().map(|v| Vec3::from(v.pos)) {
             assert!(p.x >= -1e-5 && p.x <= 1.0 + 1e-5 && p.y >= -1e-5 && p.y <= 1.0 + 1e-5 && -p.z >= -1e-5 && -p.z <= 1.0 + 1e-5, "{p}");
@@ -1665,12 +1693,32 @@ mod tests {
         }
     }
 
+    /// #292: `body_parts` names one face per triangle, counted in the caller's list (a face of no
+    /// area in front is skipped), and a triangle lies on or next to the face it names
+    #[test]
+    fn body_parts_name_their_faces() {
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let mut faces = vec![face(&[[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], [0.0, 0.0, 1.0])];
+        faces.extend(cube());
+        let (v, src) = body_parts(&faces, &st);
+        assert!(bytemuck::cast_slice::<Vertex, u8>(&v) == bytemuck::cast_slice::<Vertex, u8>(&body(&faces, &st)));
+        assert_eq!(src.len() * 3, v.len());
+        assert!(src.iter().all(|&f| (1..faces.len()).contains(&f)));
+        for (t, &f) in v.chunks(3).zip(&src) {
+            let n = Vec3::from(faces[f].normal);
+            let on = Vec3::from(faces[f].pts[0]);
+            // back to game space; the bevel's half nearest the face
+            let c = t.iter().map(|v| Vec3::new(v.pos[0], v.pos[1], -v.pos[2])).sum::<Vec3>() / 3.0;
+            assert!((c - on).dot(n).abs() < 0.05, "face {f}: {c}");
+        }
+    }
+
     /// a cube whose top is a fan of three triangles round a point of its front edge (the middle
     /// one touches the crease with its corner only): the fan shares one inset point, so the
     /// body stays watertight and inside the cube (#232: each kept its own, a T-junction)
     #[test]
     fn crease_fan_shares_its_inset() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         let v = [0.5, 1.0, 0.0];
         faces[0] = face(&[[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], v, [0., 1., 0.]], [0., 0., -1.]);
@@ -1697,7 +1745,7 @@ mod tests {
     #[test]
     fn glass_top_insets() {
         let g = Glass { rgb: [21, 25, 29], frame: 0.1, inset: 0.05, tint: 0.5 };
-        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         faces[5].rgb = g.rgb;
         inset_glass(&mut faces, &g, &[]);
@@ -1726,7 +1774,7 @@ mod tests {
     #[test]
     fn flat_glass_one_pane() {
         let g = Glass { rgb: [21, 25, 29], frame: 0.1, inset: 0.05, tint: 0.5 };
-        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let st = BodyStyle { bevel: 0.02, segments: 2, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: Some(g), flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let mut faces = cube();
         faces.pop();
         let (m, up) = ([0.5, 1.05, 0.5], [0., 1., 0.]);
@@ -1774,7 +1822,7 @@ mod tests {
     /// a flat square split in two stays flat and the same size: nothing to bevel
     #[test]
     fn coplanar_split_is_smooth() {
-        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
+        let st = BodyStyle { bevel: 0.05, segments: 4, bevel_tol: 0.001, smooth_deg: 9.0, arch_step_deg: 0.0, arch_clearance: 0.0, arch_lip: 0.0, drop: 0.0, centre: 0.0, glass: None, flat_glass: Vec::new(), lamps: Vec::new(), vents: Vec::new(), chamfers: Vec::new(), panels: Vec::new(), splitter: None, wing: None, fins: None, foils: Vec::new(), paints: Vec::new(), mirror_copies: Vec::new(), pushes: Vec::new(), slices: Vec::new(), thickens: Vec::new(), mirror_glass: None, carbon: Vec::new(), exhaust: None, diffusers: Vec::new(), smooths: Vec::new(), warps: Vec::new(), refine: 0.0, refine_seams: false };
         let up = [0.0, 1.0, 0.0];
         let f = [face(&[[0., 0., 0.], [1., 0., 0.], [1., 0., 1.]], up), face(&[[0., 0., 0.], [1., 0., 1.], [0., 0., 1.]], up)];
         let v = body(&f, &st);

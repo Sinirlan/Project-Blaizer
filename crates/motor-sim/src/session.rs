@@ -28,6 +28,12 @@ motor_tune::tunable! {
     /// range: 0.5..60
     /// unit: s
     FLIP_RESET_AFTER: f32 = 2.0;
+    /// The AI stuck reset (after `RESET_AFTER` of backing up) waits while the car's centreline point is within this
+    /// distance of the camera: the original squares it, 22500 = 150² (0x40d9d3, 0x4cf4b3) [O], #369. Ours measures to
+    /// the human's car [I]. 0 resets after 8 s wherever the car is.
+    /// range: 0..1000
+    /// unit: m
+    AI_RESET_HIDDEN: f32 = 150.0;
 }
 
 /// The timer part of the reset check `0x40d854`, once per frame: `wheel_s` (c[0xc4]) and `flip_s`
@@ -60,6 +66,26 @@ pub fn reset_due(wheel_s: f32, flip_s: f32) -> bool {
     flip_s > FLIP_RESET_AFTER.get() || wheel_s > RESET_AFTER.get()
 }
 
+/// The AI stuck timer of `0x40d854` (c[0xbc] armed flag, c[0xf8] time), once per frame: disarmed above 15 m/s, armed
+/// by the back-up manoeuvre (two separate ifs, so a car that is fast and reversing re-arms at once), then counting
+/// frame time capped at 0.5 s (0x40d97c). `None` = not armed.
+// CLASSIC 0x40d937..0x40d982
+pub fn stuck_timer(stuck: Option<f32>, fast: bool, reversing: bool, dt: f32) -> Option<f32> {
+    let mut stuck = if fast { None } else { stuck };
+    if reversing && stuck.is_none() {
+        stuck = Some(0.0);
+    }
+    stuck.map(|t| t + dt.min(0.5))
+}
+
+/// Does the stuck timer reset the car? Past `RESET_AFTER` the original resets only when the car's centreline point
+/// is more than `AI_RESET_HIDDEN` from the camera (0x40d9d3); until then the test repeats every frame. `dist` = that
+/// distance, `None` = no camera (the all-AI test benches): reset.
+// CLASSIC 0x40d98c..0x40d9de
+pub fn stuck_due(stuck: Option<f32>, dist: Option<f32>) -> bool {
+    stuck.is_some_and(|t| t > RESET_AFTER.get()) && dist.is_none_or(|d| d * d > AI_RESET_HIDDEN.get().powi(2))
+}
+
 /// A driver from League/Profiles/*.adp (or the human player).
 #[derive(Debug, Clone, Default)]
 pub struct Driver {
@@ -88,7 +114,7 @@ pub struct Racer {
     /// c[0xc0]: seconds upside down against the world (`reset_timers`, 0x40d854: reset after 2 s)
     pub flip_s: f32,
     /// AI stuck timer (0x40d854 +0xbc/+0xf8): armed by the reverse manoeuvre, cleared above
-    /// 15 m/s, reset after 8 s
+    /// 15 m/s, reset after 8 s when the car is more than `AI_RESET_HIDDEN` from the human (`stuck_timer`, `stuck_due`)
     stuck: Option<f32>,
     pub car: Car,
     pub progress: Progress,
@@ -130,6 +156,7 @@ pub struct Snapshot {
     props: crate::props::PropState,
     acc: f32,
     prev: Vec<ViewPose>,
+    last_dt: f32,
 }
 
 /// Which AI parameter row of the .trk a race uses.
@@ -207,6 +234,11 @@ pub struct Race {
     prev: Vec<ViewPose>,
     /// how many ticks the latest `step_as` ran (the variable path: always 1)
     ticks_last_frame: u32,
+    /// the latest frame's length on the per-frame path, real seconds (its start poses are `prev`)
+    last_dt: f32,
+    /// motorview cine (#423): how far the drawn moment lies before the end of the latest frame, real seconds
+    /// (`set_view_lead`); 0 outside the cine tool, cleared by every step
+    view_lead: f32,
 }
 
 /// What the renderer draws of a car, between two physics ticks (`Race::view_pose`).
@@ -332,7 +364,7 @@ impl Race {
             .iter()
             .map(|r| RacerState { airborne_s: r.airborne_s, flip_s: r.flip_s, stuck: r.stuck, car: r.car.clone(), progress: r.progress.clone(), ai: r.ai.state(), telemetry: r.telemetry, brake: r.brake })
             .collect();
-        Snapshot { racers, countdown: self.countdown, clock_ms: self.clock_ms, ai_vector: self.ai_vector, props: self.props.state(), acc: self.acc, prev: self.prev.clone() }
+        Snapshot { racers, countdown: self.countdown, clock_ms: self.clock_ms, ai_vector: self.ai_vector, props: self.props.state(), acc: self.acc, prev: self.prev.clone(), last_dt: self.last_dt }
     }
 
     /// Go back to a snapshot of this race. The cars keep the race's current size (`car_scale`).
@@ -349,7 +381,7 @@ impl Race {
         }
         (self.countdown, self.clock_ms, self.ai_vector) = (s.countdown, s.clock_ms, s.ai_vector);
         self.props.set_state(&s.props);
-        (self.acc, self.prev) = (s.acc, s.prev.clone());
+        (self.acc, self.prev, self.last_dt, self.view_lead) = (s.acc, s.prev.clone(), s.last_dt, 0.0);
     }
 
     /// `cars[i]` goes to grid slot `i`; `player` is the slot driven by the caller (or none).
@@ -406,14 +438,8 @@ impl Race {
             let v: Option<Vec<f32>> = (0..6).map(|i| e.f32(i)).collect();
             v.map(|v| (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5])))
         });
-        // `CameraSplineName`: the TV camera's motion (TrackDef +0x908 → +0x1d90, 0x45ea6d) [O]
-        let tv_camera = first_value(&trk, "CameraSplineName")
-            .ok()
-            .and_then(|n| fs::read(root, &n).ok())
-            .and_then(|b| motor_data::tbl::load(&b, None).ok())
-            .and_then(|t| cfg::parse_lwmo(&t.data).ok())
-            .map(|m| crate::tvcam::keys(&m))
-            .unwrap_or_default();
+        // `CameraSplineName`: the TV camera's motion (TrackDef +0x908 → +0x1d90, 0x45ea6d) [O], or the user's override (#424)
+        let tv_camera = crate::tvcam::load(root, track, &trk);
         // `BasePath\StartSpline1/2`: the grid-to-start fly-by motions (TrackDef +0x1108 / +0x1208, 0x45ea6d) [O]
         let start_spline = |k: &str| {
             let path = format!("{}\\{}", first_value(&trk, "BasePath").ok()?, first_value(&trk, k).ok()?);
@@ -421,7 +447,7 @@ impl Race {
             cfg::parse_lwmo(&t.data).ok()
         };
         let start_camera = crate::startcam::StartCamera::new(start_spline("StartSpline1"), start_spline("StartSpline2"));
-        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, solid_remote: false, susp: (1.0, 1.0), tick_s: None, tick_hz: None, acc: 0.0, prev: Vec::new(), ticks_last_frame: 0 };
+        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, solid_remote: false, susp: (1.0, 1.0), tick_s: None, tick_hz: None, acc: 0.0, prev: Vec::new(), ticks_last_frame: 0, last_dt: 0.0, view_lead: 0.0 };
         race.restart();
         Ok(race)
     }
@@ -449,7 +475,7 @@ impl Race {
         self.countdown = COUNTDOWN;
         self.clock_ms = 0.0;
         self.props.reset();
-        (self.acc, self.ticks_last_frame) = (0.0, 0);
+        (self.acc, self.ticks_last_frame, self.last_dt, self.view_lead) = (0.0, 0, 0.0, 0.0);
         self.prev.clear();
     }
 
@@ -503,7 +529,11 @@ impl Race {
     /// motorview drives any followed car by hand; design choice). The AI keeps tracking that car
     /// but its input is dropped, and the human's car coasts. `None` = the human car, as `step`.
     pub fn step_as(&mut self, dt: f32, player: Input, hand: Option<usize>) {
+        self.view_lead = 0.0;
         let Some(h) = self.tick_s else {
+            // the frame's start poses: `view_pose` draws between them and its end when a cine sets a view lead (#423)
+            self.capture_prev();
+            self.last_dt = dt;
             self.step_once(dt, player, hand, true);
             self.ticks_last_frame = 1;
             return;
@@ -535,7 +565,7 @@ impl Race {
     pub fn set_fixed_tick(&mut self, hz: Option<f32>) {
         self.tick_hz = hz.filter(|&hz| hz > 0.0);
         self.tick_s = self.tick_hz.map(|hz| 1.0 / hz);
-        self.acc = 0.0;
+        (self.acc, self.view_lead) = (0.0, 0.0);
         self.prev.clear();
     }
 
@@ -556,29 +586,44 @@ impl Race {
         self.ticks_last_frame
     }
 
+    /// motorview cine (#423, design choice): draw the cars `lead` real seconds before the end of the latest frame, so
+    /// a recording stepped frame by frame past the video clock is drawn at the clock (pose resampling). Clamped to the
+    /// previous tick (fixed tick) or the latest frame's start (per-frame path); the next step clears it.
+    pub fn set_view_lead(&mut self, lead: f32) {
+        self.view_lead = lead.max(0.0);
+    }
+
     /// How far the view is between the previous tick (0) and the latest (1): 1 without the fixed tick and on a frame
-    /// that ends on a tick.
+    /// that ends on a tick. On the per-frame path: between the latest frame's start and end when a view lead is set,
+    /// else 1.
     pub fn alpha(&self) -> f32 {
-        self.tick_s.map_or(1.0, |h| (1.0 + self.acc / self.tick_real(h)).clamp(0.0, 1.0))
+        match self.tick_s {
+            Some(h) => (1.0 + (self.acc - self.view_lead) / self.tick_real(h)).clamp(0.0, 1.0),
+            None if self.view_lead > 0.0 && self.last_dt > 0.0 => (1.0 - self.view_lead / self.last_dt).clamp(0.0, 1.0),
+            None => 1.0,
+        }
     }
 
     /// How far the view is behind the latest tick, real seconds (0 on the per-frame path and on a frame that ends on a
-    /// tick). Recorded poses (ghosts, a demo's car) are looked up this much before the race clock, so they move with
-    /// the interpolated cars.
+    /// tick, plus a cine's view lead). Recorded poses (ghosts, a demo's car) are looked up this much before the race
+    /// clock, so they move with the interpolated cars.
     pub fn view_lag(&self) -> f32 {
-        if self.tick_s.is_some() { (-self.acc).max(0.0) } else { 0.0 }
+        match self.tick_s {
+            Some(h) => (self.view_lead - self.acc).clamp(0.0, self.tick_real(h).max(-self.acc)),
+            None => self.view_lead.min(self.last_dt),
+        }
     }
 
     /// The pose to draw car `slot` at: between its previous and its latest tick by `alpha`, so the motion is
     /// smooth at any frame rate (one tick behind the physics). Remote cars (posed from outside every frame) and
-    /// the per-frame path give the latest pose.
+    /// the per-frame path give the latest pose (unless a cine's view lead is set, #423).
     pub fn view_pose(&self, slot: usize) -> ViewPose {
         let r = &self.racers[slot];
         let now = ViewPose::of(&r.car);
         let alpha = self.alpha();
         match self.prev.get(slot) {
             // alpha 1: the latest tick exactly (no rounding of the lerp: 60 fps draws as the per-frame path)
-            Some(prev) if self.tick_s.is_some() && !r.remote && alpha < 1.0 => prev.lerp(&now, alpha),
+            Some(prev) if !r.remote && alpha < 1.0 => prev.lerp(&now, alpha),
             _ => now,
         }
     }
@@ -717,21 +762,19 @@ impl Race {
                 r.car.merge_contact_flags(f);
             }
         }
+        let eye = self.racers.iter().find(|r| r.human).map(|r| r.car.pos);
         for (slot, (r, input)) in self.racers.iter_mut().zip(&inputs).enumerate() {
             r.brake = input.brake;
             let done = r.progress.done();
             (r.airborne_s, r.flip_s) = if r.remote { (0.0, 0.0) } else { reset_timers(r.airborne_s, r.flip_s, r.car.wheel_contact, r.car.flip_contact, sim_dt) };
             if !r.human && racing && !done && hand != Some(slot) {
-                if r.car.vel.z.abs() > 15.0 {
-                    r.stuck = None;
-                } else if r.ai.reversing() && r.stuck.is_none() {
-                    r.stuck = Some(0.0);
-                }
-                if let Some(t) = &mut r.stuck {
-                    *t += sim_dt;
-                    if *t > RESET_AFTER.get() {
-                        r.airborne_s = RESET_AFTER.get() + 1.0; // reuse the reset path below
-                    }
+                r.stuck = stuck_timer(r.stuck, r.car.vel.z.abs() > 15.0, r.ai.reversing(), sim_dt);
+                // APPROX [I]: the original measures from the car's centreline point (P+0x324) to the rendered camera
+                // (0x45b06c passes 0x704e50); the human's car stands in, so a replay, a rewind or a ghost run does not
+                // depend on the view. No human (motorrace): no camera, reset after 8 s.
+                let dist = eye.map(|e| self.line.at(r.progress.s).0.distance(e));
+                if stuck_due(r.stuck, dist) {
+                    r.airborne_s = RESET_AFTER.get() + 1.0; // reuse the reset path below
                 }
             }
             if racing {
@@ -888,6 +931,22 @@ impl Race {
         self.car_scale = (scale, feel);
     }
 
+    /// Dev tool (`motorhead --place`): stand a racer on the first surface below `from_y` at (`x`, `z`), facing `heading_deg`
+    /// (0 = +z, clockwise seen from above: x = sin, z = cos). Returns false when there is no ground there.
+    pub fn place_at(&mut self, slot: usize, x: f32, z: f32, heading_deg: f32, from_y: f32) -> bool {
+        let Some(y) = self.world.ground(x, z, from_y) else { return false };
+        let r = &mut self.racers[slot];
+        let h = heading_deg.to_radians();
+        r.car.place(Vec3::new(x, y - r.car.p.ride_height(), z), Vec3::new(h.sin(), 0.0, h.cos()));
+        (r.airborne_s, r.flip_s) = (0.0, 0.0);
+        r.stuck = None;
+        r.ai.reset(&r.car);
+        if let Some(p) = self.prev.get_mut(slot) {
+            *p = ViewPose::of(&self.racers[slot].car);
+        }
+        true
+    }
+
     /// Put a racer back on the racing line a little ahead of where it is.
     pub fn respawn(&mut self, slot: usize) {
         let r = &mut self.racers[slot];
@@ -920,11 +979,16 @@ impl Race {
         r.ai.ease_in();
         r.progress.teleported(&self.line, Vec3::new(nd.x, y, nd.z), self.clock_ms as u32);
         // a teleport, not motion: no interpolation from where the car was
+        self.sync_view_pose(slot);
+    }
+
+    /// Draw car `slot` where it is now, not interpolated from its previous tick (after a teleport or a pose set
+    /// from outside, e.g. motorview `--car-states`, #275).
+    pub fn sync_view_pose(&mut self, slot: usize) {
         if let Some(p) = self.prev.get_mut(slot) {
             *p = ViewPose::of(&self.racers[slot].car);
         }
     }
-
 }
 
 motor_tune::tunable! {
@@ -1016,6 +1080,27 @@ impl Racer {
         let scale = if self.base_acc != 0.0 && before.acc_force != 0.0 { before.acc_force / self.base_acc } else { 1.0 };
         self.base_acc = self.car.p.acc_force / scale;
         self.base_gear_top = self.car.p.gear_top.iter().map(|g| g / scale).collect();
+    }
+
+    /// Debug tuning (motorview, #434): the parameters without the rubber band's scale (`base_acc`, `base_gear_top`),
+    /// what a tuning edit compares with the car file.
+    pub fn tuned(&self) -> CarParams {
+        let mut p = self.car.p.clone();
+        p.acc_force = self.base_acc;
+        p.gear_top.clone_from(&self.base_gear_top);
+        p
+    }
+
+    /// Debug tuning: put unscaled parameters (`tuned`) in place, the rubber band's current scale kept on top.
+    pub fn set_tuned(&mut self, p: &CarParams) {
+        let scale = if self.base_acc != 0.0 { self.car.p.acc_force / self.base_acc } else { 1.0 };
+        self.base_acc = p.acc_force;
+        self.base_gear_top.clone_from(&p.gear_top);
+        self.car.p = p.clone();
+        self.car.p.acc_force = p.acc_force * scale;
+        for g in &mut self.car.p.gear_top {
+            *g *= scale;
+        }
     }
 }
 
@@ -1567,6 +1652,33 @@ mod tick_tests {
         race.restore(&snap);
         assert_eq!(first, run(&mut race));
     }
+
+    /// #423: without a view lead the drawn pose is the latest on the per-frame path and between ticks on the fixed
+    /// tick, as before; a lead of half the step draws halfway back on both, and the next step clears it (needs the install).
+    #[test]
+    fn view_lead_draws_before_the_frame_end() {
+        for hz in [None, Some(60.0)] {
+            let Some(mut race) = race(None) else { return };
+            race.set_fixed_tick(hz);
+            for _ in 0..800 {
+                race.step(1.0 / 60.0, Input::default());
+            }
+            let latest = ViewPose::of(&race.racers[1].car);
+            let start = race.prev[1];
+            assert!(start.pos.distance(latest.pos) > 0.1, "the car moves");
+            assert_eq!(race.alpha(), 1.0);
+            assert_eq!(race.view_lag(), 0.0);
+            assert_eq!(race.view_pose(1).pos, latest.pos);
+            race.set_view_lead(0.5 / 60.0);
+            assert!((race.alpha() - 0.5).abs() < 1e-3, "{hz:?}: alpha {}", race.alpha());
+            assert!((race.view_lag() - 0.5 / 60.0).abs() < 1e-5);
+            assert!((race.view_pose(1).pos - (start.pos + latest.pos) * 0.5).length() < 1e-3);
+            race.set_view_lead(1.0);
+            assert_eq!(race.view_pose(1).pos, start.pos, "{hz:?}: clamped to the step's start");
+            race.step(1.0 / 60.0, Input::default());
+            assert_eq!(race.alpha(), 1.0);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1615,5 +1727,35 @@ mod reset_tests {
     #[test]
     fn frame_time_capped() {
         assert_eq!(reset_timers(0.0, 0.0, NONE, true, 2.0), (0.5, 0.5));
+    }
+}
+
+#[cfg(test)]
+mod stuck_reset_tests {
+    use super::*;
+
+    /// 0x40d937..0x40d982: disarm above 15 m/s, arm on reverse (both ifs), count the capped frame time.
+    #[test]
+    fn stuck_timer_arms_counts_and_disarms() {
+        assert_eq!(stuck_timer(None, false, false, 0.1), None);
+        assert_eq!(stuck_timer(None, false, true, 0.1), Some(0.1));
+        // stays armed after the reverse ends, until the car is fast
+        assert_eq!(stuck_timer(Some(1.0), false, false, 0.25), Some(1.25));
+        assert_eq!(stuck_timer(Some(1.0), true, false, 0.25), None);
+        // fast and reversing: the disarm and the arm are separate ifs
+        assert_eq!(stuck_timer(Some(5.0), true, true, 0.25), Some(0.25));
+        // the frame time is capped at 0.5 s
+        assert_eq!(stuck_timer(Some(1.0), false, false, 3.0), Some(1.5));
+    }
+
+    /// 0x40d98c..0x40d9de: past 8 s the reset waits for the car to be more than 150 m from the camera.
+    #[test]
+    fn stuck_reset_waits_while_near_the_camera() {
+        assert!(!stuck_due(None, Some(500.0)));
+        assert!(!stuck_due(Some(7.9), Some(500.0)));
+        assert!(!stuck_due(Some(9.0), Some(100.0)));
+        assert!(!stuck_due(Some(9.0), Some(150.0)));
+        assert!(stuck_due(Some(9.0), Some(150.5)));
+        assert!(stuck_due(Some(8.1), None));
     }
 }

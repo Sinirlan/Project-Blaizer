@@ -17,6 +17,10 @@ Glass rgb=50,83,107 frame=0.02 inset=0.015 tint=0.6
 # y 0.42-0.52, z 1.78-2.02) wrapping round the corner as 6link 134 (x 0.74-0.82, z 1.70-1.82);
 # halo 0/1 runs the band from (0.322 0.417 2.018) to (0.817 0.518 1.778). Design choice: one
 # reflector bowl with three bulbs along the band and a daytime light bar along its bottom edge.
+# Fourth pass (#465, the user's note that the lamps stuck out): the band's faces fold 9-25 deg to
+# each other and to the paint round them (135/199 18.7, 136/148 22, 137/194 and 137/173 20), so
+# with the paint rounded the straight lens stood proud of it as a bar; the lens tag is in the
+# paint's zone now (like the Serpent's tail lamps, #463) and the band follows the skin.
 Lamp from=101,99,94 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.011 led_inset=0.03
 Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.03 margin=0 clip=0 halo=1
 # [O] tail lights: one Blight4 quad a side, tag 127 2 0 (118/119, x 0.42-0.82, y 0.73-0.83,
@@ -24,6 +28,16 @@ Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.03 margin=0 clip=0 halo=1
 # choice: two light bars across the lens (frame units = the lens's width, about 0.4 m).
 Lamp from=127,2,0 frame=0.012 inset=0.02 tint=0.55 kind=leds led_inset=0.03
 Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.04 margin=0 clip=0 halo=1
+# [O] the lens's corners: outer 154 (0.824 0.822 -1.854) and 0 (0.824 0.728 -1.868), on the
+# tail corner's folds (0/1 56.7 deg, 177/118 47.6, 138/189 53.9); inner 155 (0.420 0.826 -1.934)
+# and 4 (0.419 0.725 -1.948). Design choice (#465, the user's request: the tail corner rounded
+# into one curve, the lamps shorter and further in to make room for it): the outer corners slide
+# 6 cm in along the lens's top and bottom edges, the inner ones 2 cm, so the lens is 36 cm long
+# instead of 41 and ends 7 cm short of the corner; the paint faces round them stretch to follow.
+Push lo=0.819,0.817,-1.859 hi=0.829,0.827,-1.849 by=-0.0589,0.0006,-0.0117
+Push lo=0.819,0.723,-1.873 hi=0.829,0.733,-1.863 by=-0.0589,-0.0004,-0.0116
+Push lo=0.415,0.821,-1.939 hi=0.425,0.831,-1.929 by=-0.0196,0,-0.0039
+Push lo=0.414,0.72,-1.953 hi=0.424,0.73,-1.943 by=-0.0196,0,-0.0039
 
 # [O] the dark 10 10 10 faces: the grille 202 under the nose panel (|x| < 0.322, y 0.31-0.42,
 # z 2.02), the side scoops ahead of the rear arches (54-57, x 0.74-0.92, y 0.31-0.76,
@@ -32,7 +46,86 @@ Led pts=0,0.03;0.95,0.03 repeat=2 step=0,0.1 style=bar width=0.04 margin=0 clip=
 # Design choice: honeycomb grille, slatted side scoops, the channel's mouth an empty recess.
 Vent from=10,10,10 lo=0,0.28,1.98 hi=0.35,0.44,2.05 rgb=3,3,3 frame=0.01 inset=0.03 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=0
 Vent from=10,10,10 lo=0.7,0.28,0.3 hi=0.95,0.8,0.7 rgb=3,3,4 frame=0.01 inset=0.03 tint=0.5 kind=slats pitch=0.03 width=0.01 blades=0 spine=0.01 tilt=0
-Vent from=10,10,10 lo=0,0.6,1.5 hi=0.4,0.72,1.66 rgb=3,3,5 frame=0.008 inset=0.03 tint=0.5 kind=plain
+Vent from=10,10,10 lo=0,0.6,1.5 hi=0.4,0.8,1.66 rgb=3,3,5 frame=0.008 inset=0.03 tint=0.5 kind=plain
+
+# [O] the bonnet channel: the cowl's floor 74/75 (228 42 4) runs from the mouth's bottom edge
+# 97/98 (0.330 0.630 1.527) up to the windscreen's base 104/102 (0.414 0.842 1.025) between the
+# walls 73 (96 103 105 97) and 72 (103 104 105), 10 cm under the bonnet's edge 96-103 at the mouth
+# and 3 cm at 105 (0.394 0.773 1.267). Design choice (#465, the user's note that the bonnet read
+# concave): the channel is filled. 105 goes onto the wall's top corner 103 and 97 onto the
+# bonnet's edge 96-103 at its own z (0.3208 of the way: 0.397954 0.735070 1.52719), so the floor
+# lies in the bonnet's plane (74 folds 6 deg to 190, 75 6 deg to 74), the walls 72/73 collapse to
+# no area (the zone drops them) and the mouth 69 becomes a flat vent in the bonnet, 3 cm deep,
+# rising 3 cm from the nose slope 203 (a 15 deg fold, rounded).
+Push lo=0.389,0.768,1.262 hi=0.399,0.778,1.272 by=0.02,0.03045,0.00842
+Push lo=0.325,0.625,1.522 hi=0.335,0.635,1.532 by=0.067714,0.10542,0
+
+# [O] the tail's lower centre: the black panel 124 (5 5 5, Holes3.iff, |x| < 0.416, y 0.350-0.611,
+# z -2.034..-2.021, n 0 -0.05 -1) between the red bumper corners 121 (x 0.416-0.843), the
+# Holes3 slope 123 (45 45 45) under it down to the underside's edge 26/27 (0.4217 0.258 -1.968),
+# the underside 13 (|x| < 0.818, y 0.258, z -1.968..-1.887) and 23 (|x| < 0.466, 0.215 at
+# z -1.049 to 0.260 at -1.887) between the rear arches' inner walls (0.466). Design choice (#465,
+# the user's request: the panel moved back into the body, a diffuser and an exhaust after the
+# Ferrari F80's tail, the user's marked photo: the red corners are its body-coloured side panels,
+# the panel between them its black centre with one wide outlet up top and the diffuser below;
+# then the user's call: the whole centre set back to the tail lamps' plane):
+# - [O] the tail bulges back in the middle: the panel's plane z -2.034 lies 8.6 cm behind the
+#   lamps' inner ends 4/5 (0.419 0.725 -1.948), the yellow band 2 slopes down from them to the
+#   panel's top edge 3/6, the red corners 121 sweep forward to -1.950 at their outer edge 2. The
+#   centre column goes to the lamps' plane: the panel's corners 3/6 (0.416 0.611 -2.034) and
+#   158/160 (0.416 0.350 -2.021) move to z -1.948 (`Push`), so the band 2 stands upright under
+#   the lamps and the panel upright under it; the underside's edge 26/27 onto 160/158 themselves,
+#   so the slope 123 has no area and goes, the valance 120 is a triangle and the underside 13
+#   runs straight up to the panel's foot (26/27 moved to the plane instead left 123 in it, and
+#   the ramp's wall pieces cut from 123 and 124 sat on one edge: 10 non-manifold edges; 5 mm short
+#   of it, 123's lifted inner part was a 5 mm lip the bevel could not inset: 4). The red corners 121 (and the valance 120 and the band
+#   1 over them) are cut at |x| 0.45 first (`Slice`), so only the 3.4 cm strip inside the cut
+#   follows the moved corners: it becomes the side wall of the set-back centre, 7.5 cm deep,
+#   65 deg to the tail plane, and the corners outside the cut keep their sweep as the F80's
+#   protruding side panels do.
+# - the underside between the arches ramps up to the panel's foot (`Diffuser`, as the Serpent's
+#   #388, no keel): from z -1.72, where it lies on the floor (0.251), to 0.37 at z -1.948,
+#   steepening; the channel |x| < 0.396 with its walls leaning out 1.988 cm to the panel's own
+#   edge 0.41588, so no sliver is cut beside it; the rows every 2.28 cm land on the ramp's end
+#   (2.5 cm left a 3 mm row before it). The panel's bottom rises with the ramp (24 cm tall over
+#   its trailing edge, which is the panel's foot).
+# - the ramp and its walls in carbon fibre (123 repainted into the underside's tag first); four
+#   carbon strakes under the ramp at |x| 0.13 and 0.27 (`Fins`, the walls make six), 14 cm deep at
+#   the tail, shrinking forward with the ramp (the fins keep 23 cm over the ground).
+# - the panel itself (repainted plain black, the Holes3 texture goes) recessed 3 cm in a 1 cm
+#   frame, and one wide outlet on the centre line in the recess (`Exhaust centre=1`): 32 x 10 cm
+#   in a 1.2 cm rim, its lower corners chamfered 2 cm, every corner rounded 1.5 cm, its lip in the
+#   lamps' plane (3 cm proud of the recess floor), centred at y 0.525.
+Slice lo=0.42,0.25,-2.1 hi=0.9,0.65,-1.85 axis=x at=0.45
+Push lo=0.41,0.606,-2.039 hi=0.42,0.616,-2.029 by=0,0,0.08561
+Push lo=0.41,0.345,-2.026 hi=0.42,0.355,-2.016 by=0,0,0.07322
+Push lo=0.4205,0.2565,-1.9695 hi=0.4225,0.259,-1.9665 by=-0.00577,0.09215,0.01986
+Diffuser lo=0,0.15,-2.1 hi=0.4158,0.63,-1.72 width=0.396 wall=0.01988 roof=-1.72,0.251;-1.80,0.27;-1.87,0.305;-1.92,0.345;-1.948,0.37 keel=-1.948,0.1 keel_bottom=0 keel_top=0 keel_round=0 step=0.0228
+Paint from=45,45,45 lo=0,0.2,-2.1 hi=0.42,0.45,-1.9 like=0,0,0
+Carbon from=0,0,0 lo=0,0.2,-2.1 hi=0.42,0.62,-1.7
+Fins xs=0.13;0.27 z0=-1.945 z1=-1.72 depth=0.14 thickness=0.012 carbon=1
+Paint from=5,5,5 lo=0,0.35,-2.1 hi=0.42,0.63,-1.9 like=10,10,10
+Vent from=10,10,10 lo=0,0.35,-2.1 hi=0.42,0.63,-1.9 rgb=3,3,7 frame=0.01 inset=0.03 tint=0.5 kind=plain
+Exhaust x=0 y=0.525 z=-1.95 width=0.32 height=0.1 chamfer=0.02 slant=0 round=0.015 lip=0.012 pipe=0.08 depth=0.05 centre=1
+
+# [O] behind the rear window, the engine cover: 201 (45 45 45, Holes2.iff, |x| < 0.42, y 0.898-
+# 0.946, z -1.812..-1.375, n 0 0.99 -0.11) and the triangle 181 a side (x 0.366-0.462, out to
+# the strip's back corner at z -1.293, 5 deg off 201): a near-flat trapezoid 0.84 m across and
+# 0.44 m long, the Holes2 texture its oval holes. Design choice (#465, the user's photo of the
+# Lamborghini Huracán's engine cover): a louvred cover, three wide matt graphite plates stepping
+# down towards the tail, each step's riser facing back, with four gussets across each step, in
+# a dark chamfered frame (the recess's frame band); the row of small fins under the Huracán's
+# last plate left out (the user's call). The faces stay out of the paint's curved zone (below),
+# so they are the original two polygons when they are picked here (centroid z -1.51 and -1.59;
+# the carbon strips' faired triangles all lie forward of -1.375), repainted in the vent faces'
+# plain black (the texture goes) and recessed 6.5 cm.
+Paint from=45,45,45 lo=0,0.85,-1.85 hi=0.47,0.97,-1.42 like=10,10,10
+Vent from=10,10,10 lo=0,0.85,-1.85 hi=0.47,0.97,-1.42 rgb=3,3,6 frame=0.012 inset=0.065 tint=0.5 kind=louvres count=3 ribs=4 width=0.016 low=0.2
+# [O] the strips either side of the rear window, 82 / 83 / 88 (45 45 45, Holes.iff, x 0.366-0.501,
+# y 0.946-1.138, z -1.375..-0.581, between the glass and the paint's 103-105). Design choice
+# (#465, the user's request): carbon fibre. The cover beside them is repainted first, so the
+# tag picks only the strips here (the rear panel 123, also 45 45 45, is under y 0.36).
+Carbon from=45,45,45 lo=0.3,0.94,-1.4 hi=0.52,1.16,-0.55
 
 # [O] The fenders are fans of flat facets: the front fender crown 155-158 / 194-197 (folded
 # 20-35 deg from the side 129/128 and the bonnet slope 154), the rear haunch 178 179 185 /
@@ -40,11 +133,61 @@ Vent from=10,10,10 lo=0,0.6,1.5 hi=0.4,0.72,1.66 rgb=3,3,5 frame=0.008 inset=0.0
 # choice (like the Titan's fenders): each curved into one panel a side, 2.5 cm triangles, every
 # point held to the original facets (`round`) so the bulge stays; the folds to the bonnet
 # centre, the glass line and the lower red body stay creases.
-Smooth from=239,159,4 lo=0.7,0.5,0.9 hi=0.95,0.85,1.85 max_deg=50 step=0.025 loose=0 round=0.1
-Smooth from=239,159,4 lo=0.8,0.5,-1.8 hi=0.95,0.95,-0.5 max_deg=50 step=0.025 loose=0 round=0.1
+# Third pass (#465, the user's request: production fidelity, the whole bodywork smooth, no edge
+# or ridge): one zone over both paints and the carbon strips (zones fair one by one, so a fold
+# between two zones would stay a crease), `max_deg` 50 -> 65. [O] The paint's folds are 10-57 deg
+# but for the tail's lower corner 121/122 (61.5), the bonnet channel's walls 72/73 (58-64 to its
+# floor 74/75 and the bonnet 182/190) and the side scoop's (63.7-64.2 inside it, 69.5 and 114 at
+# its lower and upper lips): all of those round but the scoop's lips, which stay the opening's
+# edges. The boxes, first holding a face's centroid wins: the fenders (`round` 0.1, as before),
+# the channel 72-75 (`round` 0.04: rounded over 25 cm, as the rest, its walls melted into the
+# bonnet round the black mouth 69, a dimpled "beak"; tight, it stays a channel with soft edges),
+# the tail outboard of x 0.38 (down to the valance, below), under the lamps and over them, the
+# body outboard of the cover and
+# the strips, the strips, and the centre forward of the rear window (`round` 0.25, like the
+# Serpent's tail). Fourth pass (#465): the headlight band in the zone too (above), and the
+# channel box's `round` 0.04 is moot with the channel filled (it stays for the mouth's surround).
+# [O] The side scoop's lips run on as two creases down the flank to the rear arch: the shoulder's
+# underside 60 (77 78 84, facing down) folds 114 deg to the shoulder 163 along 84-78 and 62 to the
+# door 51, the ledge 59 (74 73 83, facing up) 70 deg to the sill 198 along 83-74 and 64 to the door
+# 49; both triangles taper from the lips (18 / 13 cm) to their apexes 78 (0.930 0.828 -0.818) and
+# 74 (0.930 0.436 -0.766), where the shoulder meets the side at the haunch's 50 deg fold. Design
+# choice (#465, the user's request: the only edges left are these, and they are to dissolve into
+# the body towards the back): the flank is cut across at z -0.3 (`Slice`), so each crease is two
+# cage edges; ahead of the cut they stay creases (the zone's 65), behind it the box `max_deg` 120
+# rounds them (`round` 0.3, the cut point on the fold line pinned by the crease ahead of it), so
+# the undercut melts into the shoulder-to-side fold over the last half metre.
+# Left out: the cover 201/181 (recessed, above) and the rear panels 123/124 (their
+# outlines are cut lines), and the band 175 between the tail lamps ([O] 0 0.14 -0.99, |x| < 0.42,
+# y 0.725-0.826, the lamps' height): the deck 139 over it folds 46 deg and the panel 2 under it
+# 27 deg, and the lamps' outline pins those folds at the lens's corners. Rounded between the
+# lamps, the band's top sagged 2-3 cm and the paint crumpled at the lenses' inner ends; at a
+# 3-6 cm `round` the 2.5 cm lattice gave the fold a sawtooth in the reflections. Out of the zone,
+# the lamps' and the band's edges are one straight line from corner to corner that the deck and
+# the panel round into. (The lens in the zone too, as on the Serpent, with the band back in it:
+# no pin at all, but on the faired lens the second LED bar fell outside the recess and the deck
+# over it rippled; the run with the lens in the zone before the lamps were shortened hung.)
+# [O] The dark valance 120 (33 35 33, n 0.17 -0.51 -0.85) under the rear bumper folds 26.8 deg to
+# its rear face 121 and 61.8 to its corner 122, and the corner fold 121/122 (61.5) ran down into
+# the valance's corner 159 (0.811 0.350 -1.942), an outline point, so the bumper's bottom corner
+# stayed sharp. Design choice (#465, the user's request: that corner rounded): the valance joins
+# the zone (its tag in `from`, the outboard tail box down to y 0), so the corner rounds to the
+# bottom; the outline corner is now 28 under the car (y 0.26), where the side 122 meets the arch.
+Slice lo=0.7,0.28,-1.0 hi=1.0,0.93,0.65 axis=z at=-0.3
+Smooth from=239,159,4;228,42,4;45,45,45;33,35,33;101,99,94 lo=0.7,0.5,0.9;0.8,0.5,-1.8;0.7,0.28,-0.75;0,0.6,1.0;0.38,0,-2.3;0,0.36,-2.3;0,0.83,-2.3;0.47,0,-1.7;0.42,0.97,-1.3;0,0,-0.55 hi=0.95,0.85,1.85;0.95,0.95,-0.5;1.0,0.93,-0.3;0.43,0.86,1.66;1.0,1.3,-1.7;0.38,0.72,-1.7;0.38,1.3,-1.7;1.0,1.3,2.3;0.47,1.2,-0.5;0.47,1.3,2.3 max_deg=65;65;120;65;65;65;65;65;65;65 step=0.025 loose=0 round=0.1;0.1;0.3;0.04;0.25;0.25;0.25;0.25;0.25;0.25
+# [O] the glass is flat facets too: the windscreen's centre 77 and its corner wraps 76 fold
+# 14.7 deg, the rear window 84/86/89 3-6 deg, the side windows 91-93 and 97/98 3-7 deg. Design
+# choice (#465, as the Serpent's canopy): one zone, faired before the glass is recessed, with a
+# longer `round` than the paint's so it reads as one even curve.
+Smooth from=50,83,107 lo=0,0.8,-1.4 hi=0.8,1.2,1.1 max_deg=30 step=0.025 loose=0 round=0.3
 # Second pass (the user's mesh-check shot, 2026-10-29): 2,584 of the body's 13,574 triangles were
 # slivers (under 5 deg), [D] mostly the bevel strips' rows, 3-12 mm across, along cage edges up to
 # 1.5 m (the windscreen and side-window frames, the sills, the nose), and long fans over the big
 # side and bonnet panels. Every edge cut and every face remeshed at 4 cm, like the Titan; a design
 # choice: at 5-15 cm the rows come out 3-6 mm by 6-15 cm, still slivers, and more of them.
 Refine step=0.04
+# Design choice (#465, the user's note that the bonnet read concave): with the channel filled
+# (above) the bonnet is flat between the fenders' crowns and still reads dished, so it domes
+# 2 cm along the centre line, fading to the fender crowns (|x| 0.8), the lamps (y 0.5) and the
+# windscreen's base (z 1.0); the nose at z 1.95 stays.
+Warp by=0,0.02,0 x=0,1;0.45,0.7;0.8,0 y=0.5,0;0.62,1 z=1.0,0;1.45,1;1.95,0

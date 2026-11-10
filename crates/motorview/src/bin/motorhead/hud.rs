@@ -425,6 +425,11 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
         }
     }
 
+    // ---- CHEAT-free map easter eggs (#366, 0x41353a): the RuhrStadt club message, the Atlantika roof scroller
+    if !paused {
+        egg_overlay(g, r, b);
+    }
+
     // ---- minimap, bottom right (10 px in from the corner, 0x412c0c): a marker in each
     // driver's colour with their race position above it
     let mine = pos;
@@ -505,6 +510,43 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
     if !paused {
         if let Some(sc) = motor_sim::cheats::tron(race.name_cheat).then(|| motor_sim::cheats::tron_scroll(race.since_init_s())).flatten() {
             tron_scroller(b, sc, modern, px);
+        }
+    }
+}
+
+/// The map easter eggs (#366), CLASSIC `0x41353a` in DrawHud `0x413008`: white myfont with a black shadow 2 px down and right
+/// (`0x4116fc`), screen coordinates in the 480-tall HUD canvas. Remaster draws the same text with its sharp myfont.
+fn egg_overlay(g: &Game, r: &RaceState, b: &mut Batch) {
+    use motor_sim::eggs::*;
+    const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    let (w, h) = (b.canvas.w, b.canvas.h);
+    match r.eggs.active {
+        Egg::None => {}
+        Egg::Club => {
+            // SetTextMode centre, shadow 2: (W/2, H/2) and one line (font height + 2) below
+            for (i, line) in ["WELCOME TO CLUB TBL!", "Tonights Guest DJ: Randolph Carter!"].into_iter().enumerate() {
+                let x = w * 0.5 - b.text_width(line, 1.0) * 0.5;
+                let y = h * 0.5 + i as f32 * (FONT_H + 2.0);
+                b.text(line, x + SHADOW, y + SHADOW, 1.0, BLACK);
+                b.text(line, x, y, 1.0, motorview::ui::WHITE);
+            }
+        }
+        Egg::Roof => {
+            // 0x411a5c: the five red letters at scale 10 with a 20 px shadow, bouncing on |sine|
+            let red = [BIG_COLOUR[0] as f32 / 255.0, BIG_COLOUR[1] as f32 / 255.0, BIG_COLOUR[2] as f32 / 255.0, 1.0];
+            for (c, x, y) in big_letters(&r.eggs, w, h) {
+                let s = c.to_string();
+                b.text(&s, x + SHADOW * BIG_SCALE, y + SHADOW * BIG_SCALE, BIG_SCALE, BLACK);
+                b.text(&s, x, y, BIG_SCALE, red);
+            }
+            // 0x411868: the diary text, each character centred on its own sine position, no shadow
+            for (at, x, y) in scroll_glyphs(&r.eggs, g.egg_text.len(), w) {
+                let c = g.egg_text[at] as char;
+                if c > ' ' {
+                    let s = c.to_string();
+                    b.text(&s, x - b.text_width(&s, 1.0) * 0.5, y, 1.0, motorview::ui::WHITE);
+                }
+            }
         }
     }
 }
@@ -660,8 +702,9 @@ fn plate_points(r: &RaceState, w: f32, h: f32, wobble: Option<f32>) -> Vec<(usiz
     let cam = &r.cam;
     let (f, rt) = (cam.forward(), cam.right());
     let up = rt.cross(f);
-    // 90 degree horizontal field of view: focal length = half the width
-    let focal = w * 0.5;
+    // 90 degree horizontal field of view: focal length = half the width. Vert+ (#446, #479, `render::field_aspect`): on a
+    // window wider than 4:3 the vertical field stays the 4:3 one, so the focal length is 2/3 of the height
+    let focal = if w > h * 4.0 / 3.0 { h * 2.0 / 3.0 } else { w * 0.5 };
     let mut out = Vec::new();
     for (i, rc) in r.sess.race.racers.iter().enumerate() {
         if i == r.sess.focus || rc.progress.eliminated_ms.is_some() {

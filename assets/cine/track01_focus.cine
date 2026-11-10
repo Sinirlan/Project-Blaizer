@@ -1,0 +1,15 @@
+# Motorhead cine v1
+# Depth of field sample for #421 (Remaster only; Classic renders it sharp): RedRock, 8 AI cars from the green light.
+# A long lens down the start straight looks at the pack coming head-on, focused on the back of the field, then pulls
+# focus to the pole car (a rack in 1 / distance from 5.8 to 6.8 s, once the pack is out from behind the bridge). Aperture 0.25 is no real lens: at these distances a
+# real f/2 blurs a few pixels at most (20-cine "Depth of field").
+Race Track 1 Cars 1 2 3 4 5 6 7 8 Difficulty medium Laps 3 Catchup on Start go
+Output Size 1920 1080 Fps 60
+End 8.5
+
+Camera head static Eye -7.8 8.5 238.1 Target car 0 Zoom auto 8 Lag 0.25 Lead 0.2 Aperture 0.25
+Key head 0   Focus car 7
+Key head 5.8 Focus car 7
+Key head 6.8 Focus car 0
+
+Shot 0 head FadeIn 0.5 FadeOut 0.7

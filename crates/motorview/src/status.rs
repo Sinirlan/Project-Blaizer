@@ -21,15 +21,26 @@ pub struct StatusBar<'a> {
     pub mode: &'static str,
     /// a background job (the Cine render): its text, progress 0..1 (None: not known) and the flag its cancel button sets
     pub job: Option<(String, Option<f32>, &'a AtomicBool)>,
+    /// the dock's tuning changes an exit would lose (#434): above 0, the "N CHANGED" chip that opens the Changes card
+    pub changes: usize,
+    /// the Changes card is open (the chip is lit)
+    pub changes_open: bool,
+}
+
+/// What the bar drew: its height in points (margins included) and the changes chip, when shown.
+pub struct Shown {
+    pub h: f32,
+    pub chip: Option<egui::Response>,
 }
 
 /// The card's height and its margins around it (points).
 const H: f32 = 28.0;
 
 impl StatusBar<'_> {
-    /// The bar along the bottom edge (add it before the side panels); its height in points, margins included.
-    pub fn show(&self, ui: &mut Ui) -> f32 {
+    /// The bar along the bottom edge (add it before the side panels).
+    pub fn show(&self, ui: &mut Ui) -> Shown {
         let ctx = ui.ctx().clone();
+        let mut chip = None;
         let r = egui::Panel::bottom("status")
             .exact_size(H + 20.0)
             .show_separator_line(false)
@@ -62,6 +73,11 @@ impl StatusBar<'_> {
                             ui.add_space(6.0);
                             tag(ui, t);
                         }
+                        if self.changes > 0 {
+                            glass_ui::status_sep(ui);
+                            let r = changes_chip(ui, self.changes, self.changes_open);
+                            chip = Some(r.on_hover_text("tuning changes in the dock: click for the list (Copy as Markdown, reset per row)"));
+                        }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.spacing_mut().item_spacing.x = 16.0;
                             ui.label(RichText::new(self.mode.to_uppercase()).font(theme::glass_font(13.0)).color(theme::S1));
@@ -87,8 +103,21 @@ impl StatusBar<'_> {
                 glass_ui::finish(&ctx, &card.response);
             })
             .response;
-        r.rect.height()
+        Shown { h: r.rect.height(), chip }
     }
+}
+
+/// The tuning changes chip (#434): the unsaved tag's orange pill with an icon and "N CHANGED", clickable; filled
+/// while the card is open.
+fn changes_chip(ui: &mut Ui, n: usize, open: bool) -> egui::Response {
+    let text = format!("{n} CHANGED");
+    let g = ui.painter().layout_no_wrap(text, theme::glass_font(10.0), theme::ORANGE_TEXT);
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(g.size().x + 34.0, 18.0), egui::Sense::click());
+    let fill = theme::ORANGE.gamma_multiply(if open { 0.22 } else if r.hovered() { 0.14 } else { 0.08 });
+    ui.painter().rect(rect, 7.0, fill, egui::Stroke::new(1.0, theme::ORANGE.gamma_multiply(if open || r.hovered() { 0.9 } else { 0.6 })), egui::StrokeKind::Inside);
+    ui.painter().text(egui::pos2(rect.left() + 13.0, rect.center().y), egui::Align2::CENTER_CENTER, icons::SLIDERS, egui::FontId::proportional(12.0), theme::ORANGE_TEXT);
+    ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - g.size().y / 2.0), g, egui::Color32::PLACEHOLDER);
+    r
 }
 
 /// `FPS 144`: the caption in dim, the value in white mono, right to left.

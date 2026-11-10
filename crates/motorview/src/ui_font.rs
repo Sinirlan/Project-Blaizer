@@ -156,7 +156,10 @@ pub mod icon {
     pub const SQUARE: char = '\u{e167}';
     // the Remaster race HUD's DEMO tag (#345): the camera of a watched demo
     pub const VIDEO: char = '\u{e1a5}';
-    pub const ALL: [char; 41] = [FLAG, MONITOR, VOLUME, GAMEPAD, CAMERA, GAUGE, PLAY, RESTART, LOG_OUT, ALERT, X, CHECK, TRASH, SAVE, USER, PAINT_BUCKET, MESSAGE_SQUARE, TROPHY, BAR_CHART, CAR, DELETE, KEYBOARD, TIMER, ROUTE, LIST_ORDERED, TRENDING_UP, TRENDING_DOWN, LOCK_OPEN, FILM, CHEVRON_UP, CHEVRON_DOWN, ACTIVITY, MAP_PIN, GHOST, EYE, LOCK, USERS, DISC, MUSIC, SQUARE, VIDEO];
+    // Lap Analysis (#429 phase 4): BROWSE FILES and the drop overlay, NOT NOW of the keep requester
+    pub const FOLDER_OPEN: char = '\u{e247}';
+    pub const CIRCLE_X: char = '\u{e084}';
+    pub const ALL: [char; 43] = [FLAG, MONITOR, VOLUME, GAMEPAD, CAMERA, GAUGE, PLAY, RESTART, LOG_OUT, ALERT, X, CHECK, TRASH, SAVE, USER, PAINT_BUCKET, MESSAGE_SQUARE, TROPHY, BAR_CHART, CAR, DELETE, KEYBOARD, TIMER, ROUTE, LIST_ORDERED, TRENDING_UP, TRENDING_DOWN, LOCK_OPEN, FILM, CHEVRON_UP, CHEVRON_DOWN, ACTIVITY, MAP_PIN, GHOST, EYE, LOCK, USERS, DISC, MUSIC, SQUARE, VIDEO, FOLDER_OPEN, CIRCLE_X];
 }
 
 /// Chars the fields are built for.
@@ -167,7 +170,8 @@ pub fn charset(font: HudFont) -> Vec<char> {
     if font == HudFont::Glyphs {
         return GLYPHS.to_vec();
     }
-    (33u8..=126).map(char::from).chain(['»', '·', '×']).collect()
+    // ± and the true minus: Lap Analysis's gaps; the ellipsis of BROWSE FILES… (#429)
+    (33u8..=126).map(char::from).chain(['»', '·', '×', '±', '\u{2212}', '\u{2026}']).collect()
 }
 
 /// One glyph's metrics, in field source pixels (1/16 em), y down from the baseline.

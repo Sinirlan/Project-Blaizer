@@ -72,7 +72,8 @@ impl Game {
     }
 
     /// Keys of the Glass screen (`Screen::Replays`): up / down the recordings (the ends stop with their sound), left / right
-    /// and Q / E the mode, Enter races or watches, Del / the pad's X deletes behind the requester (NO! preselected).
+    /// and Q / E the mode, Enter races or watches, Del / the pad's X deletes behind the requester (NO! preselected), F / the
+    /// pad's Y opens Lap Analysis (#429).
     pub(crate) fn replays_key_modern(&mut self, k: KeyCode) {
         let n = self.replays.len();
         let mut e = None;
@@ -98,6 +99,15 @@ impl Game {
                 e = Some(ev::REQUESTER);
             }
             KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space => e = Some(self.ghost_pick()),
+            // ANALYSE (#429): Lap Analysis of this recording; F, the pad's Y (F5)
+            KeyCode::KeyF | KeyCode::F5 if self.sel < n => {
+                e = Some(if self.ana_from_ghost(self.sel) {
+                    self.go(Screen::Analysis);
+                    ev::SELECT
+                } else {
+                    ev::SELECT_ERROR
+                });
+            }
             KeyCode::Escape | KeyCode::Backspace => self.back_to_dial(Screen::Single, 5),
             _ => {}
         }
@@ -143,9 +153,10 @@ impl Game {
                     Self::glass_hints(b, d, dev, &[(&[3], "BACK")], 626.0);
                 } else {
                     let locked = g.replays.get(g.sel).is_some_and(|(_, m)| g.rec_locked(m).is_some());
-                    let off: &[usize] = if locked { &[2] } else { &[] };
-                    let items: [(&[usize], &str); 5] = [(&[9, 10], "RECORDING"), (&[0, 1], "MODE"), (&[2], verb), (&[16], "DELETE"), (&[3], "BACK")];
-                    Self::glass_hints_off(b, d, dev, &items, (640.0, 626.0), (1.0, 28.0), off);
+                    // RACE / WATCH dimmed on a locked track, ANALYSE (#429) without a lap to compare
+                    let off: Vec<usize> = [(2, locked), (4, !g.ana_possible(g.sel))].iter().filter(|x| x.1).map(|x| x.0).collect();
+                    let items: [(&[usize], &str); 6] = [(&[9, 10], "RECORDING"), (&[0, 1], "MODE"), (&[2], verb), (&[16], "DELETE"), (&[17], "ANALYSE"), (&[3], "BACK")];
+                    Self::glass_hints_off(b, d, dev, &items, (640.0, 626.0), (1.0, 28.0), &off);
                 }
             }
         });
@@ -281,7 +292,7 @@ impl Game {
     }
 
     /// `.tag-d`: a dim tag (no accent), 18 design px high, its top left at canvas (x, y); returns its width.
-    fn tag_dim(b: &mut Batch, d: Glass, text: &str, (x, y): (f32, f32)) -> f32 {
+    pub(super) fn tag_dim(b: &mut Batch, d: Glass, text: &str, (x, y): (f32, f32)) -> f32 {
         let w = Self::tag_width(b, d, text);
         let r = vec::rounded_rect(x, y, w, d.d(18.0), d.d(7.0));
         let mut m = Mesh::default();

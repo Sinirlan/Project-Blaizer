@@ -54,7 +54,7 @@ pub struct VolU {
     pub proj: [f32; 4],
     /// volume near, volume far, slices
     pub vol: [f32; 4],
-    /// output width, height
+    /// output width, height; z, w: the projection's lens shift in NDC (`Camera::shift`, the Cine preview)
     pub scr: [f32; 4],
     /// the street lamps of `Globals` (position, range), (rgb, shadow layer); x: lamps in use,
     /// y, z: cosine of the cone's inner and outer half angle, w: scatter gain (`FogTune::lamps`)
@@ -73,6 +73,9 @@ pub struct VolU {
     pub shaft_vp: [[f32; 4]; 4],
     /// x: the map holds this frame (sun shafts on), y: depth bias in map units, z: how much the haze darkens in shadow
     pub shaft: [f32; 4],
+    /// REMASTER clouds of `Globals` (#470): `CLOUD_ROWS` vec4 per cloud; x: clouds in use
+    pub clouds: [[f32; 4]; crate::render::CLOUD_ROWS * crate::render::MAX_CLOUDS],
+    pub cloud_n: [f32; 4],
 }
 
 /// The last frame's camera, for the history.
