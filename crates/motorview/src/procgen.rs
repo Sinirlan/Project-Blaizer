@@ -55,14 +55,21 @@ const INNER_INSET: f32 = 0.55;
 /// Rubber colour (sRGB bytes). [O] the original tread faces are (1, 1, 1), which per-pixel
 /// light leaves pitch black; slightly lifted so the sidewall's shape reads.
 const TYRE_RGB: [u8; 3] = [38, 38, 38];
-/// `Vertex::env` of a textured tread (generated wheels): the texture layer is the rubber's colour,
-/// the next layer its normal (rgb) and roughness (a), shaded matte [design choice]
+/// `Vertex::env` of the textured rubber (generated wheels' tread and walls): the texture layer is the
+/// rubber's colour, the next layer its normal (rgb) and roughness (a), shaded matte [design choice]
 pub const TYRE_ENV: f32 = 7.0;
-/// the tread texture's mean (assets/textures/tyre/colour.png, 37.6 of 255), so a tread tinted
-/// `tyre_rgb` averages that colour and meets the plain sidewalls
-const TYRE_TEX_MEAN: f32 = 37.6 / 255.0;
-/// one tile of the tread texture covers this many metres, square [design choice]
-const TYRE_TILE: f32 = 0.4;
+/// the colour means of the baked rubber (assets/textures/tyre/tread.png and side.png, printed by
+/// tools/tyre-bake/pack.py), so a tyre tinted `tyre_rgb` averages that colour (#529)
+const TYRE_TEX_MEAN: f32 = 164.5 / 255.0;
+const SIDE_TEX_MEAN: f32 = 198.4 / 255.0;
+/// [O] the baked tread tile's aspect, around / across (tools/tyre-bake/README.md: 0.2364 x 0.2765
+/// model units, 4 of the P Zero's 28 pitches): the tread takes whole tiles round the wheel at this
+/// aspect over the crown's width
+pub const TREAD_ASPECT: f32 = 0.855;
+/// the sidewall atlas (side.png): `WALL_ROWS` rows, each a quarter turn, `WALL_GUTTER` of edge copies
+/// above and below each row (fractions of the layer; tools/tyre-bake/README.md)
+const WALL_ROWS: usize = 4;
+const WALL_GUTTER: f32 = 4.0 / 256.0;
 
 /// The barrel and tyre of a wheel (REMASTER, editable in `rimshop`). The defaults are the
 /// constants above, so a style without a file keeps the mesh it always had.
@@ -237,8 +244,8 @@ pub struct WheelSpec {
     pub rim: Option<Rim>,
     /// ObjectBrightness, multiplied into the untextured colours like `scene::emit`
     pub scale: [f32; 3],
-    /// REMASTER: the first texture layer of the tread's rubber (colour, then normal + roughness;
-    /// `scene::Layers::tyre`); `None`: a flat tyre
+    /// REMASTER: the first of the rubber's four texture layers (`scene::Layers::tyre`): the tread's
+    /// colour and normal + roughness, then the sidewall atlas's; `None`: a plain tyre
     pub tyre: Option<f32>,
 }
 
@@ -303,8 +310,8 @@ enum Part {
 }
 
 /// Build a wheel centred on its hub. The tyre's cross-section is a superellipse reaching
-/// exactly ±half-width and ±radius, so hub placement, contact and skid-mark width are the
-/// original's (`scene::build_car` measures them on the MYO mesh).
+/// exactly ±half-width and ±radius, the original's (`scene::build_car` measures them on the MYO
+/// mesh); the scene then fits it inside the original's octagon (`fit_wheel`, #530).
 pub fn wheel(w: &WheelSpec) -> Vec<Vertex> {
     let (r, h) = (w.radius, w.half_width);
     let b = w.rim.as_ref().map(|r| r.style.barrel.clone()).unwrap_or_default();
@@ -363,15 +370,15 @@ pub fn wheel(w: &WheelSpec) -> Vec<Vertex> {
             continue;
         }
         if let (Part::Tyre, Some(layer)) = (part, w.tyre) {
-            // only the contact patch takes the rubber texture: the crown, 45 degrees (about 0.8 of
-            // the half-width) either side of the top (the profile points at pi/4 and 3pi/4); the
-            // shoulders and sidewalls stay plain. One profile, so the lighting is smooth across the edges
+            // the crown, 45 degrees (about 0.8 of the half-width) either side of the top (the profile
+            // points at pi/4 and 3pi/4), takes the tread tile; the walls on either side, shoulders
+            // included, the sidewall atlas (#529). One profile, so the lighting is smooth across the edges
             let (t0, t1) = tread;
-            let tread_c = { let c = rgba(b.tyre_rgb).map(|x| (x / TYRE_TEX_MEAN).min(2.0)); [c[0], c[1], c[2], 1.0] };
-            let cols = vec![tyre_c; tyre.len()];
-            strip_ex(&mut out, w, &tyre, &cols, false, 0..t0, None);
-            strip_ex(&mut out, w, &tyre, &cols, false, t1..tyre.len() - 1, None);
-            strip_ex(&mut out, w, &tyre, &vec![tread_c; tyre.len()], false, t0..t1, Some(layer));
+            let tint = |mean: f32| { let c = rgba(b.tyre_rgb).map(|x| (x / mean).min(2.0)); vec![[c[0], c[1], c[2], 1.0]; tyre.len()] };
+            let (tread_c, side_c) = (tint(TYRE_TEX_MEAN), tint(SIDE_TEX_MEAN));
+            strip_ex(&mut out, w, &tyre, &side_c, false, 0..t0, Some(Rubber::Wall { layer: layer + 2.0, inner: false }));
+            strip_ex(&mut out, w, &tyre, &side_c, false, t1..tyre.len() - 1, Some(Rubber::Wall { layer: layer + 2.0, inner: true }));
+            strip_ex(&mut out, w, &tyre, &tread_c, false, t0..t1, Some(Rubber::Tread(layer)));
             continue;
         }
         let colour = match (part, w.face) {
@@ -395,47 +402,95 @@ pub fn wheel(w: &WheelSpec) -> Vec<Vertex> {
     out
 }
 
+/// REMASTER (#530): shrink a hub-centred wheel from `wheel` across its axle by `k` (y and z; x, the
+/// width, stays). The scene builds the wheel at the original's corner radius (the octagon's, so the
+/// alloy fit and the rubber maps keep their size) and fits it inside the octagon with this; normals
+/// take the inverse transpose. uv, layers and colours stay.
+pub fn fit_wheel(v: &mut [Vertex], k: f32) {
+    if (k - 1.0).abs() < 1e-6 {
+        return;
+    }
+    for v in v {
+        v.pos = [v.pos[0], v.pos[1] * k, v.pos[2] * k];
+        v.normal = Vec3::new(v.normal[0], v.normal[1] / k, v.normal[2] / k).normalize_or_zero().to_array();
+    }
+}
+
 /// Sweep one profile strip around the axle with smooth normals inside the strip (the strips
 /// meet at creases).
 fn strip(out: &mut Vec<Vertex>, w: &WheelSpec, prof: &[Vec2], colours: &[[f32; 4]], textured: bool) {
     strip_ex(out, w, prof, colours, textured, 0..prof.len() - 1, None);
 }
 
+/// The baked rubber on a tyre strip (#529, tools/tyre-bake/README.md "Layout").
+#[derive(Clone, Copy)]
+enum Rubber {
+    /// the tread tile on this layer: u across the crown from the rim side's edge (0) to the other (1),
+    /// v round the wheel in whole tiles at `TREAD_ASPECT`
+    Tread(f32),
+    /// the sidewall atlas on `layer`: row q = quarter turn q, x round the quarter, y from the tread
+    /// edge (row top) to the bead; `inner`: the wall facing the car (x mirrored)
+    Wall { layer: f32, inner: bool },
+}
+
+/// The tread's tiles round a wheel of radius `r` whose crown is `crown` metres across (profile arc).
+fn tread_tiles(r: f32, crown: f32) -> f32 {
+    (std::f32::consts::TAU * r / (crown * TREAD_ASPECT).max(1e-6)).round().max(1.0)
+}
+
+/// A wall vertex's atlas uv: `j` the vertex's segment, `quad` the segment of the quad it belongs to
+/// (it picks the row, so a row's last vertex sits at x = 1, not at the next row's x = 0), `a` 0 at
+/// the tread edge .. 1 at the bead. x runs clockwise seen from outside the wall, so the lettering
+/// reads upright: in the left-handed game axes a rising segment turns anticlockwise seen from +x, so
+/// the outer wall of a +x wheel and the inner wall of a -x one mirror x [D].
+fn wall_uv(j: usize, quad: usize, a: f32, side: f32, inner: bool) -> [f32; 2] {
+    let per = SEGMENTS / WALL_ROWS;
+    let q = quad / per;
+    let f = (j - q * per) as f32 / per as f32;
+    let x = if (side > 0.0) != inner { 1.0 - f } else { f };
+    let row = 1.0 / WALL_ROWS as f32;
+    [x, q as f32 * row + WALL_GUTTER + a * (row - 2.0 * WALL_GUTTER)]
+}
+
 /// `strip` over the segments `span` of the profile (the normals still come from all of it), with
-/// the tread texture on layer `tread` (uv: across the profile and around the wheel in whole tiles).
-fn strip_ex(out: &mut Vec<Vertex>, w: &WheelSpec, prof: &[Vec2], colours: &[[f32; 4]], textured: bool, span: std::ops::Range<usize>, tread: Option<f32>) {
-    // distance along the profile from the span's start, and tiles round the wheel
+/// the baked `rubber` on it (`TYRE_ENV`).
+fn strip_ex(out: &mut Vec<Vertex>, w: &WheelSpec, prof: &[Vec2], colours: &[[f32; 4]], textured: bool, span: std::ops::Range<usize>, rubber: Option<Rubber>) {
+    // distance along the profile from the span's start, as a fraction of the span
     let mut across = vec![0.0f32; prof.len()];
     for i in span.start + 1..prof.len() {
         across[i] = across[i - 1] + prof[i].distance(prof[i - 1]);
     }
-    let around = (std::f32::consts::TAU * w.radius / TYRE_TILE).round().max(1.0);
+    let len = across[span.end].max(1e-9);
+    let frac = |i: usize| (across[i] / len).clamp(0.0, 1.0);
+    let around = tread_tiles(w.radius, len);
     // profile normals: (dr, -do) points out of the wheel for every strip as they are laid out
     let seg: Vec<Vec2> = prof.windows(2).map(|p| { let d = p[1] - p[0]; Vec2::new(d.y, -d.x).normalize_or_zero() }).collect();
     let pn: Vec<Vec2> = (0..prof.len()).map(|i| (seg.get(i.wrapping_sub(1)).copied().unwrap_or(Vec2::ZERO) + seg.get(i).copied().unwrap_or(Vec2::ZERO)).normalize_or(Vec2::X)).collect();
     let (face, s) = (w.face.filter(|_| textured), w.side);
     // the original's texture coordinates of a face point, scaled so RIM_TEXTURE lands on the rim
     let k = RIM_TEXTURE / RIM;
-    let vert = |i: usize, j: usize| -> Vertex {
+    let vert = |i: usize, j: usize, quad: usize| -> Vertex {
         let a = j as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
         let (sa, ca) = a.sin_cos();
         let (p, n) = (prof[i], pn[i]);
         let game = Vec3::new(s * p.x, p.y * sa, p.y * ca);
         let normal = Vec3::new(s * n.x, n.y * sa, n.y * ca);
-        let (uv, layer) = match face {
-            _ if tread.is_some() => ([across[i] / TYRE_TILE, j as f32 / SEGMENTS as f32 * around], tread.unwrap_or(-1.0)),
-            Some(f) => {
+        let (uv, layer) = match (rubber, face) {
+            (Some(Rubber::Tread(l)), _) => ([frac(i), j as f32 / SEGMENTS as f32 * around], l),
+            // the outer wall runs from the bead (span start) to the tread edge, the inner one away from it
+            (Some(Rubber::Wall { layer, inner }), _) => (wall_uv(j, quad, if inner { frac(i) } else { 1.0 - frac(i) }, s, inner), layer),
+            (None, Some(f)) => {
                 let (y, z) = (game.y * k, game.z * k);
                 let at = |c: [f32; 3]| c[0] * y + c[1] * z + c[2];
                 ([at(f.fit[0]), at(f.fit[1])], f.layer)
             }
-            None => ([0.0; 2], -1.0),
+            (None, None) => ([0.0; 2], -1.0),
         };
-        Vertex { pos: [game.x, game.y, -game.z], uv, color: colours[i], layer, normal: [normal.x, normal.y, -normal.z], env: if tread.is_some() { TYRE_ENV } else { 0.0 } }
+        Vertex { pos: [game.x, game.y, -game.z], uv, color: colours[i], layer, normal: [normal.x, normal.y, -normal.z], env: if rubber.is_some() { TYRE_ENV } else { 0.0 } }
     };
     for i in span {
         for j in 0..SEGMENTS {
-            let (a, b, c, d) = (vert(i, j), vert(i, j + 1), vert(i + 1, j + 1), vert(i + 1, j));
+            let (a, b, c, d) = (vert(i, j, j), vert(i, j + 1, j), vert(i + 1, j + 1, j), vert(i + 1, j, j));
             for t in [[a, b, c], [a, c, d]] {
                 let p = t.map(|v| Vec3::from(v.pos));
                 let cross = (p[1] - p[0]).cross(p[2] - p[0]);
@@ -1192,6 +1247,18 @@ mod tests {
         }
     }
 
+    /// `fit_wheel` shrinks the radius only, and the normals stay unit
+    #[test]
+    fn fit_wheel_shrinks_radius() {
+        let (r, hw, k) = (0.353, 0.153, 0.92);
+        let mut v = wheel(&WheelSpec { radius: r, half_width: hw, side: -1.0, face: None, rim: None, scale: [1.0; 3], tyre: None });
+        fit_wheel(&mut v, k);
+        let (lo, hi) = bbox(&v);
+        let want = Vec3::new(hw, r * k, r * k);
+        assert!((hi - want).abs().max_element() < 1e-5 && (lo + want).abs().max_element() < 1e-5, "{lo} {hi} vs {want}");
+        assert!(v.iter().all(|v| (Vec3::from(v.normal).length() - 1.0).abs() < 1e-4 || Vec3::from(v.normal) == Vec3::ZERO));
+    }
+
     /// the Titan rim builds, every triangle faces along its normals, the size stays the original's
     #[test]
     fn rim_builds() {
@@ -1224,6 +1291,33 @@ mod tests {
         println!("titan wheel: {} triangles", v.len() / 3);
     }
 
+    /// #529: the tread's u spans 0..1 across the crown and its v whole tiles round the wheel; every
+    /// wall vertex stays inside its atlas row (no bleed into the gutters or the next row), on both
+    /// wheel sides; the tread tile round the reference wheel is the skid marks' `SKID_TILE` (within 5%)
+    #[test]
+    fn rubber_uvs_stay_in_their_tiles() {
+        for side in [-1.0, 1.0] {
+            let v = wheel(&WheelSpec { radius: 0.353, half_width: 0.153, side, face: None, rim: None, scale: [1.0; 3], tyre: Some(10.0) });
+            let tread: Vec<&Vertex> = v.iter().filter(|v| v.layer == 10.0).collect();
+            let walls: Vec<&Vertex> = v.iter().filter(|v| v.layer == 12.0).collect();
+            assert!(!tread.is_empty() && !walls.is_empty());
+            assert!(tread.iter().chain(&walls).all(|v| v.env == TYRE_ENV));
+            assert!(tread.iter().all(|v| (0.0..=1.0).contains(&v.uv[0])));
+            let around = tread.iter().map(|v| v.uv[1]).fold(0.0f32, f32::max);
+            assert_eq!(around, around.round());
+            let tile = std::f32::consts::TAU * 0.353 / around;
+            let skid = crate::drive::SKID_TILE.get();
+            assert!((tile / skid - 1.0).abs() < 0.05, "tread tile {tile} m vs SKID_TILE {skid}");
+            for t in walls.chunks(3) {
+                let row = (t.iter().map(|v| v.uv[1]).sum::<f32>() / 3.0 * WALL_ROWS as f32).floor();
+                for v in t {
+                    let (lo, hi) = (row / WALL_ROWS as f32 + WALL_GUTTER, (row + 1.0) / WALL_ROWS as f32 - WALL_GUTTER);
+                    assert!((0.0..=1.0).contains(&v.uv[0]) && v.uv[1] >= lo - 1e-6 && v.uv[1] <= hi + 1e-6, "{:?} outside row {row}", v.uv);
+                }
+            }
+        }
+    }
+
     /// FNV-1a over the vertex bytes of the Titan rim and a plain wheel: guards refactors of the
     /// generator (the default style must keep producing the same mesh; hashes renewed when the tyre
     /// colour went from 18 to 38, the tread texture's mean, and for 32 segments + adaptive profiles, #218)
@@ -1241,7 +1335,8 @@ mod tests {
     /// v1 rim files (#337 phase 1): the installed car09 / car10 rims, a twin spoke curve and a
     /// three-point curve keep the exact mesh they had before spoke groups (hashes taken on the
     /// old `bar` / `SpokeCurve` generator). The floats are hashed rounded to 1e-4: the spline rim's
-    /// last bits differ between libm implementations (Windows CI), the mesh does not
+    /// last bits differ between libm implementations (Windows CI), the mesh does not. Renewed for the
+    /// baked rubber's uvs on the tyre (#529); `titan_mesh_is_stable` (no rubber) did not move
     #[test]
     fn legacy_rims_are_stable() {
         let fnv = |v: &[Vertex]| bytemuck::cast_slice::<Vertex, f32>(v).iter().fold(0xcbf29ce484222325u64, |h, &x| ((x * 1e4).round() as i32).to_le_bytes().iter().fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3)));
@@ -1255,7 +1350,7 @@ mod tests {
             let look = RimLook { spokes: style.spokes, phase: 0.7, metal: [0.8; 3], backing: [[0.1; 3]; BACKING_RINGS] };
             fnv(&wheel(&WheelSpec { radius: 0.353, half_width: 0.153, side: -1.0, face: Some(face), rim: Some(Rim { style, look }), scale: [1.0; 3], tyre: Some(3.0) }))
         }).collect();
-        assert_eq!(got, vec![0xcc01e853f2dc24aa, 0xa4691b99084d3291, 0x91fbca40fe47272b, 0x83fafdc73d29adfe]);
+        assert_eq!(got, vec![0x376a2eaaad3a954e, 0xa8aa6f7c886bb50d, 0x9fe8f18dfac9845f, 0xf1e56088600251ea]);
     }
 
     /// every mirror and section kind with sweep, lift and a phase builds facing out inside the
@@ -1431,7 +1526,7 @@ mod tests {
     }
 
     /// the textured tread covers the crown from 45 to 135 degrees of the section, whatever the
-    /// tyre's shape, and ends exactly there (#218)
+    /// tyre's shape, and ends exactly there (#218; the walls take their own layer since #529)
     #[test]
     fn tread_spans_the_crown() {
         for shape in [3.2, 5.3] {
@@ -1440,7 +1535,7 @@ mod tests {
             let face = WheelFace { layer: 0.0, fit: [[1.0, 0.0, 0.5], [0.0, 1.0, 0.5]], colour: [0.4; 4], lip: [0.3; 4] };
             let h = 0.153;
             let v = wheel(&WheelSpec { radius: 0.353, half_width: h, side: 1.0, face: Some(face), rim: Some(Rim { style, look }), scale: [1.0; 3], tyre: Some(3.0) });
-            let x: Vec<f32> = v.iter().filter(|v| v.env == TYRE_ENV).map(|v| v.pos[0].abs()).collect();
+            let x: Vec<f32> = v.iter().filter(|v| v.env == TYRE_ENV && v.layer == 3.0).map(|v| v.pos[0].abs()).collect();
             assert!(!x.is_empty());
             let edge = h * std::f32::consts::FRAC_1_SQRT_2.powf(2.0 / shape);
             let widest = x.iter().cloned().fold(0.0, f32::max);

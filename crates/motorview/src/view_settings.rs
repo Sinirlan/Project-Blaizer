@@ -141,6 +141,44 @@ pub fn apply<'a>(view: &mut View, k: &str, v: &'a str, rest: &mut SplitWhitespac
     true
 }
 
+/// The game's sound settings the viewer's own sound follows (#495): the three volumes in percent (the game's defaults
+/// until `settings.cfg` says otherwise), the Remaster engine sound and the song-to-track table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoundPrefs {
+    pub vol_sfx: u32,
+    pub vol_music: u32,
+    pub vol_ambient: u32,
+    pub engine_sound: crate::race_audio::EngineSound,
+    /// `TrackCDTrack N M`: the CD track the player gave race track N
+    pub track_cd: std::collections::HashMap<u32, u32>,
+}
+
+impl Default for SoundPrefs {
+    fn default() -> Self {
+        SoundPrefs { vol_sfx: 80, vol_music: 70, vol_ambient: 80, engine_sound: Default::default(), track_cd: Default::default() }
+    }
+}
+
+impl SoundPrefs {
+    /// One `settings.cfg` line (`k v rest`); false when it is not a sound key.
+    fn apply<'a>(&mut self, k: &str, v: &'a str, rest: &mut SplitWhitespace<'a>) -> bool {
+        let pct = |v: &str| v.parse::<i64>().ok().map(|x| x.clamp(0, 100) as u32);
+        match k.to_ascii_lowercase().as_str() {
+            "sfxvolume" => self.vol_sfx = pct(v).unwrap_or(self.vol_sfx),
+            "musicvolume" => self.vol_music = pct(v).unwrap_or(self.vol_music),
+            "ambientvolume" => self.vol_ambient = pct(v).unwrap_or(self.vol_ambient),
+            "enginesound" => self.engine_sound = crate::race_audio::EngineSound::parse(v).unwrap_or(self.engine_sound),
+            "trackcdtrack" => {
+                if let (Ok(t), Some(c)) = (v.parse::<i64>(), rest.next().and_then(|x| x.parse::<i64>().ok())) {
+                    self.track_cd.insert(t.clamp(1, 99) as u32, c.clamp(2, 99) as u32);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// What motorview takes from `settings.cfg` besides the `View`.
 pub struct Loaded {
     pub path: PathBuf,
@@ -148,14 +186,21 @@ pub struct Loaded {
     pub skid_marks: bool,
     /// `SoundDevice` (the output the game plays on; None = the system default), for the Cine editor's live sound (#349)
     pub sound_device: Option<String>,
+    /// the volumes, engine sound and song table the viewer's Sound / Music switches follow (#495)
+    pub sound: SoundPrefs,
 }
 
 /// The game's `settings.cfg` over `view`; `None` when there is none (the view is untouched).
 pub fn load(view: &mut View) -> Option<Loaded> {
     let path = crate::ghost::config_dir()?.join("settings.cfg");
     let text = std::fs::read_to_string(&path).ok()?;
+    Some(parse(view, path, &text))
+}
+
+fn parse(view: &mut View, path: PathBuf, text: &str) -> Loaded {
     let mut skid_marks = true;
     let mut sound_device = None;
+    let mut sound = SoundPrefs::default();
     for line in text.lines() {
         let mut it = line.split_whitespace();
         let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
@@ -163,11 +208,61 @@ pub fn load(view: &mut View) -> Option<Loaded> {
             skid_marks = v != "0";
         } else if k.eq_ignore_ascii_case("sounddevice") {
             sound_device = Some(v.to_string()).filter(|d| d != "default");
-        } else {
+        } else if !sound.apply(k, v, &mut it) {
             apply(view, k, v, &mut it);
         }
     }
-    Some(Loaded { path, skid_marks, sound_device })
+    Loaded { path, skid_marks, sound_device, sound }
+}
+
+/// The viewer's own switches (#495), `motorview.cfg` beside `settings.cfg`: the speaker button's Sound and Music, and
+/// the engine sound picked there. Sound and Music are off until the user turns them on; `engine` None follows the game's
+/// `EngineSound` setting. The game's `settings.cfg` is never written.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Switches {
+    pub sound: bool,
+    pub music: bool,
+    pub engine: Option<crate::race_audio::EngineSound>,
+}
+
+impl Switches {
+    fn path() -> Option<PathBuf> {
+        Some(crate::ghost::config_dir()?.join("motorview.cfg"))
+    }
+
+    fn parse(text: &str) -> Switches {
+        let mut s = Switches::default();
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            let (Some(k), Some(v)) = (it.next(), it.next()) else { continue };
+            if k.eq_ignore_ascii_case("sound") {
+                s.sound = v != "0";
+            } else if k.eq_ignore_ascii_case("music") {
+                s.music = v != "0";
+            } else if k.eq_ignore_ascii_case("engine") {
+                s.engine = crate::race_audio::EngineSound::parse(v);
+            }
+        }
+        s
+    }
+
+    fn text(self) -> String {
+        let engine = self.engine.map_or(String::new(), |e| format!("Engine {}\n", e.key()));
+        format!("Sound {}\nMusic {}\n{engine}", u8::from(self.sound), u8::from(self.music))
+    }
+
+    /// The saved switches (both off without a file).
+    pub fn load() -> Switches {
+        Self::path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| Self::parse(&t)).unwrap_or_default()
+    }
+
+    /// Keep the switches; a failed write only costs the memory, so it is ignored.
+    pub fn save(self) {
+        if let Some(p) = Self::path() {
+            let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
+            let _ = std::fs::write(p, self.text());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -193,5 +288,25 @@ mod tests {
         assert_eq!(taken, ["GraphicsMode", "RemasterFogStyle", "ViewDistance", "RemasterExposure", "RemasterRevMeter"]);
         assert_eq!((v.mode, v.remaster.fog_style, v.distance, v.remaster.exposure), (RenderMode::Remaster, FogStyle::Volumetric, 2.5, 120));
         assert_eq!(v.remaster.rev_meter.to_array(), [100, 90, 80, 70, 60, 50, 41, 210]);
+    }
+
+    #[test]
+    fn sound_keys_follow_the_game() {
+        let mut v = view();
+        let l = parse(&mut v, PathBuf::new(), "SfxVolume 55\nMusicVolume 120\nAmbientVolume 10\nEngineSound Enhanced\nTrackCDTrack 2 7\nViewDistance 250\nSoundDevice default\n");
+        assert_eq!((l.sound.vol_sfx, l.sound.vol_music, l.sound.vol_ambient), (55, 100, 10));
+        assert_eq!(l.sound.engine_sound, crate::race_audio::EngineSound::Enhanced);
+        assert_eq!(l.sound.track_cd.get(&2), Some(&7));
+        assert_eq!(v.distance, 2.5);
+        assert_eq!(parse(&mut view(), PathBuf::new(), "").sound, SoundPrefs::default());
+    }
+
+    #[test]
+    fn switches_round_trip() {
+        assert_eq!(Switches::parse(""), Switches::default());
+        let s = Switches { sound: true, music: false, engine: None };
+        assert_eq!(Switches::parse(&s.text()), s);
+        let e = Switches { sound: false, music: true, engine: Some(crate::race_audio::EngineSound::Enhanced) };
+        assert_eq!(Switches::parse(&e.text()), e);
     }
 }

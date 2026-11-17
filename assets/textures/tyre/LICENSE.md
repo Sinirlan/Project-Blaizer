@@ -4,8 +4,4 @@ Embedded in the binaries with `include_bytes!` (crates/motorview/src/scene.rs `t
 
 | File | Source | Author | Licence |
 |---|---|---|---|
-| colour.png | plastic_0022_color_2k.jpg x plastic_0022_ao_2k.jpg, box-downscaled to 256² | TextureCan, "Clean Car Tire Rubber Texture (Plastic 0022)" | TextureCan free licence [U: check the terms on texturecan.com before publishing] |
-| normal_rough.png | plastic_0022_normal_opengl_2k.jpg (RGB) + plastic_0022_roughness_2k.jpg (A), box-downscaled to 256² | TextureCan | as above |
-
-Made from the 2K set in reference_materials/textures/tire with PIL (`Image.resize((256, 256), Image.BOX)`).
-The height and DirectX normal maps are not used.
+| tread.png, tread_nr.png, tread_height.png, side.png, side_nr.png, side_height.png | baked by `tools/tyre-bake/run.sh` (#529) from reference_materials/models/p-zero/PZero+Trofeo+R+BLEND.blend: tread relief from its mesh, rubber colour / roughness from its maps; the sidewall is the median over the circle (no model lettering) with our own lettering in Orbitron ExtraBold (OFL, assets/fonts) | model: [U: author and download page of the P Zero Trofeo R model] | [U: the model's licence decides whether these may be published] |

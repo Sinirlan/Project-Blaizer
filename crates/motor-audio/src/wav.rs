@@ -1,7 +1,8 @@
 //! RIFF WAVE reader for the game's samples (PCM, 8 or 16 bit, mono or stereo; all shipped
-//! files are 16-bit mono at 22050 or 16000 Hz). Stereo is mixed down to mono.
+//! files are 16-bit mono at 22050 or 16000 Hz). `decode` mixes stereo down to mono; `decode_channels`
+//! keeps the channels (the REMASTER engine packs, #80).
 
-use crate::Clip;
+use crate::{Clip, Interp};
 use std::sync::Arc;
 
 /// A 16-bit PCM WAV file of interleaved `samples` (`channels` per frame at `rate` Hz).
@@ -28,7 +29,22 @@ pub fn to_pcm16(s: f32) -> i16 {
     (s * 32767.0) as i16
 }
 
+/// The file as one mono clip: the channels' mean.
 pub fn decode(d: &[u8]) -> Result<Clip, String> {
+    let (rate, ch, samples) = parse(d)?;
+    let mono = samples.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
+    Ok(Clip { rate, data: Arc::new(mono), loop_points: None, interp: Interp::Linear, glide: 0.0 })
+}
+
+/// The file as one mono clip per channel (left first).
+pub fn decode_channels(d: &[u8]) -> Result<Vec<Clip>, String> {
+    let (rate, ch, samples) = parse(d)?;
+    let frames = samples.len() / ch;
+    Ok((0..ch).map(|c| Clip { rate, data: Arc::new(samples.iter().skip(c).step_by(ch).take(frames).copied().collect()), loop_points: None, interp: Interp::Linear, glide: 0.0 }).collect())
+}
+
+/// (rate, channels, interleaved samples in -1..1; the last frame may be partial).
+fn parse(d: &[u8]) -> Result<(u32, usize, Vec<f32>), String> {
     if d.len() < 12 || &d[0..4] != b"RIFF" || &d[8..12] != b"WAVE" {
         return Err("not a RIFF WAVE file".into());
     }
@@ -58,8 +74,7 @@ pub fn decode(d: &[u8]) -> Result<Clip, String> {
         8 => data.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
         _ => return Err(format!("unsupported {bits}-bit samples")),
     };
-    let mono = samples.chunks(ch).map(|f| f.iter().sum::<f32>() / ch as f32).collect();
-    Ok(Clip { rate, data: Arc::new(mono), loop_points: None })
+    Ok((rate, ch, samples))
 }
 
 #[cfg(test)]
@@ -79,5 +94,16 @@ mod tests {
         let c = super::decode(&d).unwrap();
         assert_eq!(c.rate, 22050);
         assert_eq!(*c.data, vec![0.5, -1.0]);
+    }
+
+    #[test]
+    fn stereo16_kept_or_mixed() {
+        let frames: [i16; 4] = [16384, -16384, 8192, 0];
+        let d = super::encode_pcm16(44100, 2, &frames);
+        let ch = super::decode_channels(&d).unwrap();
+        assert_eq!(ch.len(), 2);
+        assert_eq!((*ch[0].data).clone(), vec![0.5, 0.25]);
+        assert_eq!((*ch[1].data).clone(), vec![-0.5, 0.0]);
+        assert_eq!(*super::decode(&d).unwrap().data, vec![0.0, 0.125]);
     }
 }

@@ -116,18 +116,53 @@ struct Globals {
 @group(0) @binding(8) var irr_sun: texture_3d<f32>;
 // REMASTER: the same filtering with the chosen anisotropy (render.rs `Gpu::aniso_bind`)
 @group(1) @binding(0) var samp_hq: sampler;
+// #528 `samp_hq` clamped to the edge (binding 4: the blade pass's group 1 holds 1-3)
+@group(1) @binding(4) var samp_hq_clamp: sampler;
 // REMASTER texture pack (#211, texpack.rs): the user's upscaled colour and normal + roughness
 // layers, and per layer of `tex` the ids of its pair (x colour, y normal; -1 = the original),
-// two layers to a vec4
+// two layers to a vec4; then the World mapping scales (#521, render.rs `pack_map`): per layer (u, v) =
+// texels per metre / the original's size, two layers to a vec4, 0 = the layer's own UVs
+struct PackMap {
+    ids: array<vec4<i32>, 256>,
+    world: array<vec4<f32>, 256>,
+    // #528 one bit per base layer: sampled clamp-to-edge (render.rs `pack_map`, `Scene::layer_clamp`)
+    clamp: array<vec4<u32>, 4>,
+}
 @group(0) @binding(9) var tex_hi: texture_2d_array<f32>;
-@group(0) @binding(10) var<uniform> pack_map: array<vec4<i32>, 256>;
+@group(0) @binding(10) var<uniform> pack_map: PackMap;
 fn pack_ids(layer: f32) -> vec2<i32> {
     if (layer < 0.0) {
         return vec2<i32>(-1);
     }
     let l = min(u32(layer + 0.5), 511u);
-    let m = pack_map[l >> 1u];
+    let m = pack_map.ids[l >> 1u];
     return select(m.xy, m.zw, (l & 1u) == 1u);
+}
+// #528 the layer is sampled clamp-to-edge: its polygons stay within one tile, so wrapping would only blend the
+// texture's opposite edge in where two polygons meet (a seam line, worst in the mips)
+fn layer_clamps(layer: f32) -> bool {
+    if (layer < 0.0) {
+        return false;
+    }
+    let l = min(u32(layer + 0.5), 511u);
+    return (pack_map.clamp[l >> 7u][(l >> 5u) & 3u] & (1u << (l & 31u))) != 0u;
+}
+fn pack_world(layer: f32) -> vec2<f32> {
+    if (layer < 0.0) {
+        return vec2<f32>(0.0);
+    }
+    let l = min(u32(layer + 0.5), 511u);
+    let m = pack_map.world[l >> 1u];
+    return select(m.xy, m.zw, (l & 1u) == 1u);
+}
+// REMASTER World mapping (#521, texpack.rs `world_uv` is the tested copy): the texture projected from the
+// face's plane, u along its horizontal (to the right seen from the front `n`), v down its slope; a level
+// face uses x and z [design choice]
+fn world_uv(p: vec3<f32>, n: vec3<f32>, scale: vec2<f32>) -> vec2<f32> {
+    let h = cross(vec3<f32>(0.0, 1.0, 0.0), n);
+    let t = select(vec3<f32>(1.0, 0.0, 0.0), normalize(h), dot(h, h) > 1e-6);
+    let b = cross(n, t);
+    return vec2<f32>(dot(p, t), -dot(p, b)) * scale;
 }
 // the pack's sun highlight strength, and the clamp of its normal map's relight of the baked
 // world light [design choice]
@@ -536,6 +571,8 @@ fn headlight_open(x: f32, y: f32) -> f32 {
 // (render.rs `PropLightGpu`). `prop_of` = the record of each vertex of the props buffer.
 @group(0) @binding(11) var<storage, read> prop_myw: array<vec4<f32>>;
 @group(0) @binding(12) var<storage, read> prop_of: array<u32>;
+// #528 `samp` clamped to the edge, for the layers of polygons within one tile (`layer_clamps`)
+@group(0) @binding(13) var samp_clamp: sampler;
 const MYW_REC: u32 = 18u;
 // the record of the vertex being lit (`vs_main` sets it when `myw_n.y` = 2), -1: `g.myw`, the
 // light list of the draw
@@ -1439,7 +1476,11 @@ fn fs_far(i: VsOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     // sample in uniform control flow, then decide
-    let t = textureSample(tex, samp, i.uv, max(i32(i.layer + 0.5), 0));
+    // CLASSIC D3D Begin3D 0x482af4: LINEAR filtering, no mips, WRAP [O]. Ours keeps the mips [design choice, #528]
+    // and samples a layer whose polygons stay within one tile clamped, so the mips do not blend the far edge in
+    let tw = textureSample(tex, samp, i.uv, max(i32(i.layer + 0.5), 0));
+    let tc = textureSample(tex, samp_clamp, i.uv, max(i32(i.layer + 0.5), 0));
+    let t = select(tw, tc, layer_clamps(i.layer));
     let bary_w = fwidth(i.bary);
     let textured = i.layer >= 0.0;
     // CLASSIC 0x440142 (#460): an object's or the world's far triangle is drawn by `fs_far`, not here
@@ -1663,11 +1704,22 @@ fn fs_remaster(i: VsOut) -> @location(0) vec4<f32> {
     let env_uv = select(i.env_uv, sphere_uv(n, i.wpos), pixel_light && i.env < 8.5);
     // sample in uniform control flow, then decide
     // (the tangent frame of the normal maps, from the screen derivatives)
-    let duv_x = dpdx(i.uv);
-    let duv_y = dpdy(i.uv);
     let dp_x = dpdx(i.wpos);
     let dp_y = dpdy(i.wpos);
-    var t = textureSample(tex, samp_hq, i.uv, max(i32(i.layer + 0.5), 0));
+    // REMASTER World mapping (#521): a pack texture set to it ignores its UVs; the face normal from the
+    // screen derivatives (flat per triangle), turned to the eye
+    let wscale = pack_world(i.layer);
+    let fn_raw = cross(dp_x, dp_y);
+    let fn_w = fn_raw * inverseSqrt(max(dot(fn_raw, fn_raw), 1e-20));
+    let face_n = select(-fn_w, fn_w, dot(fn_w, vd) >= 0.0);
+    let uv = select(i.uv, world_uv(i.wpos, face_n, wscale), flag(4096u) && wscale.x > 0.0);
+    let duv_x = dpdx(uv);
+    let duv_y = dpdy(uv);
+    // #528 a layer within one tile is sampled clamped (not under World mapping, which tiles it)
+    let clamps = layer_clamps(i.layer) && !(flag(4096u) && wscale.x > 0.0);
+    let t_wrap = textureSample(tex, samp_hq, uv, max(i32(i.layer + 0.5), 0));
+    let t_clamp = textureSample(tex, samp_hq_clamp, uv, max(i32(i.layer + 0.5), 0));
+    var t = select(t_wrap, t_clamp, clamps);
     let e = textureSample(tex, samp_hq, env_uv, max(i32(g.env.y + 0.5), 0));
     // CHEAT tribute to tron: the Neon grid's pixel scale of the corner weights
     let bary_w = fwidth(i.bary);
@@ -1679,10 +1731,18 @@ fn fs_remaster(i: VsOut) -> @location(0) vec4<f32> {
     if (flag(4096u)) {
         let pack = pack_ids(i.layer);
         if (pack.x >= 0) {
-            t = textureSampleGrad(tex_hi, samp_hq, i.uv, pack.x, duv_x, duv_y);
+            if (clamps) {
+                t = textureSampleGrad(tex_hi, samp_hq_clamp, uv, pack.x, duv_x, duv_y);
+            } else {
+                t = textureSampleGrad(tex_hi, samp_hq, uv, pack.x, duv_x, duv_y);
+            }
         }
         if (pack.y >= 0 && dot(i.wnormal, i.wnormal) > 1e-6) {
-            pr = textureSampleGrad(tex_hi, samp_hq, i.uv, pack.y, duv_x, duv_y);
+            if (clamps) {
+                pr = textureSampleGrad(tex_hi, samp_hq_clamp, uv, pack.y, duv_x, duv_y);
+            } else {
+                pr = textureSampleGrad(tex_hi, samp_hq, uv, pack.y, duv_x, duv_y);
+            }
             nn = map_normal(pr, n, dp_x, dp_y, duv_x, duv_y);
             packed_n = true;
         }
@@ -1954,9 +2014,11 @@ const SKID_SMEAR_LOD: f32 = 2.0;
 const SKID_TAPS: i32 = 6;
 const SKID_GROOVE: f32 = 0.3;
 const SKID_NOISE: f32 = 0.35;
-// the tread texture's luma: the lands (0.155) against the grooves (0.08 .. 0.12)
-const TREAD_LAND: f32 = 0.155;
-const TREAD_DEPTH: f32 = 0.07;
+// the tread texture's green (assets/textures/tyre/tread.png, the groove shading of tools/tyre-bake/pack.py,
+// #529): the lands at 0.75, the groove bottoms at 0.34 (the smear at SKID_SMEAR_LOD: 0.34 in the
+// circumferential grooves .. 0.74 on the lands)
+const TREAD_LAND: f32 = 0.74;
+const TREAD_DEPTH: f32 = 0.4;
 
 // REMASTER: the skid pass's own varyings, centroid-sampled. With MSAA a plain varying is evaluated
 // at the pixel centre even when only an edge sample is covered; a distant segment is a fraction of

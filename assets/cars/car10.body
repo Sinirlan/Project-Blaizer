@@ -10,7 +10,8 @@
 # the band reads as about 1.5 cm once the bevels take their share). The stance was tuned with
 # the tyre bottom at y = 0 and the body 4 cm down; with the rest position known it is 2.4 cm up
 # on the original body (#182), the same height over the road, and the arch top at 0.78, as high
-# as the front fender's ridge (0.787) allows.
+# as the front fender's ridge (0.787) allows. #533: the arches follow the drawn tyre (≈ 2.7 cm
+# smaller since #530): the arch top is now ≈ 0.75.
 Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=9 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=-0.024
 
 # [O] the mirror glass (face 78) is 229 249 255, facing back: shaded as polished metal

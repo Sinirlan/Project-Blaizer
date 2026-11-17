@@ -372,7 +372,7 @@ impl Game {
             let f = phase * trace.len() as f32;
             let (i, k) = (f.floor() as usize % trace.len(), f.fract());
             let (a, z) = (trace[i], trace[(i + 1) % trace.len()]);
-            (Some((phase * best_ms as f32) as u32), Some((a[3] + (z[3] - a[3]) * k).round() as u32))
+            (Some((phase * best_ms as f32) as u32), Some(self.settings.units.speed(a[3] + (z[3] - a[3]) * k).round() as u32))
         };
         self.replay_live(b, d, (ix + 20.0, iy + 318.0), lap_now.zip(Some(best_ms)), kmh);
         // the four stats at 86
@@ -396,7 +396,7 @@ impl Game {
             None => stat(b, 420.0, "BEST LAP", "--", ""),
         }
         match stats {
-            Some(s) if s.top_kmh > 0 => stat(b, 548.0, "TOP SPEED", &s.top_kmh.to_string(), "KM/H"),
+            Some(s) if s.top_kmh > 0 => stat(b, 548.0, "TOP SPEED", &self.settings.units.speed(s.top_kmh as f32).round().to_string(), self.settings.units.speed_cap()),
             _ => stat(b, 548.0, "TOP SPEED", "--", ""),
         }
         let (fx, fy) = at(650.0, 86.0);
@@ -449,7 +449,7 @@ impl Game {
                 cap(b, "NO LAP COMPLETED", mx, my);
             } else {
                 cap(b, &format!("SPEED \u{b7} BEST LAP (L{no})"), mx, my);
-                txt_r(b, d, HudFont::GlassMed, 11.0, 1.0, note, &format!("{} - {} KM/H", lo.round() as u32, hi.round() as u32), mid_right, my, None);
+                txt_r(b, d, HudFont::GlassMed, 11.0, 1.0, note, &format!("{} - {} {}", self.settings.units.speed(lo).round() as u32, self.settings.units.speed(hi).round() as u32, self.settings.units.speed_cap()), mid_right, my, None);
                 let (sx, sy) = at(262.0, 176.0);
                 Self::replay_spark(b, d, trace, (sx, sy), (554.0, 56.0), phase);
             }
@@ -596,7 +596,7 @@ impl Game {
         let big = |s: &str| bb.font_width(HudFont::Glass, s, &d.font(HudFont::Glass, 22.0, 0.5, WHITE));
         let small = |s: &str| bb.font_width(HudFont::GlassMed, s, &d.font(HudFont::GlassMed, 12.0, 0.0, WHITE));
         let (t_main, t_small) = lap.map_or(("--".to_string(), String::new()), |(now, best)| (lap_text(now), format!("/ {}", lap_text(best))));
-        let (s_main, s_small) = kmh.map_or(("--".to_string(), String::new()), |k| (k.to_string(), "KM/H".to_string()));
+        let (s_main, s_small) = kmh.map_or(("--".to_string(), String::new()), |k| (k.to_string(), self.settings.units.speed_cap().to_string()));
         let w_of = |c: &(String, f32), main: &str, sm: &str| c.1.max(big(main) + if sm.is_empty() { 0.0 } else { small(sm) + d.d(4.0) });
         let (c1, c2) = (cap("GHOST LAP"), cap("SPEED"));
         let (w1, w2) = (w_of(&c1, &t_main, &t_small), w_of(&c2, &s_main, &s_small));

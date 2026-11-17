@@ -20,7 +20,8 @@
 # to 0.680 at z 1.517. A round arch with 3.5 cm of gap and the 2 cm lip peaked at 0.797, through
 # the bonnet (2 cm) and over the crease (#177 phase 2). Like the Titan: the body drawn 2.5 cm up
 # on its wheels and a 2.5 cm gap, so the tunnel stays 1.5 cm under the bonnet and the lip at
-# least 1.5 cm under the crease (tightest at z 1.33).
+# least 1.5 cm under the crease (tightest at z 1.33). #533: the arches follow the drawn tyre
+# (≈ 2.7 cm smaller since #530), so both margins are now ≈ 4.2 cm; drop and gap kept.
 Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.025 arch_lip=0.02 drop=-0.025 centre=0.003
 # [O] The rear arch tunnel's rims end on the underside at z -1.953, the outer rim at y 0.253
 # (x 0.808), the inner at y 0.261 (x 0.504, the edge between them slopes 8 mm across): on the

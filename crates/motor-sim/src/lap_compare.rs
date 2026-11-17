@@ -602,9 +602,12 @@ fn build(samples: &[Sample], lap_ms: f64, prof: &TrackProfile, who: Who) -> Resu
         if !(x.ms.is_finite() && x.s.is_finite() && x.pos.iter().all(|c| c.is_finite() && c.abs() < FAR_M)) {
             return Err(Refusal::Damaged("a position is not a number".into()));
         }
-        // a frame between two ticks, or the countdown, repeats the clock
-        if v.last().is_none_or(|l| x.ms > l.ms) {
-            v.push(*x);
+        // a frame between two ticks, or the countdown, repeats the clock: keep its latest pose (at the start, the car
+        // settled on the grid at GO, not dropping from its spawn height, #531)
+        match v.last_mut() {
+            Some(l) if x.ms == l.ms => *l = *x,
+            Some(l) if x.ms < l.ms => {}
+            _ => v.push(*x),
         }
     }
     let n = v.len();

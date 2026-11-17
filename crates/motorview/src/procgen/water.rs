@@ -27,8 +27,17 @@ pub const MAX_BODIES: usize = 4;
 pub const ROWS: usize = 7;
 /// `Vertex::env` of a water vertex is `WATER_ENV + body index`
 pub const WATER_ENV: f32 = 16.0;
-/// longest triangle edge of an ocean surface (metres): the vertex shader displaces the mesh
+/// longest triangle edge of an ocean surface (metres) on and near the track: the vertex shader displaces the mesh.
+/// Farther out the limit grows (`EdgeLimit`), and water over `WATER_TRIS` is coarsened as a whole (#523).
 const OCEAN_EDGE: f32 = 4.0;
+/// how far (metres, XZ) outside the world's bounds the ocean keeps `OCEAN_EDGE` [design choice]
+const NEAR: f32 = 50.0;
+/// beyond `NEAR`, the edge limit grows by one `OCEAN_EDGE` per this many metres [design choice]
+const GROWTH: f32 = 100.0;
+/// most triangles of all bodies' surfaces together (and of their beds): they share one vertex buffer, which must stay
+/// under wgpu's 256 MiB limit (#523: a 3 km area at 4 m was 704 MB and not drawn); a 3 km ocean around track 2 is
+/// ~850k and keeps its 4 m swells by the track [design choice]
+const WATER_TRIS: usize = 1_200_000;
 /// how close (metres) an extra texture's triangle must lie to a level of the water's own to join it
 const LEVEL_TOLERANCE: f32 = 0.05;
 
@@ -352,14 +361,14 @@ fn segment_distance(p: [f32; 3], s: [[f32; 3]; 2]) -> f32 {
     dot(q, q).sqrt()
 }
 
-/// Split the longest edge until none is longer than `max` (a triangle in view space).
-fn subdivide(t: [[f32; 3]; 3], max: f32, out: &mut Vec<[[f32; 3]; 3]>, depth: u32) {
-    subdivide_by(t, max, out, depth, &|p| *p, &|a, b| mid(*a, *b));
+/// Split the edges until none is longer than `max` at its midpoint (a triangle in view space).
+fn subdivide(t: [[f32; 3]; 3], max: &dyn Fn([f32; 3]) -> f32, out: &mut dyn FnMut([[f32; 3]; 3])) {
+    subdivide_by(t, max, out, 0, &|p| *p, &|a, b| mid(*a, *b));
 }
 
 /// `subdivide` for world vertices: every attribute is interpolated (the bed keeps the texture
 /// and baked colours of the triangles it is made from).
-fn subdivide_vertices(t: [Vertex; 3], max: f32, out: &mut Vec<[Vertex; 3]>) {
+fn subdivide_vertices(t: [Vertex; 3], max: &dyn Fn([f32; 3]) -> f32, out: &mut dyn FnMut([Vertex; 3])) {
     let half = |a: &Vertex, b: &Vertex| Vertex {
         pos: mid(a.pos, b.pos),
         uv: [(a.uv[0] + b.uv[0]) / 2.0, (a.uv[1] + b.uv[1]) / 2.0],
@@ -370,23 +379,74 @@ fn subdivide_vertices(t: [Vertex; 3], max: f32, out: &mut Vec<[Vertex; 3]>) {
     subdivide_by(t, max, out, 0, &|v| v.pos, &half);
 }
 
+/// The longest ocean edge at a point (#523) [design choice, APPROX]: `OCEAN_EDGE` up to `NEAR` metres outside the
+/// world's XZ bounds, then one more `OCEAN_EDGE` per `GROWTH` metres, all times `scale` (the shared budget). The
+/// camera stays near the track, so a point that far out is seen at least that far away, and `fs_water` works the
+/// swell out again per pixel: only the swells' outline gets coarser.
+#[derive(Clone, Copy)]
+struct EdgeLimit {
+    /// world XZ bounds (scene space), min and max; None: no world, every point is near
+    bounds: Option<([f32; 2], [f32; 2])>,
+    scale: f32,
+}
+
+impl EdgeLimit {
+    fn new(s: &Scene) -> Self {
+        let bounds = s.tris.iter().fold(None, |b: Option<([f32; 2], [f32; 2])>, v| {
+            let p = [v.pos[0], v.pos[2]];
+            Some(b.map_or((p, p), |(lo, hi)| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])])))
+        });
+        EdgeLimit { bounds, scale: 1.0 }
+    }
+
+    fn at(&self, p: [f32; 3]) -> f32 {
+        let d = self.bounds.map_or(0.0, |(lo, hi)| {
+            let (dx, dz) = ((lo[0] - p[0]).max(p[0] - hi[0]).max(0.0), (lo[1] - p[2]).max(p[2] - hi[1]).max(0.0));
+            (dx * dx + dz * dz).sqrt()
+        });
+        OCEAN_EDGE * self.scale * (1.0 + (d - NEAR).max(0.0) / GROWTH)
+    }
+
+    /// This limit with `scale` raised until the bodies (their triangles, and whether they are subdivided) make at most
+    /// `WATER_TRIS` triangles together.
+    fn budgeted(mut self, bodies: &[(&[[[f32; 3]; 3]], bool)]) -> Self {
+        for _ in 0..6 {
+            let mut n = 0usize;
+            for &(tris, sub) in bodies {
+                if !sub {
+                    n += tris.len();
+                    continue;
+                }
+                for &t in tris {
+                    subdivide(t, &|p| self.at(p), &mut |_| n += 1);
+                }
+            }
+            if n <= WATER_TRIS {
+                break;
+            }
+            self.scale *= (n as f32 / WATER_TRIS as f32).sqrt() * 1.05;
+        }
+        self
+    }
+}
+
 fn mid(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0, (a[2] + b[2]) / 2.0]
 }
 
-/// Split every edge longer than `max`, whichever the triangle: an edge is split (or not) by its own
-/// length, so two triangles sharing it put the same vertices on it and the swell displacement cannot
-/// open a crack between them (splitting only a triangle's longest edge left T-junctions on the
-/// diagonals of an area). Depth only guards degenerate input.
-fn subdivide_by<T: Copy>(t: [T; 3], max: f32, out: &mut Vec<[T; 3]>, depth: u32, pos: &dyn Fn(&T) -> [f32; 3], half: &dyn Fn(&T, &T) -> T) {
-    let d = |a: &T, b: &T| {
+/// Split every edge longer than `max` at its midpoint, whichever the triangle: an edge is split (or not)
+/// by its own length and midpoint (`mid` is symmetric), so two triangles sharing it put the same vertices
+/// on it and the swell displacement cannot open a crack between them (splitting only a triangle's
+/// longest edge left T-junctions on the diagonals of an area). Depth only guards degenerate input.
+fn subdivide_by<T: Copy>(t: [T; 3], max: &dyn Fn([f32; 3]) -> f32, out: &mut dyn FnMut([T; 3]), depth: u32, pos: &dyn Fn(&T) -> [f32; 3], half: &dyn Fn(&T, &T) -> T) {
+    let long_edge = |a: &T, b: &T| {
         let (a, b) = (pos(a), pos(b));
-        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt() > max(mid(a, b))
     };
-    let long: [bool; 3] = std::array::from_fn(|i| d(&t[i], &t[(i + 1) % 3]) > max);
+    let long: [bool; 3] = std::array::from_fn(|i| long_edge(&t[i], &t[(i + 1) % 3]));
     let n = long.iter().filter(|&&l| l).count();
     if n == 0 || depth >= 14 {
-        out.push(t);
+        out(t);
         return;
     }
     // midpoints of the long edges; edge i runs t[i] -> t[i + 1]
@@ -614,7 +674,19 @@ fn floor_tri(t: &[[f32; 3]; 3], layer: f32, color: [f32; 4]) -> [Vertex; 3] {
 /// triangles (same vertices, so the surface sits exactly where the original's did); areas are
 /// triangulated. The first `MAX_BODIES` bodies count.
 pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
+    build_with(bodies, s, false)
+}
+
+/// The surface only, for the World Editor while a drag is held [design choice]: no ocean subdivision, no bed and every
+/// vertex calm (flat), so a big area stays cheap to re-mesh (the full mesh is up to `WATER_TRIS` triangles).
+/// `hide` is as `build`'s; the full mesh follows on release.
+pub fn preview(bodies: &[Body], s: &Scene) -> Mesh {
+    build_with(bodies, s, true)
+}
+
+fn build_with(bodies: &[Body], s: &Scene, preview: bool) -> Mesh {
     let mut m = Mesh::default();
+    let limit = EdgeLimit::new(s);
     if bodies.len() > MAX_BODIES {
         eprintln!("water: only the first {MAX_BODIES} of {} bodies are used", bodies.len());
     }
@@ -646,9 +718,11 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
     let claimed: std::collections::HashSet<usize> = bodies.iter().zip(&sets)
         .filter(|(b, _)| matches!(b.source, Source::Texture { piece: Some(_), .. }))
         .flat_map(|(_, set)| set.iter().flatten().copied()).collect();
+    // each body's surface triangles and its bed (world vertices)
+    type Shape = (Vec<[[f32; 3]; 3]>, Vec<[Vertex; 3]>);
+    let mut shapes: Vec<Shape> = Vec::new();
     for (bi, b) in bodies.iter().enumerate() {
         m.params.push(b.params.packed());
-        let ocean = b.params.style == Style::Ocean;
         let mut tris: Vec<[[f32; 3]; 3]> = Vec::new();
         let mut floor: Vec<[Vertex; 3]> = Vec::new();
         match &b.source {
@@ -688,27 +762,41 @@ pub fn build(bodies: &[Body], s: &Scene) -> Mesh {
                     tris.push([p(0), p(1), p(2)]);
                 }
                 // a `Bed` texture gives the area a floor (texture bodies have the hidden polygons)
-                if let Some((layer, color)) = b.bed.as_deref().and_then(|n| bed_look(s, n)) {
+                if let Some((layer, color)) = b.bed.as_deref().filter(|_| !preview).and_then(|n| bed_look(s, n)) {
                     floor.extend(tris.iter().map(|t| floor_tri(t, layer, color)));
                 }
             }
         }
+        shapes.push((tris, floor));
+    }
+    // a body is subdivided when it is an ocean (the swells displace it) or has a bed (its drop follows the shore); one
+    // budget for all, since they share the vertex buffer (and their beds the bed buffer)
+    let has_bed = |b: &Body, floor: &[[Vertex; 3]]| b.params.bed_depth > 0.0 && !floor.is_empty();
+    let subdivided: Vec<(&[[[f32; 3]; 3]], bool)> = bodies.iter().zip(&shapes)
+        .map(|(b, (tris, floor))| (tris.as_slice(), !preview && (b.params.style == Style::Ocean || has_bed(b, floor)))).collect();
+    let limit = limit.budgeted(&subdivided);
+    for (bi, (b, (tris, floor))) in bodies.iter().zip(shapes.iter()).enumerate() {
+        let ocean = b.params.style == Style::Ocean;
         // the shore distance calms the ocean's swells (still water is not displaced) and shapes the bed
         let calm = calm_distance(&b.params);
-        let bed = b.params.bed_depth > 0.0 && !floor.is_empty();
+        if preview {
+            m.verts.extend(tris.iter().flatten().map(|&p| vertex(p, bi, if ocean { 0.0 } else { 1.0 })));
+            continue;
+        }
+        let bed = has_bed(b, floor);
         let reach = if bed { calm.max(b.params.bed_depth / BED_SLOPE) } else { calm };
-        let grid = (ocean || bed).then(|| ShoreGrid::new(shoreline(&tris), reach));
+        let grid = (ocean || bed).then(|| ShoreGrid::new(shoreline(tris), reach));
         let mut fine = Vec::new();
-        for &t in &tris {
-            if ocean { subdivide(t, OCEAN_EDGE, &mut fine, 0) } else { fine.push(t) }
+        for &t in tris {
+            if ocean { subdivide(t, &|p| limit.at(p), &mut |t| fine.push(t)) } else { fine.push(t) }
         }
         for t in fine {
             m.verts.extend(t.iter().map(|&p| vertex(p, bi, if ocean { grid.as_ref().map_or(1.0, |g| (g.distance(p) / calm).min(1.0)) } else { 1.0 })));
         }
         if let Some(g) = grid.as_ref().filter(|_| bed) {
             let mut fine = Vec::new();
-            for t in floor {
-                subdivide_vertices(t, OCEAN_EDGE, &mut fine);
+            for &t in floor {
+                subdivide_vertices(t, &|p| limit.at(p), &mut |t| fine.push(t));
             }
             for mut v in fine.into_iter().flatten() {
                 v.pos[1] -= bed_drop(&b.params, g.distance(v.pos));
@@ -819,8 +907,8 @@ mod tests {
         // two triangles of a quad: the shared diagonal must carry the same points from both sides
         let (a, b, c, d) = ([0.0, 0.0, 0.0], [37.0, 0.0, 3.0], [41.0, 0.0, 29.0], [-2.0, 0.0, 22.0]);
         let (mut t1, mut t2) = (Vec::new(), Vec::new());
-        subdivide([a, b, c], 4.0, &mut t1, 0);
-        subdivide([a, c, d], 4.0, &mut t2, 0);
+        subdivide([a, b, c], &|_| 4.0, &mut |t| t1.push(t));
+        subdivide([a, c, d], &|_| 4.0, &mut |t| t2.push(t));
         let on_diagonal = |ts: &[[[f32; 3]; 3]]| {
             let mut v: Vec<[i32; 3]> = ts.iter().flatten().filter(|p| {
                 let (ac, ap) = ((c[0] - a[0], c[2] - a[2]), (p[0] - a[0], p[2] - a[2]));
@@ -834,10 +922,85 @@ mod tests {
         assert_eq!(on_diagonal(&t1), on_diagonal(&t2));
     }
 
+    /// the triangles `tris` subdivide into under `limit`
+    fn fine(tris: &[[[f32; 3]; 3]], limit: &EdgeLimit) -> Vec<[[f32; 3]; 3]> {
+        let mut out = Vec::new();
+        for &t in tris {
+            subdivide(t, &|p| limit.at(p), &mut |t| out.push(t));
+        }
+        out
+    }
+
+    /// a square of side `w` centred on the origin, two triangles at y 0
+    fn square(w: f32) -> Vec<[[f32; 3]; 3]> {
+        let h = w / 2.0;
+        let (a, b, c, d) = ([-h, 0.0, -h], [h, 0.0, -h], [h, 0.0, h], [-h, 0.0, h]);
+        vec![[a, b, c], [a, c, d]]
+    }
+
+    #[test]
+    fn water_buffer_fits_the_gpu_limit() {
+        // #523: all bodies' surfaces share one vertex buffer; wgpu's default max_buffer_size is 256 MiB
+        assert!(WATER_TRIS * 3 * std::mem::size_of::<Vertex>() <= 256 << 20);
+    }
+
+    #[test]
+    fn huge_ocean_stays_in_budget() {
+        // #523: a 3 km area around a 1 km world was 4.2 M triangles at 4 m
+        let limit = EdgeLimit { bounds: Some(([-500.0, -500.0], [500.0, 500.0])), scale: 1.0 };
+        let tris = square(3000.0);
+        let b = limit.budgeted(&[(&tris, true)]);
+        assert_eq!(b.scale, 1.0);
+        let n = fine(&tris, &b).len();
+        assert!(n <= WATER_TRIS && n > WATER_TRIS / 4, "{n}");
+        // no world at all: the budget alone bounds it, also shared by two such bodies
+        let b = EdgeLimit { bounds: None, scale: 1.0 }.budgeted(&[(&tris, true), (&tris, true)]);
+        assert!(b.scale > 1.0);
+        assert!(2 * fine(&tris, &b).len() <= WATER_TRIS);
+    }
+
+    #[test]
+    fn water_near_the_world_keeps_4_m() {
+        // a 200 m body inside the world's bounds subdivides exactly as before #523
+        let limit = EdgeLimit { bounds: Some(([-500.0, -500.0], [500.0, 500.0])), scale: 1.0 }.budgeted(&[(&square(200.0), true)]);
+        assert_eq!(limit.scale, 1.0);
+        let mut old = Vec::new();
+        for t in square(200.0) {
+            subdivide(t, &|_| OCEAN_EDGE, &mut |t| old.push(t));
+        }
+        assert_eq!(fine(&square(200.0), &limit), old);
+    }
+
+    #[test]
+    fn graded_neighbours_share_their_edge_vertices() {
+        // a quad from inside the bounds to 400 m out: the shared diagonal carries the same points from both sides
+        let limit = EdgeLimit { bounds: Some(([-100.0, -100.0], [0.0, 0.0])), scale: 1.0 };
+        let (a, b, c, d) = ([-30.0, 0.0, -20.0], [400.0, 0.0, -10.0], [380.0, 0.0, 300.0], [-20.0, 0.0, 280.0]);
+        let (t1, t2) = (fine(&[[a, b, c]], &limit), fine(&[[a, c, d]], &limit));
+        let on_diagonal = |ts: &[[[f32; 3]; 3]]| {
+            let mut v: Vec<[i32; 3]> = ts.iter().flatten().filter(|p| {
+                let (ac, ap) = ((c[0] - a[0], c[2] - a[2]), (p[0] - a[0], p[2] - a[2]));
+                (ac.0 * ap.1 - ac.1 * ap.0).abs() / (ac.0.hypot(ac.1)) < 1e-2
+            }).map(|p| p.map(|x| (x * 100.0).round() as i32)).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        assert!(on_diagonal(&t1).len() > 8);
+        assert_eq!(on_diagonal(&t1), on_diagonal(&t2));
+        // and the far corner is coarser than the near one
+        let longest = |ts: &[[[f32; 3]; 3]], q: [f32; 3]| ts.iter().filter(|t| t.contains(&q)).map(|t| (0..3).map(|k| {
+            let (u, v) = (t[k], t[(k + 1) % 3]);
+            (u[0] - v[0]).hypot(u[2] - v[2])
+        }).fold(0.0f32, f32::max)).fold(0.0f32, f32::max);
+        assert!(longest(&t1, a) <= OCEAN_EDGE + 1e-3);
+        assert!(longest(&t1, b) > 2.0 * OCEAN_EDGE);
+    }
+
     #[test]
     fn subdivide_limits_edges() {
         let mut out = Vec::new();
-        subdivide([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [0.0, 0.0, 20.0]], 4.0, &mut out, 0);
+        subdivide([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [0.0, 0.0, 20.0]], &|_| 4.0, &mut |t| out.push(t));
         assert!(out.len() > 8);
         for t in out {
             for k in 0..3 {

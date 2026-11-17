@@ -128,7 +128,7 @@ pub fn area_of(file: &str) -> &'static str {
         "render" | "scene" | "fog" | "sky" | "probes" | "volfog" | "fx" | "texpack" | "previews" | "loading" | "sky_image" => "Graphics",
         "drive" | "ghost" => "Camera & drive",
         "cine" | "cine_render" => "Cinematics",
-        "race_audio" | "engine_sim" => "Audio",
+        "race_audio" => "Audio",
         "ui" | "ui_sdf" | "ui_vector" | "ui_font" | "minimap" | "revmeter" => "HUD",
         _ => "Tools UI",
     }

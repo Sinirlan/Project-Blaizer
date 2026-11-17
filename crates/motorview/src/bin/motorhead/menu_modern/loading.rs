@@ -88,6 +88,8 @@ pub(crate) struct LoadFacts {
     pub(crate) field: usize,
     /// the car on the event card: yours, or the recorder's when a recording is watched
     pub(crate) car: String,
+    /// the player's units for the length and the climb (#501)
+    pub(crate) units: Units,
 }
 
 /// `m:ss.mmm` (the mockup's `fmtLap`), dashes without a time.
@@ -179,7 +181,7 @@ impl Game {
         };
         let rec_dir = hiscore::dir(self.persist);
         let records = hiscore::Records::load(rec_dir.as_deref(), &self.tracks[track].name, laps);
-        LoadFacts { track, laps, mode, rows, best_lap: records.lap.map(|r| r.lap_ms), best_race: records.race.map(|r| r.race_ms), field, car }
+        LoadFacts { track, laps, mode, rows, best_lap: records.lap.map(|r| r.lap_ms), best_race: records.race.map(|r| r.race_ms), field, car, units: self.settings.units }
     }
 
     /// The bar as drawn: the stage, the share of the bar (0..1) and READY (the scene is on the GPU). Without a
@@ -221,7 +223,7 @@ impl Game {
             let shot = self.load_preview.is_some();
             let yaw = TURN_YAW0 + if shot { 0.0 } else { self.t / TURN_S * TAU };
             let breathe = if shot { 1.0 } else { 0.75 + 0.25 * (self.t * 1000.0 / 180.0).sin() };
-            Self::loading_turntable(b, d, prof, (p, ready), yaw, breathe, self.settings.player_colour);
+            Self::loading_turntable(b, d, prof, (p, ready), yaw, breathe, (self.settings.player_colour, self.settings.units));
         }
         let mut m = Mesh::default();
         Self::glass_title_wash(&mut m, d);
@@ -262,7 +264,7 @@ impl Game {
     /// lap's shadow, then the segments far to near (the curtain from the road down to the base, a post every 4th
     /// point, the road: lit in its sector's colour up to `p`), the high point and the base marked, S/F, the head dot
     /// in the driver's colour while loading, the caption. `yaw` turns the table; `breathe` scales the head's pool.
-    fn loading_turntable(b: &mut Batch, d: Glass, prof: &TrackProfile, (p, ready): (f32, bool), yaw: f32, breathe: f32, colour: [u8; 3]) {
+    fn loading_turntable(b: &mut Batch, d: Glass, prof: &TrackProfile, (p, ready): (f32, bool), yaw: f32, breathe: f32, (colour, units): ([u8; 3], Units)) {
         let pts = lap3d(prof);
         let n = pts.len();
         if n < 3 {
@@ -396,14 +398,14 @@ impl Game {
         m.dashed(ht, hb, d.d(3.0), d.d(3.0), d.w(1.0), hex(0xf4fbff, 0.6), d.px);
         b.mesh(&m);
         let dim = hex(G_DIM, 1.0);
-        canvas_text(b, d, HudFont::Glass, 15.0, 0.0, WHITE, &format!("+{} M", climb(prof).round() as u32), ht[0], ht[1] - d.d(12.0), 0.5);
+        canvas_text(b, d, HudFont::Glass, 15.0, 0.0, WHITE, &format!("+{} {}", units.height(climb(prof)).round() as u32, units.height_cap()), ht[0], ht[1] - d.d(12.0), 0.5);
         canvas_text(b, d, HudFont::GlassMed, 10.0, 0.0, dim, "HIGH POINT", ht[0], ht[1] - d.d(27.0), 0.5);
         // the low point is the base (0 M)
         let lb = base[lo];
         let mut m = Mesh::default();
         m.fill(&circle(lb, d.d(3.0)), hex(G_TEXT, 1.0), d.px);
         b.mesh(&m);
-        canvas_text(b, d, HudFont::GlassMed, 10.0, 0.0, dim, "BASE 0 M", lb[0], lb[1] + d.d(16.0), 0.5);
+        canvas_text(b, d, HudFont::GlassMed, 10.0, 0.0, dim, &format!("BASE 0 {}", units.height_cap()), lb[0], lb[1] + d.d(16.0), 0.5);
         // start / finish
         let sf = top[0].0;
         let mut m = Mesh::default();
@@ -428,7 +430,7 @@ impl Game {
             b.mesh(&m);
         }
         // X: the Glass font has no multiplication sign
-        let cap = format!("HEIGHTS X {EX:.0} \u{b7} BASE = LOWEST POINT OF THE LAP \u{b7} {:.2} KM", prof.length / 1000.0);
+        let cap = format!("HEIGHTS X {EX:.0} \u{b7} BASE = LOWEST POINT OF THE LAP \u{b7} {:.2} {}", units.dist(f64::from(prof.length)), units.dist_cap());
         let foot = at([cx, VIEW.3 - 6.0]);
         canvas_text(b, d, HudFont::GlassMed, 11.0, 1.5, dim, &cap, foot[0], foot[1], 0.5);
     }
@@ -483,12 +485,14 @@ impl Game {
         txt(b, d, HudFont::GlassMed, 17.0, 1.5, hex(G_TEXT, 1.0), &tr.location.to_uppercase(), x + d.d(25.0), top, Some(20.0));
         top += d.d(20.0 + 12.0);
         // the cells: caption over value, 18 px padding, a hairline between
-        let climb = tr.profile.as_ref().map(|p| climb(p).round() as u32);
+        let u = f.units;
+        let climb = tr.profile.as_ref().map(|p| u.height(climb(p)).round() as u32);
         let km = if tr.length_m > 0.0 { tr.length_m } else { tr.profile.as_ref().map_or(0.0, |p| p.length) } / 1000.0;
+        let km = if u.imperial() { km * 1000.0 / 1609.344 } else { km };
         let cells: [(&str, String, Option<&str>, bool); 5] = [
-            ("LENGTH", format!("{km:.2}"), Some("KM"), true),
+            ("LENGTH", format!("{km:.2}"), Some(u.dist_cap()), true),
             ("LAPS", f.laps.to_string(), None, true),
-            ("CLIMB", climb.map_or_else(|| "--".into(), |c| c.to_string()), climb.map(|_| "M"), climb.is_some()),
+            ("CLIMB", climb.map_or_else(|| "--".into(), |c| c.to_string()), climb.map(|_| u.height_cap()), climb.is_some()),
             ("BEST LAP", lap_time(f.best_lap), None, f.best_lap.is_some()),
             ("BEST RACE", lap_time(f.best_race), None, f.best_race.is_some()),
         ];

@@ -49,9 +49,9 @@ pub struct MatSound {
     pub priority: f32,
     pub volume: f32,
     pub pitch: f32,
-    /// loop region in samples, when given (both 0 = whole sample; an end at or before the start,
-    /// as SndSpin's `36102 0`, runs to the sample's end [I])
-    pub loop_points: Option<(usize, usize)>,
+    /// the `loopstart loopend` fields: the patch 3.0 driver reads them as frames cut from the
+    /// sample's head and tail (0x4b0a8c, 07-audio "Patch 3.0 car sound update", #503)
+    pub trim: (usize, usize),
 }
 
 impl Material {
@@ -105,11 +105,7 @@ pub fn parse_materials(c: &Config) -> Vec<Material> {
                     priority: f(2),
                     volume: f(3),
                     pitch: f(4),
-                    loop_points: match (ls, le) {
-                        (0, 0) => None,
-                        (s, e) if e > s => Some((s, e)),
-                        (s, _) => Some((s, usize::MAX)),
-                    },
+                    trim: (ls, le),
                 },
             ));
             continue;
@@ -137,6 +133,19 @@ pub fn parse_materials(c: &Config) -> Vec<Material> {
         }
     }
     out
+}
+
+/// The patch 3.0 `Snd*` lines of `Data/Material.mat`, built into the game (#503; the file is never shipped).
+const SOUNDS_P30: &str = include_str!("../../../assets/audio/material_snd_p30.txt");
+
+/// The tyre and hit sounds are patch 3.0's whatever the install's file says: each material of the built-in
+/// table takes its `Snd*` lines (07-audio "Patch 3.0 car sound update"). Materials the table lacks keep theirs.
+fn apply_p30_sounds(materials: &mut [Material]) {
+    for p30 in parse_materials(&Config::parse(SOUNDS_P30.as_bytes())) {
+        if let Some(m) = materials.iter_mut().find(|m| m.name.eq_ignore_ascii_case(&p30.name)) {
+            m.sounds = p30.sounds;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -174,6 +183,7 @@ impl World {
         let get = |k: &str| trk.get(k).and_then(|e| e.values.first().cloned()).ok_or(format!("Track{track}.trk: no {k}"));
         let col = col::parse(&fs::read(root, &get("CollisionName")?)?).map_err(|e| e.to_string())?;
         let mut materials = parse_materials(&fs::config(root, "Data/Material.mat")?);
+        apply_p30_sounds(&mut materials);
         let srf = fs::config(root, &get("MaterialsName")?)?;
         let mut surface = Vec::new();
         for e in srf.all("Material") {

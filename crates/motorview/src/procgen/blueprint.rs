@@ -233,7 +233,8 @@ fn reference(name: &str, colour: [f32; 4], tris: Vec<[f32; 3]>) -> GlbPart {
     GlbPart { material: name.into(), color: colour, image: None, pos: tris, normal, uv: Vec::new() }
 }
 
-fn png(rgba: &[u8], size: u32) -> Vec<u8> {
+/// `rgba` (`size` square) as PNG bytes (also the OBJ export's textures, `bodyobj`)
+pub(crate) fn png(rgba: &[u8], size: u32) -> Vec<u8> {
     let mut out = Vec::new();
     let mut e = png::Encoder::new(&mut out, size, size);
     e.set_color(png::ColorType::Rgba);
@@ -284,7 +285,7 @@ mod tests {
 
     /// a car of one paint triangle and one trim triangle, hubs 1.6 m apart and 2.7 m long (view space)
     fn car() -> ShowroomCar {
-        let w = Some(ShowroomWheel { radius: 0.3, half_width: 0.12, side: 1.0, face: None, tyre: None, scale: [1.0; 3] });
+        let w = Some(ShowroomWheel { radius: 0.3, half_width: 0.12, side: 1.0, face: None, tyre: None, scale: [1.0; 3], fit: 1.0 });
         ShowroomCar {
             name: "test".into(),
             body: Vec::new(),

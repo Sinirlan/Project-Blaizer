@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::controls::Dir;
+use motorview::race_audio::EngineSound;
 use motorview::ui::FontStyle;
 use motorview::ui_font::{self, HudFont};
 use motorview::ui_vector::{self as vec, Ends, Mesh};
@@ -23,6 +24,10 @@ mod loading;
 pub(crate) use loading::LoadFacts;
 #[path = "menu_modern/pause_settings.rs"]
 mod pause_settings;
+// REMASTER HUD layout editor (#542)
+#[path = "menu_modern/hud_edit.rs"]
+mod hud_edit;
+pub(crate) use hud_edit::HudEdit;
 #[path = "menu_modern/personal.rs"]
 mod personal;
 pub(crate) use personal::PaintPick;
@@ -464,6 +469,12 @@ impl Game {
             (Device::PlayStation, 8) => ('\u{21E8}', CYAN_G),
             // kind 17: the Ghost screen's ANALYSE (#429): the F cap, the pad's Y / triangle (it arrives as F5)
             (Device::Keyboard, 17) => ('\u{FF26}', CYAN_G),
+            // kind 18: the HUD layout editor's SHOW (#542): the H cap, the pad's Y / triangle (it arrives as F5)
+            (Device::Keyboard, hud_edit::KIND_SHOW) => ('\u{FF28}', CYAN_G),
+            (Device::Xbox, hud_edit::KIND_SHOW) => ('\u{21D1}', YELLOW),
+            (Device::PlayStation, hud_edit::KIND_SHOW) => ('\u{21E1}', [0.4, 0.85, 0.6, 1.0]),
+            // kind 19: the layout editor's SNAP (#542 phase 3): the G cap (keyboard only: snapping is for the mouse)
+            (Device::Keyboard, hud_edit::KIND_SNAP) => ('\u{FF27}', CYAN_G),
             (Device::Xbox, 17) => ('\u{21D1}', YELLOW),
             (Device::PlayStation, 17) => ('\u{21E1}', [0.4, 0.85, 0.6, 1.0]),
             (Device::Keyboard, _) => ('\u{FF32}', CYAN_G),
@@ -694,7 +705,8 @@ impl Game {
     }
 
     /// The Sound items in the modern Sound screen's order, each with its help text: the three
-    /// volumes (dials there, sliders in the pause tab), CD music, CD loop, menu CD track, engine sound.
+    /// volumes (dials there, sliders in the pause tab), CD music, CD loop, menu CD track, engine sound (#494).
+    /// The Remaster menus only: the Classic mode always plays the Classic engine.
     fn sound_items(&self) -> Vec<(OptRow, &'static str)> {
         let row = |label: &str, val, help| (OptRow { label: label.into(), val, dim: 1.0 }, help);
         let sw = |on| RowValue::Control(Control::Switch(on));
@@ -707,7 +719,11 @@ impl Game {
             row("CD music", sw(s.music), "Plays the CD soundtrack in menus and races."),
             row("CD loop", sw(s.cd_loop), "Repeats the CD track that is playing."),
             row("Menu CD track", self.menu_track_choice(), "The CD track played in the menus: the tracks found in the Music folder."),
-            row("Engine sound", RowValue::Choices(vec!["Classic".into(), "Simulated".into()], s.engine_sound as usize), "Classic: the game's engine recordings. Simulated: an engine simulation (cars with a sound pack in remaster/engines)."),
+            row(
+                "Engine sound",
+                RowValue::Choices(EngineSound::ALL.iter().map(|e| e.label().to_string()).collect(), EngineSound::ALL.iter().position(|&e| e == s.engine_sound).unwrap_or(0)),
+                "Classic is the game's engine. Enhanced is the same recordings, cleaner and smoother, with a voice of its own for each car.",
+            ),
         ]
     }
 

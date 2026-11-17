@@ -5,7 +5,7 @@
 //! picked row (`Run`, applied by main.rs `App::command_run`), Esc closes. The picks of this session come first. Help >
 //! Shortcuts opens the same box. The game does not use it.
 
-use super::ribbon::{groups, RTab, CARS, TRACKS};
+use super::ribbon::{car_ids, car_names, groups, RTab, TRACKS};
 use super::{Act, Ctx, BINDS, HELD_FREE, HELD_RACE};
 use egui::{Color32, Context, Id, Key, Modifiers, RichText, Vec2};
 use motorview::consts::CATALOG;
@@ -89,8 +89,8 @@ pub(crate) fn entries() -> Vec<Entry> {
             v.push(Entry::new(ic::KEYBOARD, what, title, k, Ctx::Any, Run::Held));
         }
     }
-    for (i, c) in CARS.iter().enumerate() {
-        v.push(Entry::new(ic::CAR, format!("car {:02} {c}", i + 1), "switch car", "", Ctx::Any, Run::Act(Act::Car, i)));
+    for (i, (id, c)) in car_ids().iter().zip(car_names()).enumerate() {
+        v.push(Entry::new(ic::CAR, format!("car {id:02} {c}"), "switch car", "", Ctx::Any, Run::Act(Act::Car, i)));
     }
     for tab in RTab::ALL {
         for (gi, g) in groups(tab).iter().enumerate() {

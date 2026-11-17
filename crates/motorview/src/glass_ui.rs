@@ -32,6 +32,7 @@ pub fn begin(ctx: &Context, solid: bool) {
     ctx.data_mut(|d| {
         d.insert_temp(rects_id(), Vec::<Rect>::new());
         d.insert_temp(solid_id(), solid);
+        d.insert_temp(reset_tip_id(), None::<String>);
     });
 }
 
@@ -857,6 +858,19 @@ pub fn set_reset_all(ctx: &Context, on: bool) {
     ctx.data_mut(|d| d.insert_temp(reset_all_id(), on));
 }
 
+fn reset_tip_id() -> Id {
+    Id::unique("glass_ui::reset_tip")
+}
+
+/// The hover text of the section reset buttons from here on (`None` = the default "reset this section").
+pub fn set_reset_tip(ctx: &Context, tip: Option<&str>) {
+    ctx.data_mut(|d| d.insert_temp(reset_tip_id(), tip.map(str::to_owned)));
+}
+
+fn reset_tip(ctx: &Context) -> String {
+    ctx.data(|d| d.get_temp::<Option<String>>(reset_tip_id())).flatten().unwrap_or_else(|| "reset this section".into())
+}
+
 pub fn reset_all(ctx: &Context) -> bool {
     ctx.data(|d| d.get_temp(reset_all_id()).unwrap_or(false))
 }
@@ -1057,7 +1071,7 @@ pub fn section_header(ui: &mut Ui, icon: &str, title: &str, count: Option<&str>,
     let mut clicked = false;
     if reset {
         let b = Rect::from_center_size(Pos2::new(rect.right() - 16.0, cy), Vec2::splat(24.0));
-        let br = ui.interact(b, r.id.with("reset"), Sense::click()).on_hover_text("reset this section");
+        let br = ui.interact(b, r.id.with("reset"), Sense::click()).on_hover_text(reset_tip(ui.ctx()));
         let hot = br.hovered();
         if hot {
             ui.painter().rect_filled(b, 6.0, theme::ORANGE.gamma_multiply(0.08));
@@ -1292,6 +1306,89 @@ pub fn chip(ui: &mut Ui, value: &str, caption: &str) -> Response {
     p.rect(rect, 7.0, theme::TILE, Stroke::new(1.0, theme::line(0.12)), StrokeKind::Inside);
     p.galley(Pos2::new(rect.left() + 9.0, rect.center().y - v.size().y / 2.0), v.clone(), Color32::PLACEHOLDER);
     p.galley(Pos2::new(rect.left() + 9.0 + v.size().x + 5.0, rect.center().y - c.size().y / 2.0 + 0.5), c, Color32::PLACEHOLDER);
+    r
+}
+
+/// A clickable chip (motortex #517: a texture of the object on the stage): the text in mono on a tile, orange text and
+/// rim when `on` (where you are).
+pub fn chip_btn(ui: &mut Ui, text: &str, on: bool) -> Response {
+    let g = galley(ui, text, FontId::monospace(12.0), if on { theme::ORANGE_TEXT } else { theme::TEXT });
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(g.size().x + 18.0, 24.0), Sense::click());
+    let p = ui.painter();
+    let rim = if on { theme::ORANGE } else if r.hovered() { theme::line(0.32) } else { theme::line(0.14) };
+    p.rect(rect, 7.0, if r.hovered() { theme::GLASS } else { theme::TILE }, Stroke::new(1.0, rim), StrokeKind::Inside);
+    p.galley(Pos2::new(rect.left() + 9.0, rect.center().y - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+    r
+}
+
+/// A small text button for a dock card (motortex #517 phase 4: Apply, Save as, Copy look): icon and text on a tile, 26
+/// tall; `accent` = orange text and rim (the main action of its row). Dimmed and silent while the `ui` is disabled.
+pub fn text_btn(ui: &mut Ui, icon: &str, text: &str, accent: bool) -> Response {
+    let on = ui.is_enabled();
+    let g = galley(ui, text, theme::glass_font(14.0), Color32::PLACEHOLDER);
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(g.size().x + 44.0, 26.0), if on { Sense::click() } else { Sense::hover() });
+    let hot = on && (r.hovered() || r.is_pointer_button_down_on());
+    let (col, rim) = if !on {
+        (theme::DIM.gamma_multiply(0.5), theme::line(0.10))
+    } else if accent {
+        (theme::ORANGE_TEXT, theme::ORANGE)
+    } else {
+        (if hot { theme::WHITE } else { theme::TEXT }, theme::line(if hot { 0.40 } else { 0.18 }))
+    };
+    let p = ui.painter();
+    p.rect(rect, 8.0, if hot { theme::white(0.12) } else { theme::white(0.06) }, Stroke::new(1.0, rim), StrokeKind::Inside);
+    p.text(Pos2::new(rect.left() + 15.0, rect.center().y), Align2::CENTER_CENTER, icon, FontId::proportional(14.0), col);
+    let g = galley(ui, text, theme::glass_font(14.0), col);
+    ui.painter().galley(Pos2::new(rect.left() + 29.0, rect.center().y - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+    r
+}
+
+/// An active filter as a chip (motortex #517: the object the texture list is cut down to): icon, the text in mono,
+/// a close cross at the end. True when the cross (or the chip) is clicked.
+pub fn filter_chip(ui: &mut Ui, icon: &str, text: &str) -> Response {
+    let g = galley(ui, text, FontId::monospace(12.0), theme::ORANGE_TEXT);
+    let w = (g.size().x + 64.0).min(ui.available_width().max(60.0));
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::click());
+    let p = ui.painter();
+    p.rect(rect, 7.0, theme::ORANGE.gamma_multiply(0.08), Stroke::new(1.0, theme::ORANGE), StrokeKind::Inside);
+    p.text(Pos2::new(rect.left() + 14.0, rect.center().y), Align2::CENTER_CENTER, icon, FontId::proportional(13.0), theme::ORANGE_TEXT);
+    let cross = Pos2::new(rect.right() - 13.0, rect.center().y);
+    p.text(cross, Align2::CENTER_CENTER, crate::icons::CLOSE, FontId::proportional(13.0), if r.hovered() { theme::WHITE } else { theme::DIM });
+    let clip = Rect::from_min_max(Pos2::new(rect.left() + 26.0, rect.top()), Pos2::new(rect.right() - 26.0, rect.bottom()));
+    p.with_clip_rect(clip).galley(Pos2::new(clip.left(), rect.center().y - g.size().y / 2.0), g, Color32::PLACEHOLDER);
+    r
+}
+
+/// A miniature in a grid (motortex #517 objects, rimshop's browser tiles): the picture (a tile while it is missing) at
+/// `side` points, the label under it, truncated; orange rim and label when `on` (where you are), a faint rim on hover.
+/// `dot` = a sector-1 blue dot at the picture's corner (done).
+pub fn thumb_tile(ui: &mut Ui, side: f32, image: Option<egui::TextureId>, label: &str, on: bool, dot: bool) -> Response {
+    let (rect, r) = ui.allocate_exact_size(Vec2::new(side, side + 18.0), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return r;
+    }
+    let img = Rect::from_min_size(rect.min, Vec2::splat(side));
+    let p = ui.painter();
+    match image {
+        Some(id) => {
+            p.image(id, img, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(img, 6.0, theme::TILE);
+        }
+    }
+    let rim = if on { Stroke::new(2.0, theme::ORANGE) } else if r.hovered() { Stroke::new(1.0, theme::line(0.5)) } else { Stroke::new(1.0, theme::line(0.14)) };
+    p.rect_stroke(img, 6.0, rim, StrokeKind::Inside);
+    if dot {
+        let c = img.right_top() + Vec2::new(-9.0, 9.0);
+        p.circle_filled(c, 4.5, Color32::from_black_alpha(190));
+        p.circle_filled(c, 3.0, s1(1.0));
+    }
+    let colour = if on { theme::ORANGE_TEXT } else { theme::TEXT };
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_string(), FontId::proportional(12.5), colour);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(side);
+    let g = p.layout_job(job);
+    p.galley(Pos2::new(img.left(), img.bottom() + 2.0), g, colour);
     r
 }
 

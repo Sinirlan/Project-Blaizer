@@ -5,6 +5,8 @@
 pub const CAMERA: &str = "\u{e064}";
 pub const VIDEO: &str = "\u{e1a5}";
 pub const VOLUME: &str = "\u{e1ab}";
+pub const VOLUME_OFF: &str = "\u{e1ac}";
+pub const MUSIC: &str = "\u{e34c}";
 pub const RESET: &str = "\u{e148}";
 pub const NEXT_CAMERA: &str = "\u{e17c}";
 pub const MIRROR: &str = "\u{e6be}";
@@ -61,6 +63,8 @@ pub const HELP: &str = "\u{e082}";
 pub const CLOSE: &str = "\u{e1b2}";
 pub const MORE: &str = "\u{e0b6}";
 pub const LAUNCH: &str = "\u{e5a4}";
+/// picture-in-picture-2: open a view in its own window (motortex On object, #526)
+pub const POP_OUT: &str = "\u{e3af}";
 pub const SAVE: &str = "\u{e14d}";
 pub const RELOAD: &str = "\u{e145}";
 pub const TRASH: &str = "\u{e18e}";
@@ -100,3 +104,7 @@ pub const FILTER: &str = "\u{e0dc}";
 pub const SHRUB: &str = "\u{e2ee}";
 pub const GEM: &str = "\u{e242}";
 pub const WARN: &str = "\u{e193}";
+/// motortex Draw mode (#524): pen-tool, square, pentagon
+pub const PEN_TOOL: &str = "\u{e131}";
+pub const SQUARE: &str = "\u{e167}";
+pub const PENTAGON: &str = "\u{e52b}";

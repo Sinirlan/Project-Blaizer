@@ -197,7 +197,7 @@ motor_tune::tunable! {
     /// unit: m
     /// applies: restart
     pub TRAFFIC_WIDTH: f32 = 2.1;
-    /// The length every car has in the AI's traffic tests (A+0x48), see `TRAFFIC_WIDTH` [O, #379].
+    /// The length every car has in the AI's traffic tests (A+0x48, 0x4a7db4), see `TRAFFIC_WIDTH` [O, #379].
     /// range: 2..8
     /// unit: m
     /// applies: restart
@@ -391,7 +391,9 @@ impl GameAi {
         (self.x[i] - p.0).powi(2) + (self.z[i] - p.1).powi(2)
     }
 
-    /// Place the tracker on the nearest node (call after (re)spawning).
+    /// Place the tracker on the nearest node (call after (re)spawning). The throttle ramp goes back to 1.0, which is
+    /// all a reset does to it: nothing on the reset path (0x45c332, 0x40da34, 0x425910) writes `0x4db1c4[A+0x64]`, and
+    /// the wheelspin cut that drops it to 0.5 (0x407d80) never fires for AI cars in Single/League (03-physics 3.2) [O, #487].
     pub fn reset(&mut self, car: &Car) {
         let p = (car.pos.x, car.pos.z);
         self.pos = p;
@@ -405,13 +407,6 @@ impl GameAi {
         self.recover = false;
         self.side_lock = 0.0;
         self.lane = 0.0;
-    }
-
-    /// After a respawn the car stands still: take the throttle up gently. APPROX [I]. The
-    /// original's wheelspin cut (P[0x25], 0x407d80) never fires for AI cars in Single/League
-    /// races (03-physics 3.2), so the port has no such flag.
-    pub fn ease_in(&mut self) {
-        self.ramp = 0.5;
     }
 
     /// What the other cars see of this one.

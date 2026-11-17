@@ -20,7 +20,7 @@ use winit::keyboard::KeyCode;
 use crate::controls::{task, Device, PadIn};
 use crate::demo::DemoCars;
 use crate::front::menu_modern::{code_glyph, key_glyph, pad_glyph};
-use crate::front::Game;
+use crate::front::{Game, Units};
 use crate::hud_transport::Hint;
 
 /// The speeds of the speed chip (the file's time over the clock's).
@@ -204,6 +204,8 @@ pub struct View<'a> {
     pub pointer: Option<[f32; 2]>,
     /// the bar or diagram is dragged
     pub scrub: bool,
+    /// the speeds in the card's text (#501)
+    pub units: Units,
 }
 
 pub struct Playback {
@@ -285,8 +287,8 @@ impl Playback {
         self.hold != 0 || !self.playing || self.ended || self.mouse.scrub
     }
 
-    pub fn view(&self, t_ms: f64) -> View<'_> {
-        View { t_ms, len_ms: self.len_ms, laps: &self.laps, playing: self.playing, hold: self.hold, rate: RATES[self.rate], tele: self.tele, trace: &self.trace, show: self.show, unfold: self.unfold, ended: self.ended, picked: self.picked, hover: self.mouse.hover, tip: self.mouse.tip, pointer: self.mouse.pointer, scrub: self.mouse.scrub }
+    pub fn view(&self, t_ms: f64, units: Units) -> View<'_> {
+        View { t_ms, len_ms: self.len_ms, laps: &self.laps, playing: self.playing, hold: self.hold, rate: RATES[self.rate], tele: self.tele, trace: &self.trace, show: self.show, unfold: self.unfold, ended: self.ended, picked: self.picked, hover: self.mouse.hover, tip: self.mouse.tip, pointer: self.mouse.pointer, scrub: self.mouse.scrub, units }
     }
 
     /// Headless shots: the card and the unfold at their targets at once.

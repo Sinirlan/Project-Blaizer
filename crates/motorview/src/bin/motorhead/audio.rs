@@ -4,7 +4,8 @@
 use crate::front::{Game, Screen, Sfx};
 use motor_audio::{Audio, MusicStream, Params, VoiceId};
 use motorview::drive::CamMode;
-use motorview::race_audio::{Bank, Ear, RaceAudio, MASTER};
+use motorview::race_audio::{index_music, Bank, EngineSound, Ear, RaceAudio, MASTER, MUSIC_VOLUME};
+use motorview::render::RenderMode;
 pub use motorview::race_audio::{race_sounds, RaceSounds};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,6 @@ use std::path::{Path, PathBuf};
 /// The audio CD's track layout: 1 data, 2 results, 3 menu (the MenuCDTrack default),
 /// 4.. per-track music (CDTrack).
 const CD_RESULTS: u32 = 2;
-const MUSIC_VOLUME: f32 = 1.15;
 
 pub struct GameAudio {
     audio: Audio,
@@ -37,22 +37,6 @@ pub struct GameAudio {
     horn_try: Option<VoiceId>,
     /// the id of the output the sound is on (#260): what the player picked on the Sound screen, None = the system default
     device: Option<String>,
-}
-
-/// Index a folder of ripped CD tracks: "04 RedRock.mp3" -> 4. Any format symphonia reads.
-fn index_music(root: &Path) -> HashMap<u32, PathBuf> {
-    let mut map = HashMap::new();
-    let Some(dir) = motor_data::fs::find_ci(root, "Music") else { return map };
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let p = e.path();
-        let ok = p.extension().is_some_and(|x| ["mp3", "ogg", "flac", "wav"].iter().any(|k| x.eq_ignore_ascii_case(k)));
-        let name = e.file_name().to_string_lossy().to_string();
-        let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let (true, Ok(n)) = (ok, digits.parse::<u32>()) {
-            map.insert(n, p);
-        }
-    }
-    map
 }
 
 /// The CD track numbers present in Music/, ascending.
@@ -119,6 +103,11 @@ impl GameAudio {
     }
 
 
+    /// Stop the race's sound (`--record-audio`'s end)
+    pub fn stop_race(&mut self) {
+        self.race.stop();
+    }
+
     fn play(&mut self, rel: &str, p: Params) -> Option<VoiceId> {
         let clip = self.bank.get(rel)?;
         Some(self.audio.play(&clip, p))
@@ -152,8 +141,6 @@ impl GameAudio {
         let pct = |v: u32| v.min(100) as f32 / 100.0;
         (self.sfx, self.mus, self.amb) = (pct(game.settings.vol_sfx), pct(game.settings.vol_music), pct(game.settings.vol_ambient));
         (self.race.sfx, self.race.amb) = (self.sfx, self.amb);
-        self.race.sim_wanted = game.settings.engine_sound;
-        self.race.car_id = game.cars.get(game.settings.car).map_or(1, |c| c.id);
         for s in std::mem::take(&mut game.sfx) {
             match s {
                 Sfx::Menu(e) => {
@@ -178,7 +165,7 @@ impl GameAudio {
             }
         }
         // race sounds live while racing or paused; results and menus stop them
-        let racing = matches!(game.screen, Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam);
+        let racing = game.screen.in_race();
         if self.race.active() && (!racing || game.race.is_none()) {
             self.race.stop();
             self.music = None;
@@ -187,6 +174,9 @@ impl GameAudio {
         if !game.screen.is_movie() {
             self.music(game);
         }
+        // REMASTER: the setting's engine sound, Classic in the Classic mode; a change (the menu row, F9) swaps the
+        // engine voices of a running race
+        self.race.set_engine_sound(effective_engine_sound(game));
         if let (Some(r), false, Screen::Race) = (&mut game.race, self.race.active(), game.screen) {
             // #335 the sounds the loading worker decoded
             if let Some(pre) = r.sounds.take() {
@@ -245,7 +235,7 @@ impl GameAudio {
         }
         Some(match game.screen {
             Screen::Loading => return None,
-            Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam => game.race.as_ref().map(|r| game.race_cd_track(r.track)),
+            s if s.in_race() => game.race.as_ref().map(|r| game.race_cd_track(r.track)),
             Screen::Results => Some(CD_RESULTS),
             // the song-to-track table's Enter plays the picked song until the screen is left
             Screen::Sound if game.cd_preview.is_some() => game.cd_preview,
@@ -263,7 +253,7 @@ impl GameAudio {
             self.cd_playing = want;
         }
         // Menyloop.wav (loaded at race init, 0x45880c) when there is no menu track to stream
-        let in_menus = !matches!(game.screen, Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam | Screen::Loading);
+        let in_menus = !(game.screen.in_race() || game.screen == Screen::Loading);
         let fallback = in_menus && game.settings.music && self.cd_playing.is_none();
         match (fallback, self.music) {
             (true, None) => self.music = self.play("menyloop.wav", Params { volume: 0.7, looping: true, ..Default::default() }),
@@ -274,11 +264,21 @@ impl GameAudio {
             _ => {}
         }
         // music volume, quieter under the in-race menus
-        let paused = matches!(game.screen, Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam);
+        let paused = game.screen.race_paused();
         let v = MUSIC_VOLUME * self.mus * if paused { 0.4 } else { 1.0 };
         self.audio.with(|m| m.set_music_volume(v));
         if let Some(m) = self.music {
             self.audio.set(m, Params { volume: 0.7 * self.mus, looping: true, ..Default::default() });
         }
+    }
+}
+
+/// REMASTER (#494): the engine sound that plays: the `EngineSound` setting in the Remaster mode, the game's own
+/// (Classic) in the Classic mode.
+fn effective_engine_sound(game: &Game) -> EngineSound {
+    if game.settings.view.mode == RenderMode::Remaster {
+        game.settings.engine_sound
+    } else {
+        EngineSound::Classic
     }
 }

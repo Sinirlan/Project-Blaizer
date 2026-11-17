@@ -229,6 +229,23 @@ pub struct Assets {
     movie_slot: Option<Rect>,
 }
 
+/// The Classic HUD's "MPH" label from the 1998 art, 32 x 16 like `TKMH00.TGA` (patch 3.0 ships its own `Tkmh01.TGA`): M and
+/// H of KMH (columns 10..22 and 22..32, K is 0..10) with the P of POS (columns 0..10; O is 10..20, S 20..30) between them.
+/// APPROX [I]: the cell columns are read off the 1998 art; any other size gives None (no label rather than a wrong one).
+fn compose_mph(kmh: (u32, u32, &[u8]), pos: (u32, u32, &[u8])) -> Option<Vec<u8>> {
+    if (kmh.0, kmh.1) != (32, 16) || (pos.0, pos.1) != (30, 16) || kmh.2.len() < 32 * 16 * 4 || pos.2.len() < 30 * 16 * 4 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(32 * 16 * 4);
+    for y in 0..16usize {
+        let k = |x0: usize, x1: usize| &kmh.2[(y * 32 + x0) * 4..(y * 32 + x1) * 4];
+        out.extend_from_slice(k(10, 22));
+        out.extend_from_slice(&pos.2[(y * 30) * 4..(y * 30 + 10) * 4]);
+        out.extend_from_slice(k(22, 32));
+    }
+    Some(out)
+}
+
 fn magenta_key(rgba: &mut [u8]) {
     for p in rgba.chunks_mut(4) {
         if p[0] > 240 && p[1] < 16 && p[2] > 240 {
@@ -369,6 +386,8 @@ impl Assets {
                 }
             }
         }
+        // the retail HUD labels the "MPH" is composed from (#501)
+        let (mut kmh_art, mut pos_art) = (None, None);
         // Direct3D HUD images (magenta = transparent)
         if let Some(dir) = fs::find_ci(root, "Data/d3d") {
             let mut files: Vec<_> = std::fs::read_dir(dir).map(|d| d.flatten().map(|e| e.path()).collect()).unwrap_or_default();
@@ -389,6 +408,11 @@ impl Assets {
                         continue;
                     }
                     magenta_key(&mut rgba);
+                    match key.as_str() {
+                        "h:tkmh00" => kmh_art = Some((w, h, rgba.clone())),
+                        "h:pos" => pos_art = Some((w, h, rgba.clone())),
+                        _ => {}
+                    }
                     atlas.add(&key, w, h, &rgba);
                 }
             }
@@ -438,13 +462,21 @@ impl Assets {
         load_countdown(&mut atlas);
         let fnt = load_fnt(root, &mut atlas);
         // per-car photos of the Classic Car screen (0x4614e8: the car file's FileName directory + data\_menuimg.tga), last so nothing else moves in the atlas
-        for id in 1..=10u32 {
+        for id in fs::car_ids(root) {
             let dir = fs::config(root, &format!("Game/car{id:02}.car"))
                 .ok()
                 .and_then(|c| c.get("FileName").and_then(|e| e.values.first().cloned()))
                 .and_then(|f| f.rsplit_once('\\').map(|(d, _)| d.to_string()));
             if let Some(i) = dir.and_then(|d| tga(&format!("{d}/data/_menuimg.TGA"))) {
                 atlas.add(&format!("car:{id}"), i.width, i.height, &i.rgba);
+            }
+        }
+        // CLASSIC (#501): patch 3.0's Tkmh01.TGA is "h:tkmh01"; the 1998 install has no MPH label, so one is composed from its letters
+        if atlas.get("h:tkmh01").is_none() {
+            if let (Some(k), Some(p)) = (&kmh_art, &pos_art) {
+                if let Some(rgba) = compose_mph((k.0, k.1, &k.2), (p.0, p.1, &p.2)) {
+                    atlas.add("h:tkmh01", 32, 16, &rgba);
+                }
             }
         }
         for (key, w, h, rgba) in &duos {
@@ -1261,6 +1293,24 @@ impl<'a> Batch<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The composed "MPH": the M columns of KMH, the P column of POS, the H columns of KMH, row by row; other sizes give nothing.
+    #[test]
+    fn mph_label_is_composed_from_the_retail_letters() {
+        let kmh: Vec<u8> = (0..32 * 16).flat_map(|i| [(i % 32) as u8, (i / 32) as u8, 1, 255]).collect();
+        let pos: Vec<u8> = (0..30 * 16).flat_map(|i| [(i % 30) as u8, (i / 30) as u8, 2, 255]).collect();
+        let out = compose_mph((32, 16, &kmh), (30, 16, &pos)).expect("retail sizes");
+        assert_eq!(out.len(), 32 * 16 * 4);
+        let px = |x: usize, y: usize| &out[(y * 32 + x) * 4..(y * 32 + x) * 4 + 3];
+        assert_eq!(px(0, 5), [10, 5, 1], "M starts at KMH column 10");
+        assert_eq!(px(11, 5), [21, 5, 1], "M ends at column 21");
+        assert_eq!(px(12, 5), [0, 5, 2], "P is POS columns 0..10");
+        assert_eq!(px(21, 15), [9, 15, 2]);
+        assert_eq!(px(22, 3), [22, 3, 1], "H is KMH columns 22..32");
+        assert_eq!(px(31, 3), [31, 3, 1]);
+        assert!(compose_mph((32, 16, &kmh[..100]), (30, 16, &pos)).is_none());
+        assert!(compose_mph((31, 16, &kmh), (30, 16, &pos)).is_none());
+    }
 
     /// Black, mid grey and white map to the duotone's three stops; the corners are cut, the middle is opaque.
     #[test]

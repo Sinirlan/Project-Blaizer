@@ -32,7 +32,7 @@ impl Material {
 }
 
 /// `TRIROAD.IFF` / `Data\x\triroad.iff` -> `triroad`
-fn stem(name: &str) -> String {
+pub fn stem(name: &str) -> String {
     let base = name.rsplit(['\\', '/']).next().unwrap_or(name).to_ascii_lowercase();
     base.strip_suffix(".iff").map(String::from).unwrap_or(base)
 }
@@ -103,6 +103,55 @@ pub fn find(root: &Path, track: u32, name: &str, notes: &mut Vec<String>) -> Mat
     m
 }
 
+/// The recipe line key of a texture's mapping (`NAME Mapping world`, #521) and of its density
+/// (`NAME Density 25.4`, texels of the original per metre).
+pub const MAPPING_KEY: &str = "Mapping";
+pub const DENSITY_KEY: &str = "Density";
+
+/// REMASTER World mapping (#521): the textures whose recipe says `NAME Mapping world`, by upper-case
+/// stem, with their `NAME Density` (None: measure it from the meshes). Read from `motortex.cfg` in
+/// the track's pack folder, then the shared one; the first file that names a texture wins.
+/// Other recipe lines are motortex's and ignored here.
+pub fn mapping(root: &Path, track: u32) -> std::collections::HashMap<String, Option<f32>> {
+    let mut out = std::collections::HashMap::new();
+    for d in [format!("remaster/textures/track{track:02}"), "remaster/textures".to_string()] {
+        let Ok(b) = motor_data::fs::read(root, &format!("{d}/motortex.cfg")) else { continue };
+        for (name, v) in parse_mapping(&String::from_utf8_lossy(&b)) {
+            out.entry(name).or_insert(v);
+        }
+    }
+    out
+}
+
+/// `NAME Mapping world` / `NAME Density x` lines of a recipe; a Density without World is ignored.
+fn parse_mapping(text: &str) -> Vec<(String, Option<f32>)> {
+    let mut world = std::collections::BTreeMap::<String, (bool, Option<f32>)>::new();
+    for line in text.lines() {
+        let line = line.split("//").next().unwrap_or("").trim();
+        let mut w = line.split_whitespace();
+        let (Some(name), Some(key), Some(value)) = (w.next(), w.next(), w.next()) else { continue };
+        let e = world.entry(name.to_ascii_uppercase());
+        if key.eq_ignore_ascii_case(MAPPING_KEY) {
+            e.or_default().0 = value.eq_ignore_ascii_case("world");
+        } else if key.eq_ignore_ascii_case(DENSITY_KEY) {
+            e.or_default().1 = value.parse().ok().filter(|d: &f32| d.is_finite() && *d > 0.0);
+        }
+    }
+    world.into_iter().filter(|(_, (on, _))| *on).map(|(n, (_, d))| (n, d)).collect()
+}
+
+/// The planar projection the Remaster shader (`fs_remaster`, `world_uv`) makes for a World mapped
+/// texture, in view space: u along the face's horizontal (to the right as seen from its front),
+/// v down its slope; a level face uses x and z. `scale` = texels per metre / the original's size.
+/// Kept here for the tests; the shader is the one that draws.
+pub fn world_uv(pos: [f32; 3], n: [f32; 3], scale: [f32; 2]) -> [f32; 2] {
+    let (p, n) = (glam::Vec3::from(pos), glam::Vec3::from(n).normalize());
+    let h = glam::Vec3::Y.cross(n);
+    let t = if h.length_squared() > 1e-6 { h.normalize() } else { glam::Vec3::X };
+    let b = n.cross(t);
+    [p.dot(t) * scale[0], -p.dot(b) * scale[1]]
+}
+
 /// What a scene keeps of the pack: square layers (RGBA8, `size`²) for the GPU's second array and,
 /// per base texture layer, the ids of its colour and normal+roughness layers (-1 = the original).
 #[derive(Clone, Default)]
@@ -110,6 +159,9 @@ pub struct Pack {
     pub size: u32,
     pub layers: Vec<Vec<u8>>,
     pub map: Vec<[i32; 2]>,
+    /// per base texture layer, the World mapping scale (u, v) = texels per metre / the original's
+    /// width, height; [0, 0] = its own UVs (#521)
+    pub world: Vec<[f32; 2]>,
     /// textures with a colour, a normal and a roughness map
     pub counts: [usize; 3],
     pub notes: Vec<String>,
@@ -232,5 +284,26 @@ mod tests {
         assert_eq!(layer_size(600, 4), 1024);
         assert_eq!(layer_size(4096, 4), 1024);
         assert!(layer_size(1024, 400) < 1024);
+    }
+
+    #[test]
+    fn mapping_lines() {
+        let r = "Colour x.jpg\nMaterialSize 4\n_brick3 Mapping World // a wall\n_BRICK3 Density 22.5\nROAD1 Density 9\nWALL Mapping world\nOLD Mapping original\n";
+        let mut m = parse_mapping(r);
+        m.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(m, vec![("WALL".to_string(), None), ("_BRICK3".to_string(), Some(22.5))]);
+    }
+
+    #[test]
+    fn world_uv_is_level_and_unmirrored() {
+        // a wall facing the viewer (+z in view space): u to the right (+x), v down (-y)
+        let s = [0.5, 0.25];
+        assert_eq!(world_uv([2.0, 4.0, 7.0], [0.0, 0.0, 1.0], s), [1.0, -1.0]);
+        // the same wall turned 90°: still u along the wall, v from height alone
+        let a = world_uv([3.0, 4.0, 2.0], [1.0, 0.0, 0.0], s);
+        assert!((a[1] + 1.0).abs() < 1e-6 && (a[0] - -1.0).abs() < 1e-6, "{a:?}");
+        // a level floor: x and z
+        let f = world_uv([2.0, 0.0, 8.0], [0.0, 1.0, 0.0], [1.0, 1.0]);
+        assert!((f[0] - 2.0).abs() < 1e-6 && (f[1].abs() - 8.0).abs() < 1e-6, "{f:?}");
     }
 }

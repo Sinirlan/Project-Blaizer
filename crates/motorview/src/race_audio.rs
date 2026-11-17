@@ -3,11 +3,10 @@
 //! cine render (cine_render.rs). Spec: re-notes/07-audio.md, 20-cine.md "Audio".
 
 use crate::drive::Session;
-use crate::engine_sim::SimEngine;
 use crate::loading::{Progress, Stage};
 use crate::render::Camera;
 use glam::Vec3;
-use motor_audio::{wav, Audio, Clip, Params, VoiceId};
+use motor_audio::{wav, Audio, Clip, Params, Tone, VoiceId};
 use motor_sim::session::Race;
 use motor_sim::world::MatSound;
 use std::collections::HashMap;
@@ -42,20 +41,251 @@ motor_tune::tunable! {
     /// range: 0..0.001
     /// area: Audio/Engine
     AI_PITCH_PER_RPM: f32 = 0.00016512;
-    /// Level of the simulated engine's loops (baked to a 0.9 peak) [design choice, tuned by ear].
-    /// range: 0..3
-    /// area: Audio/Engine
-    SIM_VOLUME: f32 = 1.0;
 }
+
+/// REMASTER: the engine sound (the `EngineSound` setting). The engine-sim Baked / Live engines were tried and
+/// removed (#493, re-notes/09-remaster.md 9.19); Enhanced (#494) is the game's own samples, cleaner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EngineSound {
+    /// the game's engine recordings through the original linear mixer
+    #[default]
+    Classic,
+    /// the same recordings, band-limited resampling and seamless loops (`motor_audio::resample`), smoothed blends, a
+    /// character per car and the body / air layers (#494)
+    Enhanced,
+}
+
+impl EngineSound {
+    pub const ALL: [EngineSound; 2] = [EngineSound::Classic, EngineSound::Enhanced];
+
+    /// the settings file's word
+    pub fn key(self) -> &'static str {
+        match self {
+            EngineSound::Classic => "Classic",
+            EngineSound::Enhanced => "Enhanced",
+        }
+    }
+
+    /// the menu's word
+    pub fn label(self) -> &'static str {
+        self.key()
+    }
+
+    /// a settings word or command-line value; the removed `simulated` / `baked` / `live` fall back to Classic
+    pub fn parse(v: &str) -> Option<EngineSound> {
+        match v.to_ascii_lowercase().as_str() {
+            "classic" | "simulated" | "baked" | "live" => Some(EngineSound::Classic),
+            "enhanced" => Some(EngineSound::Enhanced),
+            _ => None,
+        }
+    }
+}
+motor_tune::tunable! {
+    /// REMASTER Enhanced engine: length of the crossfade that closes each engine loop's seam [design choice].
+    /// range: 0..100
+    /// unit: ms
+    /// applies: reload
+    /// area: Audio/Enhanced
+    SEAM_XFADE_MS: f32 = 20.0;
+    /// REMASTER Enhanced engine: how far back from a loop's end the seam search looks for the best match with its start [design choice].
+    /// range: 0..300
+    /// unit: ms
+    /// applies: reload
+    /// area: Audio/Enhanced
+    SEAM_SEARCH_MS: f32 = 60.0;
+    /// REMASTER Enhanced engine: time constant with which each engine-family voice glides to a new volume, pan and pitch,
+    /// so the per-frame set leaves no steps [design choice].
+    /// range: 0..100
+    /// unit: ms
+    /// applies: reload
+    /// area: Audio/Enhanced
+    ENGINE_GLIDE_MS: f32 = 10.0;
+    /// REMASTER Enhanced engine: how fast the throttle recording (gason) swells in when the pedal goes down [design choice].
+    /// range: 1..500
+    /// unit: ms
+    /// area: Audio/Enhanced
+    PEDAL_ATTACK_MS: f32 = 40.0;
+    /// REMASTER Enhanced engine: how fast the overrun recordings (gasrele) take over when the pedal is lifted [design choice].
+    /// range: 1..1000
+    /// unit: ms
+    /// area: Audio/Enhanced
+    PEDAL_RELEASE_MS: f32 = 120.0;
+    /// REMASTER Enhanced engine: smoothing of the echo-zone channel `b` that fades the left/right echo loops in and out [design choice].
+    /// range: 1..1000
+    /// unit: ms
+    /// area: Audio/Enhanced
+    ECHO_BLEND_MS: f32 = 150.0;
+    /// REMASTER Enhanced engine: how far the engine level dips at a gear change (0 = none, 1 = silent) [design choice].
+    /// range: 0..1
+    /// area: Audio/Enhanced
+    GEAR_DIP: f32 = 0.35;
+    /// REMASTER Enhanced engine: how long the gear-change dip takes to fade (time constant) [design choice].
+    /// range: 1..500
+    /// unit: ms
+    /// area: Audio/Enhanced
+    GEAR_DIP_MS: f32 = 90.0;
+    /// REMASTER Enhanced engine: how much of each car's character (assets/audio/engine_character.cfg) is applied:
+    /// 0 = every car as the game's, 1 = the table, 2 = twice its offsets [design choice].
+    /// range: 0..2
+    /// area: Audio/Enhanced
+    CHARACTER: f32 = 1.0;
+    /// REMASTER Enhanced engine: corner of the per-car low shelf (the engine's body) [design choice].
+    /// range: 40..1000
+    /// unit: Hz
+    /// area: Audio/Enhanced
+    TONE_LOW_HZ: f32 = 250.0;
+    /// REMASTER Enhanced engine: corner of the per-car high shelf (the engine's rasp) [design choice].
+    /// range: 1000..10000
+    /// unit: Hz
+    /// area: Audio/Enhanced
+    TONE_HIGH_HZ: f32 = 3000.0;
+    /// REMASTER Enhanced engine (#494 phase 4): level of the "body" layer, the throttle and overrun recordings played
+    /// one octave down under the engine, relative to the recording it doubles (-60 or less = off) [design choice,
+    /// chosen by the listening kit: "subtle" ranked first for cars 1 and 8, 4b].
+    /// range: -60..12
+    /// unit: dB
+    /// area: Audio/Enhanced
+    BODY_DB: f32 = -9.0;
+    /// REMASTER Enhanced engine: the body layer keeps only what lies below this (its low end) [design choice].
+    /// range: 60..2000
+    /// unit: Hz
+    /// area: Audio/Enhanced
+    BODY_LP_HZ: f32 = 400.0;
+    /// REMASTER Enhanced engine: level of the "air" layer, the throttle recording's own combustion noise (its
+    /// harmonics turned to noise, its pulse kept), relative to the noise the recording carries (-60 or less = off)
+    /// [design choice, chosen by the listening kit: "subtle" ranked first for cars 1 and 8, 4b].
+    /// range: -60..12
+    /// unit: dB
+    /// area: Audio/Enhanced
+    AIR_DB: f32 = -6.0;
+    /// REMASTER Enhanced engine: the air layer keeps only what lies above this (its hiss) [design choice].
+    /// range: 200..8000
+    /// unit: Hz
+    /// area: Audio/Enhanced
+    AIR_HP_HZ: f32 = 1200.0;
+    /// REMASTER Enhanced engine: share of the air layer at 0 rpm; it grows to full at 12 000 rpm [design choice].
+    /// range: 0..1
+    /// area: Audio/Enhanced
+    AIR_IDLE: f32 = 0.3;
+    /// REMASTER Enhanced engine: share of the air layer with the pedal released (full with it pressed) [design choice].
+    /// range: 0..1
+    /// area: Audio/Enhanced
+    AIR_OFF: f32 = 0.5;
+    /// REMASTER Enhanced engine: what the air layer is built from: the throttle recording above this, in the
+    /// recording's own frequencies [design choice].
+    /// range: 0..4000
+    /// unit: Hz
+    /// applies: reload
+    /// area: Audio/Enhanced
+    AIR_CUT_HZ: f32 = 600.0;
+}
+
+/// REMASTER Enhanced engine: the body layer's high-pass, so the octave-down 43 Hz rumble of the recordings does not
+/// pump the mix [design choice].
+const BODY_HP_HZ: f32 = 30.0;
+
+/// A level in dB as a volume factor; -60 dB or less is silence (the mixer then skips the voice).
+fn db_gain(db: f32) -> f32 {
+    if db <= -60.0 {
+        0.0
+    } else {
+        10f32.powf(db / 20.0)
+    }
+}
+
+/// REMASTER Enhanced engine (#494 phase 3): a car's engine character, one line of
+/// assets/audio/engine_character.cfg (`carNN pitch low_db high_db level_db body_db air_db`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Character {
+    /// factor on the engine's pitch
+    pub pitch: f32,
+    /// gains of the low / high shelf
+    pub low_db: f32,
+    pub high_db: f32,
+    /// the engine's level
+    pub level_db: f32,
+    /// added to `BODY_DB` / `AIR_DB` for this car (#496)
+    pub body_db: f32,
+    pub air_db: f32,
+}
+
+impl Character {
+    /// the game's engine, unchanged
+    pub const NEUTRAL: Character = Character { pitch: 1.0, low_db: 0.0, high_db: 0.0, level_db: 0.0, body_db: 0.0, air_db: 0.0 };
+
+    /// The offsets times `k` (0 = neutral).
+    fn scaled(self, k: f32) -> Character {
+        Character { pitch: self.pitch.max(0.01).powf(k), low_db: self.low_db * k, high_db: self.high_db * k, level_db: self.level_db * k, body_db: self.body_db * k, air_db: self.air_db * k }
+    }
+
+    /// the level as a volume factor
+    pub fn level(self) -> f32 {
+        10f32.powf(self.level_db / 20.0)
+    }
+
+    /// the voice's tone, at the shelf corners of the tunables
+    pub fn tone(self) -> Tone {
+        Tone { low_hz: TONE_LOW_HZ.get(), low_db: self.low_db, high_hz: TONE_HIGH_HZ.get(), high_db: self.high_db, ..Default::default() }
+    }
+}
+
+/// The per-car table, built into the game.
+const CHARACTER_TABLE: &str = include_str!("../../../assets/audio/engine_character.cfg");
+
+/// `carNN pitch low_db high_db level_db body_db air_db` lines by car number; `//` comments, bad lines skipped.
+fn parse_characters(text: &str) -> HashMap<u32, Character> {
+    text.lines()
+        .filter_map(|l| {
+            let l = l.split("//").next().unwrap_or("").trim();
+            let mut w = l.split_whitespace();
+            let car = w.next()?.strip_prefix("car")?.parse().ok()?;
+            let v: Vec<f32> = w.map(str::parse).collect::<Result<_, _>>().ok()?;
+            let [pitch, low_db, high_db, level_db, body_db, air_db] = v[..] else { return None };
+            Some((car, Character { pitch, low_db, high_db, level_db, body_db, air_db }))
+        })
+        .collect()
+}
+
+/// REMASTER Enhanced engine: the character of car `car_id` (the carNN number), scaled by `CHARACTER`.
+pub fn character(car_id: u32) -> Character {
+    static TABLE: std::sync::OnceLock<HashMap<u32, Character>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| parse_characters(CHARACTER_TABLE));
+    let c = character_overrides().lock().ok().and_then(|o| o.get(&car_id).copied()).or_else(|| table.get(&car_id).copied());
+    c.unwrap_or(Character::NEUTRAL).scaled(CHARACTER.get())
+}
+
+/// Character lines set from the command line (`--engine-character`), tried before the built-in table.
+fn character_overrides() -> &'static std::sync::Mutex<HashMap<u32, Character>> {
+    static O: std::sync::OnceLock<std::sync::Mutex<HashMap<u32, Character>>> = std::sync::OnceLock::new();
+    O.get_or_init(Default::default)
+}
+
+/// Dev tool (`--engine-character "car10 1.08 1.5 3.5 1.5 3 2"`, repeatable): replace cars' character lines for this run,
+/// to try a sound without a rebuild (#515). Unlike the built-in table, a line that does not parse is an error. Returns the
+/// number of cars set.
+pub fn override_characters(text: &str) -> Result<usize, String> {
+    let mut n = 0;
+    for l in text.lines().map(|l| l.split("//").next().unwrap_or("").trim()).filter(|l| !l.is_empty()) {
+        let one = parse_characters(l);
+        let Some((car, c)) = one.into_iter().next() else {
+            return Err(format!("--engine-character: `carNN pitch low_db high_db level_db body_db air_db`, not `{l}`"));
+        };
+        character_overrides().lock().map_err(|e| e.to_string())?.insert(car, c);
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// slide1.wav's loop (0x483596: start 9952, end 1 = to the sample's end [I]).
 const SLIDE1_LOOP: Option<(usize, usize)> = Some((9952, usize::MAX));
 motor_tune::tunable! {
-    /// World hit impulse from which SndHardImpulse plays instead of SndWeakImpulse (0x4d83e7); the
-    /// weak sound's volume is `volume x impulse / this x HIT_GAIN` (0x4d83ef) [O].
+    /// World hit impulse from which SndHardImpulse plays instead of SndWeakImpulse (patch 3.0 0x5140da;
+    /// the 1998 game had 16500, 0x4d83e7); the weak sound's volume is `volume x impulse / this x HIT_GAIN`
+    /// (0x5140e2) [O].
     /// range: 1000..60000
     /// unit: kg m/s
     /// area: Audio/Hits
-    HARD_IMPULSE: f32 = 16500.0;
+    HARD_IMPULSE: f32 = 18500.0;
     /// Level factor of the hit sounds (0x4c4900, 0x4c4904) [O].
     /// range: 0..2
     /// area: Audio/Hits
@@ -112,6 +342,28 @@ motor_tune::tunable! {
     DOPPLER_MAX: f32 = 2.0;
 }
 
+/// PATCH30 0x4b0a8c: a material sound's clip as the patch 3.0 DirectSound driver loads it (#503: the tyre, wall-hit
+/// and bump sounds follow patch 3.0 whatever the install, 07-audio "Patch 3.0 car sound update"). The record's
+/// `loopstart loopend` are frames cut from the sample's head and tail (each below 100 counts as 0, both are
+/// clamped to the length; when the tail would reach into the head the two swap; when they cover the sample
+/// exactly both become 0), and a looping record loops all that is left. Returns the clip and the tail used,
+/// or None when the cuts leave nothing (the driver refuses the record).
+fn trim_p30(clip: Clip, (ls, le): (usize, usize)) -> Option<(Clip, usize)> {
+    let n = clip.data.len();
+    let (mut ls, mut le) = (if ls < 100 { 0 } else { ls.min(n) }, if le < 100 { 0 } else { le.min(n) });
+    if n - le < ls {
+        std::mem::swap(&mut ls, &mut le);
+    }
+    if n - le == ls {
+        (ls, le) = (0, 0);
+    }
+    if ls + le >= n {
+        return None;
+    }
+    let data = if (ls, le) == (0, 0) { clip.data.clone() } else { std::sync::Arc::new(clip.data[ls..n - le].to_vec()) };
+    Some((Clip { data, loop_points: None, ..clip }, le))
+}
+
 pub fn engine_pitch(rpm: f32) -> f32 {
     (rpm * PITCH_PER_RPM.get() + PITCH_BASE.get()).max(0.05)
 }
@@ -138,6 +390,81 @@ fn engine_volumes(on: f32, off: f32, b: f32) -> [f32; 6] {
     let b = b.clamp(0.0, 1.0);
     let (lon, loff) = (b * on * LOOP_GAIN.get(), b * off * LOOP_GAIN.get());
     [(1.0 - b) * on, (1.0 - b) * off, lon, lon, loff, loff]
+}
+
+/// REMASTER Enhanced engine: the six engine volumes with the hard edges of `engine_levels` / `engine_volumes`
+/// smoothed. Steady, it gives what they give (the pitch law and the end states are the game's); between, the pedal
+/// gate and the echo channel glide, the two recordings of a fade mix in equal power (no hole in the middle), and a
+/// gear change dips the level for a moment (it hides the rpm jump).
+#[derive(Clone, Debug, Default)]
+pub struct EngineBlend {
+    /// 1 = the driving pedal is down (gason), 0 = released (the overrun mix), smoothed
+    gate: f32,
+    /// the echo channel `b`, smoothed
+    echo: f32,
+    /// the gear-change dip, 1 at the shift, decaying
+    dip: f32,
+    gear: usize,
+    started: bool,
+    /// what the last `step` mixed, for the layers (`levels`)
+    out: BlendLevels,
+}
+
+/// REMASTER Enhanced engine: the levels of the last `EngineBlend::step`, before the echo split.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BlendLevels {
+    /// the throttle (gason) and overrun (gasrele) levels, the in-car and gear-dip factors included
+    pub on: f32,
+    pub off: f32,
+    /// the pedal gate (1 pressed, 0 released, glided)
+    pub gate: f32,
+    /// the in-car and gear-dip factors alone
+    pub scale: f32,
+}
+
+/// One-pole step of `x` towards `to` over `dt` seconds with time constant `ms`.
+fn glide(x: f32, to: f32, ms: f32, dt: f32) -> f32 {
+    let tau = ms * 0.001;
+    if tau <= 0.0 || dt <= 0.0 { if dt > 0.0 { to } else { x } } else { x + (to - x) * (1.0 - (-dt / tau).exp()) }
+}
+
+impl EngineBlend {
+    /// Volumes of `ENGINE_SAMPLES` this frame (`dt` seconds after the last).
+    // REMASTER
+    pub fn step(&mut self, pedal: f32, rpm: f32, in_car: bool, echo: f32, gear: usize, dt: f32) -> [f32; 6] {
+        let pressed = if pedal > 0.0 { 1.0 } else { 0.0 };
+        let echo = echo.clamp(0.0, 1.0);
+        if !self.started {
+            *self = EngineBlend { gate: pressed, echo, dip: 0.0, gear, started: true, out: BlendLevels::default() };
+        }
+        let ms = if pressed > self.gate { PEDAL_ATTACK_MS.get() } else { PEDAL_RELEASE_MS.get() };
+        self.gate = glide(self.gate, pressed, ms, dt);
+        self.echo = glide(self.echo, echo, ECHO_BLEND_MS.get(), dt);
+        // a shift between two forward gears dips the level; reverse (0) and the first start do not
+        if gear != self.gear {
+            if gear > 0 && self.gear > 0 {
+                self.dip = 1.0;
+            }
+            self.gear = gear;
+        } else {
+            self.dip = glide(self.dip, 0.0, GEAR_DIP_MS.get(), dt);
+        }
+        // the pressed and the released levels mixed in energy
+        let ((on_p, off_p), (on_r, off_r)) = (engine_levels(1.0, rpm, in_car), engine_levels(0.0, rpm, in_car));
+        let g = self.gate;
+        let mix = |p: f32, r: f32| (g * p * p + (1.0 - g) * r * r).sqrt();
+        let (on, off) = (mix(on_p, on_r), mix(off_p, off_r));
+        // centre loops against the left/right echo loops in equal power
+        let (c, e) = ((self.echo * std::f32::consts::FRAC_PI_2).cos(), (self.echo * std::f32::consts::FRAC_PI_2).sin() * LOOP_GAIN.get());
+        let k = 1.0 - GEAR_DIP.get().clamp(0.0, 1.0) * self.dip;
+        self.out = BlendLevels { on: on * k, off: off * k, gate: g, scale: k * if in_car { 0.9 } else { 1.0 } };
+        [c * on * k, c * off * k, e * on * k, e * on * k, e * off * k, e * off * k]
+    }
+
+    /// The levels the last `step` mixed (all 0 before the first).
+    pub fn levels(&self) -> BlendLevels {
+        self.out
+    }
 }
 
 /// A 3D record's distance gain: 1 inside `min`, 0 beyond `max`, a straight line between
@@ -228,6 +555,29 @@ impl Bank {
         clip
     }
 
+    /// REMASTER Enhanced engine: the sample as a seamless loop read with the sinc kernel (built once, kept beside the original).
+    pub fn get_enhanced(&mut self, rel: &str) -> Option<Clip> {
+        let key = format!("{}#enhanced", bank_key(rel));
+        if let Some(c) = self.clips.get(&key) {
+            return c.clone();
+        }
+        let clip = self.get(rel).map(|c| motor_audio::resample::enhanced_loop(&c, SEAM_XFADE_MS.get(), SEAM_SEARCH_MS.get()));
+        self.clips.insert(key, clip.clone());
+        clip
+    }
+
+    /// REMASTER Enhanced engine (#494 phase 4): the air layer of a loop: noise with the colour and pulse of its
+    /// enhanced version above `AIR_CUT_HZ`, the same length (so it plays in step with it). Built once.
+    pub fn get_air(&mut self, rel: &str) -> Option<Clip> {
+        let key = format!("{}#air", bank_key(rel));
+        if let Some(c) = self.clips.get(&key) {
+            return c.clone();
+        }
+        let clip = self.get_enhanced(rel).map(|c| Clip { data: std::sync::Arc::new(motor_audio::noise::noise_like(&c.data, c.rate, AIR_CUT_HZ.get(), 1)), ..c });
+        self.clips.insert(key, clip.clone());
+        clip
+    }
+
     /// Take the samples a loading worker decoded (`race_sounds`); those already here stay.
     fn adopt(&mut self, clips: Vec<(String, Option<Clip>)>) {
         for (key, clip) in clips {
@@ -246,26 +596,46 @@ const RACE_SAMPLES: [&str; 14] = [
 pub struct RaceSounds {
     /// bank keys and their clips
     clips: Vec<(String, Option<Clip>)>,
-    /// REMASTER the engine pack, for (car id) when the simulated engine is asked for
-    sim: Option<(u32, SimEngine)>,
 }
 
 /// The track's .esd ambience file (the .trk's EnvSoundName).
+/// Music volume of the mixer's music slot (the game's CD music level, a design value shared with motorview).
+pub const MUSIC_VOLUME: f32 = 1.15;
+
+/// Index a folder of ripped CD tracks: "04 RedRock.mp3" -> 4. Any format symphonia reads.
+pub fn index_music(root: &Path) -> HashMap<u32, PathBuf> {
+    let mut map = HashMap::new();
+    let Some(dir) = motor_data::fs::find_ci(root, "Music") else { return map };
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        let ok = p.extension().is_some_and(|x| ["mp3", "ogg", "flac", "wav"].iter().any(|k| x.eq_ignore_ascii_case(k)));
+        let name = e.file_name().to_string_lossy().to_string();
+        let digits: String = name.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let (true, Ok(n)) = (ok, digits.parse::<u32>()) {
+            map.insert(n, p);
+        }
+    }
+    map
+}
+
+/// The `CDTrack` of .trk `track_n` (the audio CD track its race plays), None when the .trk names none.
+pub fn cd_track(root: &Path, track_n: u32) -> Option<u32> {
+    let c = motor_data::fs::config(root, &format!("Game/Track{track_n}.trk")).ok()?;
+    c.get("CDTrack").and_then(|e| e.f32(0)).map(|n| n as u32).filter(|&n| n > 0)
+}
+
 fn track_esd(root: &Path, track_n: u32) -> Option<motor_data::cfg::Config> {
     let esd = motor_data::fs::config(root, &format!("Game/Track{track_n}.trk")).ok().and_then(|c| c.get("EnvSoundName").and_then(|e| e.values.first().cloned()))?;
     motor_data::fs::config(root, &esd).ok()
 }
 
-/// #335 decode what a race on .trk `track_n` plays (on the loading worker): the engine (the
-/// REMASTER pack of `car_id` when `sim`, else the six original loops), the race samples, the
+/// #335 decode what a race on .trk `track_n` plays (on the loading worker): the engine (the six original
+/// loops), the race samples, the
 /// .esd ambience and object sounds, the track materials' sounds. `p` reports the AUDIO stage.
-pub fn race_sounds(root: &Path, track_n: u32, materials: &[motor_sim::world::Material], car_id: u32, sim: bool, p: &Progress) -> Result<RaceSounds, String> {
+pub fn race_sounds(root: &Path, track_n: u32, materials: &[motor_sim::world::Material], p: &Progress) -> Result<RaceSounds, String> {
     p.set(Stage::Audio, 0.0)?;
-    let sim = sim.then(|| SimEngine::load(root, car_id).map(|e| (car_id, e))).flatten();
     let mut names: Vec<String> = RACE_SAMPLES.iter().map(|s| s.to_string()).collect();
-    if sim.is_none() {
-        names.extend(ENGINE_SAMPLES.iter().map(|s| s.0.to_string()));
-    }
+    names.extend(ENGINE_SAMPLES.iter().map(|s| s.0.to_string()));
     if let Some(cfg) = track_esd(root, track_n) {
         names.extend(cfg.all("EnvSound").filter_map(|e| e.values.first().cloned()));
         names.extend(cfg.all("ObjectEnvSound").chain(cfg.all("ObjectColSound")).filter_map(|e| e.values.get(1).cloned()));
@@ -280,7 +650,7 @@ pub fn race_sounds(root: &Path, track_n: u32, materials: &[motor_sim::world::Mat
         clips.push((key, clip));
         p.set(Stage::Audio, (i + 1) as f32 / clips.capacity() as f32)?;
     }
-    Ok(RaceSounds { clips, sim })
+    Ok(RaceSounds { clips })
 }
 
 /// Track ambience line: `EnvSound sample priority volume pitch mindistance maxdistance x y z`,
@@ -297,29 +667,28 @@ struct EnvSound {
     volume: f32,
 }
 
-/// REMASTER simulated engine: one looping voice per grid loop of the pack (engine_sim.rs).
-struct SimVoices {
-    engine: SimEngine,
-    voices: Vec<VoiceId>,
-}
-
 /// A material sound that loops while its hit lasts and plays out afterwards.
 struct HitVoice {
     v: VoiceId,
     sample: String,
     p: Params,
+    /// PATCH30 0x4b1921: seconds a released loop keeps looping before it is stopped (the cut tail's
+    /// length at the voice's rate), and the countdown once released
+    tail: f32,
+    stop_in: Option<f32>,
 }
 
 /// The race's voices (built by `RaceAudio::start`).
 struct Voices {
     engine: Vec<Option<VoiceId>>,
-    /// replaces `engine` when the pack exists and the setting asks for it
-    sim: Option<SimVoices>,
-    /// the setting the engine voices were built for (it can change from the pause menu)
-    sim_asked: bool,
+    /// REMASTER Enhanced engine: the smoothed pedal / echo / gear state of the volumes
+    blend: EngineBlend,
     turbo: Option<VoiceId>,
     inside: Option<VoiceId>,
     ai: Vec<Option<VoiceId>>,
+    /// REMASTER Enhanced engine layers (#494 phase 4): gason and gasrele an octave down, the air noise (Classic: none)
+    body: Vec<Option<VoiceId>>,
+    air: Option<VoiceId>,
     env: Vec<EnvSound>,
     /// the other cars' slide loops (P+0xa88 of 0x483b41), by racer
     ai_slide: Vec<Option<VoiceId>>,
@@ -332,14 +701,13 @@ struct Voices {
     /// slide1.wav (0x757010) and the slidee1/2 tail (0x7576e0 / 0x757744)
     slide1: Option<VoiceId>,
     tail: Option<VoiceId>,
-    /// eburst1/2 (0x757280 / 0x7572e4)
-    burst: Option<VoiceId>,
+    /// eburst1/2 (0x757280 / 0x7572e4); REMASTER the sides of a pack's pop
+    burst: Vec<VoiceId>,
     /// SndScratch and SndWeakImpulse: shared looping records of 0x483d4c
     scrape: Option<HitVoice>,
     weak: Option<HitVoice>,
     /// the SndHardImpulse voice
     hard: Option<VoiceId>,
-    throttle: f32,
     last_gear: usize,
     last_count: i32,
     started: bool,
@@ -401,33 +769,40 @@ struct FocusMix {
     pitch: f32,
 }
 
+/// The engine-family voices `RaceAudio::engine_family` starts.
+struct EngineFamily {
+    engine: Vec<Option<VoiceId>>,
+    turbo: Option<VoiceId>,
+    inside: Option<VoiceId>,
+    ai: Vec<Option<VoiceId>>,
+    /// REMASTER Enhanced: the body (gason, gasrele) and air layers; none in Classic
+    body: Vec<Option<VoiceId>>,
+    air: Option<VoiceId>,
+}
+
 /// REMASTER/CLASSIC race sound on a mixer: the game plays it live, the cine render offline.
 pub struct RaceAudio {
     audio: Audio,
     bank: Bank,
     voices: Option<Voices>,
-    /// #335 the engine pack the loading worker read (car id, pack), taken by `engine_voices`
-    pre_sim: Option<(u32, SimEngine)>,
     install: PathBuf,
     /// REMASTER cine: the car you hear, placed (None in the game: heard as the player)
     focus_mix: Option<FocusMix>,
+    /// REMASTER: which engine sound the next `start` builds (the setting; Classic in the cine render)
+    pub engine_sound: EngineSound,
     /// user volumes 0..1: effects, track ambience
     pub sfx: f32,
     pub amb: f32,
-    /// simulated engine sound wanted, and the car whose pack it would use
-    pub sim_wanted: bool,
-    pub car_id: u32,
 }
 
 impl RaceAudio {
     pub fn new(root: &Path, audio: Audio) -> RaceAudio {
-        RaceAudio { audio, bank: Bank::new(root), voices: None, pre_sim: None, install: root.to_path_buf(), focus_mix: None, sfx: 0.8, amb: 0.8, sim_wanted: false, car_id: 1 }
+        RaceAudio { audio, bank: Bank::new(root), voices: None, install: root.to_path_buf(), focus_mix: None, engine_sound: EngineSound::Classic, sfx: 0.8, amb: 0.8 }
     }
 
     /// Take the sounds a loading worker decoded (`race_sounds`), before `start`.
     pub fn adopt(&mut self, pre: RaceSounds) {
         self.bank.adopt(pre.clips);
-        self.pre_sim = pre.sim;
     }
 
     /// The race's voices exist (between `start` and `stop`).
@@ -437,6 +812,17 @@ impl RaceAudio {
 
     fn play(&mut self, rel: &str, p: Params) -> Option<VoiceId> {
         let clip = self.bank.get(rel)?;
+        Some(self.audio.play(&clip, p))
+    }
+
+    /// An engine-family loop (the six engine samples, turbo, interior hum, the other cars' engine): the original
+    /// clip (CLASSIC) or, with `EngineSound::Enhanced`, its seamless sinc-read version (REMASTER).
+    fn play_engine(&mut self, rel: &str, p: Params) -> Option<VoiceId> {
+        let clip = match self.engine_sound {
+            EngineSound::Classic => self.bank.get(rel)?,
+            // REMASTER: the voice glides to its per-frame volume and pitch
+            EngineSound::Enhanced => Clip { glide: ENGINE_GLIDE_MS.get() * 0.001, ..self.bank.get_enhanced(rel)? },
+        };
         Some(self.audio.play(&clip, p))
     }
 
@@ -456,14 +842,17 @@ impl RaceAudio {
 
     /// Keep a material sound looping at `want` = (volume, pan) while its hit lasts; without one
     /// the loop bit is cleared (`and 0xfe` on the record's flags) and the sample plays out.
-    fn drive_hit_loop(&mut self, slot: &mut Option<HitVoice>, snd: Option<&MatSound>, want: Option<(f32, f32)>) {
+    /// `looping` false = a one-shot started when not playing, its level followed while it plays
+    /// (PATCH30 0x4b6f2b: the weak impulse). PATCH30 0x4b1921: a released loop goes on looping for
+    /// its cut tail's length, then stops.
+    fn drive_hit_loop(&mut self, slot: &mut Option<HitVoice>, snd: Option<&MatSound>, want: Option<(f32, f32)>, looping: bool, dt: f32) {
         let playing = slot.as_ref().is_some_and(|h| self.audio.with(|m| m.is_playing(h.v)));
         if !playing {
             *slot = None;
         }
         match (want, snd) {
             (Some((volume, pan)), Some(snd)) => {
-                let p = Params { volume: volume.min(1.0), pitch: snd.pitch.max(0.1), pan, looping: true };
+                let p = Params { volume: volume.min(1.0), pitch: snd.pitch.max(0.1), pan, looping };
                 // another material's sample replaces the record's (stopped first, 0x484d78)
                 if slot.as_ref().is_some_and(|h| h.sample != snd.sample) {
                     if let Some(h) = slot.take() {
@@ -472,36 +861,51 @@ impl RaceAudio {
                 }
                 if let Some(h) = slot {
                     h.p = p;
+                    h.stop_in = None;
                     self.audio.set(h.v, Params { volume: p.volume * self.sfx, ..p });
-                } else if let Some(mut clip) = self.bank.get(&snd.sample) {
-                    clip.loop_points = snd.loop_points;
+                } else if let Some((clip, tail)) = self.mat_clip(snd) {
+                    let tail = tail as f32 / (clip.rate.max(1) as f32 * p.pitch);
                     let v = self.audio.play(&clip, Params { volume: p.volume * self.sfx, ..p });
-                    *slot = Some(HitVoice { v, sample: snd.sample.clone(), p });
+                    *slot = Some(HitVoice { v, sample: snd.sample.clone(), p, tail, stop_in: None });
                 }
             }
             _ => {
                 if let Some(h) = slot {
                     if h.p.looping {
-                        h.p.looping = false;
-                        self.audio.set(h.v, Params { volume: h.p.volume * self.sfx, ..h.p });
+                        let left = h.stop_in.get_or_insert(h.tail);
+                        *left -= dt;
+                        if *left <= 0.0 {
+                            self.audio.stop(h.v);
+                            *slot = None;
+                        }
                     }
                 }
             }
         }
     }
 
+    /// A material record's clip, cut as the patch 3.0 driver loads it (`trim_p30`); the second value is the
+    /// cut tail in frames.
+    fn mat_clip(&mut self, snd: &MatSound) -> Option<(Clip, usize)> {
+        trim_p30(self.bank.get(&snd.sample)?, snd.trim)
+    }
+
     /// Keep a looping record going at `p` (0x484cf0: started when it does not play, else updated),
     /// at the effects volume; volumes above 1 are clamped like the voice update (0x484b24).
     fn keep(&mut self, slot: &mut Option<VoiceId>, rel: &str, loop_points: Option<(usize, usize)>, p: Params) {
+        self.keep_with(slot, |a| a.bank.get(rel).map(|clip| Clip { loop_points, ..clip }), p);
+    }
+
+    /// `keep` for a material record (`mat_clip`).
+    fn keep_mat(&mut self, slot: &mut Option<VoiceId>, snd: &MatSound, p: Params) {
+        self.keep_with(slot, |a| a.mat_clip(snd).map(|(clip, _)| clip), p);
+    }
+
+    fn keep_with(&mut self, slot: &mut Option<VoiceId>, clip: impl FnOnce(&mut Self) -> Option<Clip>, p: Params) {
         let p = Params { volume: p.volume.min(1.0) * self.sfx, ..p };
         match *slot {
             Some(v) if self.audio.with(|m| m.is_playing(v)) => self.audio.set(v, p),
-            _ => {
-                *slot = self.bank.get(rel).map(|mut clip| {
-                    clip.loop_points = loop_points;
-                    self.audio.play(&clip, p)
-                });
-            }
+            _ => *slot = clip(self).map(|clip| self.audio.play(&clip, p)),
         }
     }
 
@@ -524,30 +928,55 @@ impl RaceAudio {
             self.audio.set(v, Params { volume: p.volume * self.sfx, ..p });
         }
     }
-    /// The engine's voices: the baked simulation when asked for and the car has a pack
-    /// (REMASTER), else the original six loops (CLASSIC, 0x483630..).
-    fn engine_voices(&mut self) -> (Vec<Option<VoiceId>>, Option<SimVoices>) {
+    /// The engine's voices: the original six loops (CLASSIC, 0x483630..).
+    fn engine_voices(&mut self) -> Vec<Option<VoiceId>> {
         let looped = |pan: f32| Params { volume: 0.0, pitch: 1.0, pan, looping: true };
-        if self.sim_wanted {
-            let pre = self.pre_sim.take().filter(|p| p.0 == self.car_id).map(|p| p.1);
-            if let Some(engine) = pre.or_else(|| SimEngine::load(&self.install, self.car_id)) {
-                let voices = engine.loops.iter().map(|l| self.audio.play(&l.clip, looped(0.0))).collect();
-                return (Vec::new(), Some(SimVoices { engine, voices }));
-            }
-            eprintln!("audio: no engine pack for car {:02} (remaster/engines), using the original engine", self.car_id);
-        }
-        (ENGINE_SAMPLES.iter().map(|&(n, _, pan)| self.play(n, looped(pan))).collect(), None)
+        ENGINE_SAMPLES.iter().map(|&(n, _, pan)| self.play_engine(n, looped(pan))).collect()
     }
 
-    /// Start the race's voices for .trk `track_n` (the adopted pack, if any, is used up).
-    pub fn start(&mut self, track_n: u32, race: &Race) {
+    /// The engine-family voices: the engine's six, turbo, interior hum, an `enemyeng` for each of `n` cars, and with
+    /// Enhanced the layers (#494 phase 4).
+    fn engine_family(&mut self, n: usize) -> EngineFamily {
         let looped = |pan: f32| Params { volume: 0.0, pitch: 1.0, pan, looping: true };
-        let (engine, sim) = self.engine_voices();
-        let turbo = self.play("turbo.wav", looped(0.0));
-        let inside = self.play("inneen.wav", looped(0.0));
-        let n = race.racers.len();
+        let engine = self.engine_voices();
+        let turbo = self.play_engine("turbo.wav", looped(0.0));
+        let inside = self.play_engine("inneen.wav", looped(0.0));
         // one for every car: the followed one is muted, and F4 changes which that is
-        let ai = (0..n).map(|_| self.play("enemyeng.wav", looped(0.0))).collect();
+        let ai = (0..n).map(|_| self.play_engine("enemyeng.wav", looped(0.0))).collect();
+        // REMASTER Enhanced: gason and gasrele again for the octave-down body, and gason's air, started with the
+        // engine so the air pulses in step with gason (the same length, start and pitch)
+        let (body, air) = match self.engine_sound {
+            EngineSound::Classic => (Vec::new(), None),
+            EngineSound::Enhanced => {
+                let body = ["gason.wav", "gasrele.wav"].iter().map(|n| self.play_engine(n, looped(0.0))).collect();
+                let air = self.bank.get_air("gason.wav").map(|clip| self.audio.play(&Clip { glide: ENGINE_GLIDE_MS.get() * 0.001, ..clip }, looped(0.0)));
+                (body, air)
+            }
+        };
+        EngineFamily { engine, turbo, inside, ai, body, air }
+    }
+
+    /// REMASTER: switch the engine sound (the menu row, F9). During a race the engine-family voices are played
+    /// again from the other clips; the race and every other voice go on.
+    pub fn set_engine_sound(&mut self, e: EngineSound) {
+        if e == self.engine_sound {
+            return;
+        }
+        self.engine_sound = e;
+        let Some(mut ra) = self.voices.take() else { return };
+        for v in ra.engine.iter().chain(ra.ai.iter()).chain(ra.body.iter()).chain([&ra.turbo, &ra.inside, &ra.air]).flatten() {
+            self.audio.stop(*v);
+        }
+        let f = self.engine_family(ra.ai.len());
+        (ra.engine, ra.turbo, ra.inside, ra.ai, ra.body, ra.air) = (f.engine, f.turbo, f.inside, f.ai, f.body, f.air);
+        ra.blend = EngineBlend::default();
+        self.voices = Some(ra);
+    }
+
+    /// Start the race's voices for .trk `track_n`.
+    pub fn start(&mut self, track_n: u32, race: &Race) {
+        let n = race.racers.len();
+        let EngineFamily { engine, turbo, inside, ai, body, air } = self.engine_family(n);
         // track ambience from the .trk's EnvSoundName file
         let mut env = Vec::new();
         let mut body_hits = vec![None; 16];
@@ -581,14 +1010,14 @@ impl RaceAudio {
                 }
             }
         }
-        self.pre_sim = None;
         self.voices = Some(Voices {
             engine,
-            sim,
-            sim_asked: self.sim_wanted,
+            blend: EngineBlend::default(),
             turbo,
             inside,
             ai,
+            body,
+            air,
             env,
             ai_slide: vec![None; n],
             surface: None,
@@ -597,11 +1026,10 @@ impl RaceAudio {
             contact: None,
             slide1: None,
             tail: None,
-            burst: None,
+            burst: Vec::new(),
             scrape: None,
             weak: None,
             hard: None,
-            throttle: 0.0,
             last_gear: 1,
             last_count: 4,
             started: false,
@@ -624,17 +1052,14 @@ impl RaceAudio {
     pub fn silence(&self) {
         let Some(ra) = &self.voices else { return };
         let mute = Params { volume: 0.0, looping: true, ..Default::default() };
-        for v in ra.engine.iter().chain(ra.ai.iter()).chain([&ra.turbo, &ra.inside, &ra.scrape.as_ref().map(|h| h.v), &ra.weak.as_ref().map(|h| h.v), &ra.hard]).flatten() {
-            self.audio.set(*v, mute);
-        }
-        for v in ra.sim.iter().flat_map(|s| &s.voices) {
+        for v in ra.engine.iter().chain(ra.ai.iter()).chain(ra.body.iter()).chain([&ra.turbo, &ra.inside, &ra.air, &ra.scrape.as_ref().map(|h| h.v), &ra.weak.as_ref().map(|h| h.v), &ra.hard]).flatten() {
             self.audio.set(*v, mute);
         }
         for e in &ra.env {
             self.audio.set(e.voice, mute);
         }
-        let tyres = [ra.spin, ra.slide, ra.contact, ra.slide1, ra.tail, ra.burst];
-        for v in ra.ai_slide.iter().chain(tyres.iter()).flatten() {
+        let tyres = [ra.spin, ra.slide, ra.contact, ra.slide1, ra.tail];
+        for v in ra.ai_slide.iter().chain(tyres.iter()).flatten().chain(&ra.burst) {
             self.audio.set(*v, mute);
         }
     }
@@ -642,14 +1067,6 @@ impl RaceAudio {
     /// Per frame, after the race stepped `dt`.
     pub fn update(&mut self, sess: &Session, ear: &Ear, dt: f32) {
         let Some(mut ra) = self.voices.take() else { return };
-        if ra.sim_asked != self.sim_wanted {
-            // the setting changed in the pause menu: swap the engine voices
-            for v in ra.engine.drain(..).flatten().chain(ra.sim.take().into_iter().flat_map(|s| s.voices)) {
-                self.audio.stop(v);
-            }
-            (ra.engine, ra.sim) = self.engine_voices();
-            ra.sim_asked = self.sim_wanted;
-        }
         let race = &sess.race;
         let me = &race.racers[ear.focus];
         let t = &me.telemetry;
@@ -700,40 +1117,65 @@ impl RaceAudio {
             }
         };
 
-        // ---- engine: six samples at one rpm pitch (0x483efe..0x48405c)
+        // ---- engine: six samples at one rpm pitch (0x483efe..0x48405c) [CLASSIC]
         // `b` = the echo channel of the centreline at the heard car's arc (0x425bab -> P+0xc28, 07-audio 7.2) [O]
         let echo = race.line.echo_at(me.progress.s);
-        let pedal = if t.gear == 0 { 0.0 } else { (t.drive_force > 0.0) as u8 as f32 };
-        ra.throttle += (pedal - ra.throttle) * (1.0 - (-12.0 * dt).exp());
         let pitch = engine_pitch(t.rpm);
-        if let Some(sim) = &ra.sim {
-            // REMASTER: the baked loops around the wanted rpm and pedal, each pitched to that rpm
-            let mapped = sim.engine.map_rpm(t.rpm, me.car.p.min_rpm, me.car.p.max_rpm);
-            let mut mix = vec![(0.0f32, 1.0f32); sim.voices.len()];
-            for tap in sim.engine.taps(mapped, ra.throttle) {
-                mix[tap.index] = (tap.gain, tap.pitch);
+        let vols = match self.engine_sound {
+            EngineSound::Classic => {
+                let (on, off) = engine_levels(me.car.pedal, t.rpm, in_car);
+                engine_volumes(on, off, echo)
             }
-            for (v, (gain, pitch)) in sim.voices.iter().zip(mix) {
-                self.audio.set(*v, self.focus(Params { volume: gain * SIM_VOLUME.get() * self.sfx, pitch, pan: 0.0, looping: true }));
-            }
-        } else {
-            // CLASSIC
-            let (on, off) = engine_levels(me.car.pedal, t.rpm, in_car);
-            let vols = engine_volumes(on, off, echo);
-            for (k, v) in ra.engine.iter().enumerate() {
-                let (_, base, pan) = ENGINE_SAMPLES[k];
-                self.set(*v, self.focus(Params { volume: vols[k] * base * 0.5, pitch, pan, looping: true }));
+            // REMASTER: the same levels, glided (#494 phase 2)
+            EngineSound::Enhanced => ra.blend.step(me.car.pedal, t.rpm, in_car, echo, t.gear, dt),
+        };
+        // REMASTER Enhanced: the heard car's character (pitch, level, tone); CLASSIC: x 1 changes nothing
+        let ch = match self.engine_sound {
+            EngineSound::Classic => None,
+            EngineSound::Enhanced => Some(character(me.car_id)),
+        };
+        let (cp, cl) = ch.map_or((1.0, 1.0), |c| (c.pitch, c.level()));
+        for (k, v) in ra.engine.iter().enumerate() {
+            let (_, base, pan) = ENGINE_SAMPLES[k];
+            self.set(*v, self.focus(Params { volume: vols[k] * base * 0.5 * cl, pitch: pitch * cp, pan, looping: true }));
+            if let (Some(c), Some(v)) = (ch, v) {
+                self.audio.set_tone(*v, Some(c.tone()));
             }
         }
+        // REMASTER Enhanced (#494 phase 4): the layers under the engine of the car you hear, with its character. The
+        // body is the throttle / overrun recording an octave down at its level (before the echo split, so it stays in
+        // the echo zones); the air is gason's noise at gason's pitch, louder with the revs and the pedal
+        if let Some(c) = ch {
+            let lv = ra.blend.levels();
+            let ep = pitch * cp;
+            let (bg, body_tone) = (db_gain(BODY_DB.get() + c.body_db), Tone { low_pass: BODY_LP_HZ.get(), high_pass: BODY_HP_HZ, ..c.tone() });
+            for (k, v) in ra.body.iter().enumerate() {
+                let level = if k == 0 { lv.on } else { lv.off };
+                self.set(*v, self.focus(Params { volume: level * ENGINE_SAMPLES[k].1 * 0.5 * cl * bg, pitch: ep * 0.5, pan: 0.0, looping: true }));
+                if let Some(v) = v {
+                    self.audio.set_tone(*v, Some(body_tone));
+                }
+            }
+            let (idle, off) = (AIR_IDLE.get().clamp(0.0, 1.0), AIR_OFF.get().clamp(0.0, 1.0));
+            let revs = idle + (1.0 - idle) * (t.rpm / 12000.0).clamp(0.0, 1.0);
+            let pedal = off + (1.0 - off) * lv.gate;
+            let volume = db_gain(AIR_DB.get() + c.air_db) * revs * pedal * lv.scale * ENGINE_SAMPLES[0].1 * 0.5 * cl;
+            self.set(ra.air, self.focus(Params { volume, pitch: ep, pan: 0.0, looping: true }));
+            if let Some(v) = ra.air {
+                // the car's rasp shelf colours its air, its body shelf does not
+                self.audio.set_tone(v, Some(Tone { high_pass: AIR_HP_HZ.get(), low_db: 0.0, ..c.tone() }));
+            }
+        }
+        let rpm = t.rpm;
         // turbo whine: volume rpm*5.3e-5 - 0.3, pitch rpm*1.1e-4 + 0.1 (0x484063)
-        self.set(ra.turbo, self.focus(Params { volume: (t.rpm * 5.3e-5 - 0.3).clamp(0.0, 1.0) * 0.6, pitch: t.rpm * 1.1e-4 + 0.1, pan: 0.0, looping: true }));
+        self.set(ra.turbo, self.focus(Params { volume: (rpm * 5.3e-5 - 0.3).clamp(0.0, 1.0) * 0.6, pitch: rpm * 1.1e-4 + 0.1, pan: 0.0, looping: true }));
         // interior hum, in-car only: volume 0.25 * (1 - 0.3 b), pitch rpm * 2.628e-5 + 0.9 (0x4840b0)
         let hum = if in_car { 0.25 * (1.0 - 0.3 * echo) } else { 0.0 };
-        self.set(ra.inside, Params { volume: hum, pitch: t.rpm * 2.628e-5 + 0.9, pan: 0.0, looping: true });
+        self.set(ra.inside, Params { volume: hum, pitch: rpm * 2.628e-5 + 0.9, pan: 0.0, looping: true });
         // overrun backfire: one of eburst1/2 (0.9, 0x4837b0) while P+0xb0 is set and neither plays (0x4840f6)
-        if me.car.overrun && !ra.burst.is_some_and(|v| self.audio.with(|m| m.is_playing(v))) {
+        if me.car.overrun && !ra.burst.iter().any(|&v| self.audio.with(|m| m.is_playing(v))) {
             let name = if ra.alternate() { "eburst2.wav" } else { "eburst1.wav" };
-            ra.burst = self.play(name, self.focus(Params { volume: 0.9 * self.sfx, ..Default::default() }));
+            ra.burst = self.play(name, self.focus(Params { volume: 0.9 * self.sfx, ..Default::default() })).into_iter().collect();
         }
 
         // ---- other cars (0x4845e5): enemyeng and the slide loop, both 3D records of 0x483b41
@@ -742,7 +1184,13 @@ impl RaceAudio {
             let silent = i == ear.focus || rc.progress.eliminated_ms.is_some();
             let (volume, pan) = if silent { (0.0, 0.0) } else { place(rc.car.pos, 10.0, 100.0, 0.6) };
             if let Some(v) = ra.ai.get(i).copied().flatten() {
-                self.audio.set(v, Params { volume: volume * self.sfx, pitch: (rc.telemetry.rpm * AI_PITCH_PER_RPM.get() + PITCH_BASE.get()).max(0.05) * dop[i], pan, looping: true });
+                // REMASTER Enhanced: each car's own character
+                let ch = (self.engine_sound == EngineSound::Enhanced).then(|| character(rc.car_id));
+                let (cp, cl) = ch.map_or((1.0, 1.0), |c| (c.pitch, c.level()));
+                self.audio.set(v, Params { volume: volume * self.sfx * cl, pitch: (rc.telemetry.rpm * AI_PITCH_PER_RPM.get() + PITCH_BASE.get()).max(0.05) * dop[i] * cp, pan, looping: true });
+                if let Some(c) = ch {
+                    self.audio.set_tone(v, Some(c.tone()));
+                }
             }
             // spin.wav from 36102, pitch 0.93, (slide * 0.15 + 0.1) * 0.7 while sliding (0x4845fd)
             let c = &rc.car;
@@ -787,8 +1235,9 @@ impl RaceAudio {
                 let spin = if car.brake_locked { Some(1.08) } else if car.wheelspin { Some(1.0) } else { None };
                 match (spin, mat.sound("spin")) {
                     (Some(pitch), Some(snd)) => {
-                        let volume = car.slide * 0.3 * 0.4 * snd.volume;
-                        self.keep(&mut ra.spin, &snd.sample, snd.loop_points, self.focus(Params { volume, pitch, pan: 0.0, looping: snd.looping }));
+                        // PATCH30 0x4b6b94: x 1.0 (0x501a54; 1998 x 0.4)
+                        let volume = car.slide * 0.3 * snd.volume;
+                        self.keep_mat(&mut ra.spin, snd, self.focus(Params { volume, pitch, pan: 0.0, looping: snd.looping }));
                     }
                     _ => self.stop_slot(&mut ra.spin),
                 }
@@ -798,12 +1247,14 @@ impl RaceAudio {
                         for s in [&mut ra.slide, &mut ra.tail] {
                             self.stop_slot(s);
                         }
-                        let volume = (car.slide * 0.35 + 0.3) * 0.7;
+                        // PATCH30 0x4b6c7a: (slide x 0.9 + 0.4) x 0.9 (1998 (slide x 0.35 + 0.3) x 0.7)
+                        let volume = (car.slide * 0.9 + 0.4) * 0.9;
                         self.keep(&mut ra.slide1, "slide1.wav", SLIDE1_LOOP, self.focus(Params { volume, pitch: 1.0, pan: 0.0, looping: true }));
                     } else if let Some(snd) = mat.sound("slide") {
                         self.stop_slot(&mut ra.slide1);
-                        let volume = (car.slide * 0.035 + 0.3) * 0.7;
-                        self.keep(&mut ra.slide, &snd.sample, snd.loop_points, self.focus(Params { volume, pitch: snd.pitch.max(0.1), pan: 0.0, looping: snd.looping }));
+                        // PATCH30 0x4b6cc1: x 0.9 (0x501a50; 1998 x 0.7)
+                        let volume = (car.slide * 0.035 + 0.3) * 0.9;
+                        self.keep_mat(&mut ra.slide, snd, self.focus(Params { volume, pitch: snd.pitch.max(0.1), pan: 0.0, looping: snd.looping }));
                     }
                 } else {
                     // the squeal's tail: slidee1 or slidee2 at 0.5 (0x484282)
@@ -818,7 +1269,7 @@ impl RaceAudio {
                 if let Some(snd) = mat.sound("contact") {
                     let k = if in_car { 1.0 } else { 1.2 };
                     let volume = (car.vel.z.abs() * 0.2 * k * 0.1).min(1.0) * snd.volume;
-                    self.keep(&mut ra.contact, &snd.sample, snd.loop_points, self.focus(Params { volume, pitch: snd.pitch.max(0.1), pan: 0.0, looping: snd.looping }));
+                    self.keep_mat(&mut ra.contact, snd, self.focus(Params { volume, pitch: snd.pitch.max(0.1), pan: 0.0, looping: snd.looping }));
                 }
             }
         }
@@ -831,35 +1282,42 @@ impl RaceAudio {
         let mat = me.car.hit_material.and_then(|m| race.world.materials.get(m));
         let hit = me.car.world_hits[0];
         let impulse = hit.map_or(0.0, |h| h.impulse);
-        let weak = (impulse > 0.0 && impulse < HARD_IMPULSE.get()).then(|| mat.and_then(|m| m.sound("weakimpulse")).map(|s| ((s.volume * impulse / HARD_IMPULSE.get().max(1.0) * HIT_GAIN.get()).min(1.0), 0.0)));
+        // PATCH30 0x4b6eab, 0x4b6f17: 18500 and 1 / 18500 (1998: 16500)
+        let hard_from = HARD_IMPULSE.get();
+        let weak = (impulse > 0.0 && impulse < hard_from).then(|| mat.and_then(|m| m.sound("weakimpulse")).map(|s| ((s.volume * impulse / hard_from.max(1.0) * HIT_GAIN.get()).min(1.0), 0.0)));
         let weak = weak.flatten().map(|w| self.focus_vp(w));
-        self.drive_hit_loop(&mut ra.weak, mat.and_then(|m| m.sound("weakimpulse")), weak);
+        // PATCH30 0x4b6f2b: the weak impulse's loop bit is cleared, a one-shot (1998 0x48447d sets it)
+        self.drive_hit_loop(&mut ra.weak, mat.and_then(|m| m.sound("weakimpulse")), weak, false, dt);
         // #374: a one-shot fires on a frame that ran a tick only (between ticks the flags are the last tick's)
         let fresh = race.ticks_last_frame() > 0;
-        if fresh && impulse >= HARD_IMPULSE.get() {
+        if fresh && impulse >= hard_from {
             // 0x484d78 stops the previous one, then it starts again at volume * 0.7 (0x484906)
             if let Some(v) = ra.hard.take() {
                 self.audio.stop(v);
             }
             if let Some(snd) = mat.and_then(|m| m.sound("hardimpulse")) {
-                ra.hard = self.play(&snd.sample, self.focus(Params { volume: (snd.volume * HIT_GAIN.get()).min(1.0) * self.sfx, pitch: snd.pitch.max(0.1), ..Default::default() }));
+                let p = self.focus(Params { volume: (snd.volume * HIT_GAIN.get()).min(1.0) * self.sfx, pitch: snd.pitch.max(0.1), ..Default::default() });
+                // PATCH30 0x4b6f53: the same stop and restart, the sample cut by the 3.0 driver
+                ra.hard = self.mat_clip(snd).map(|(clip, _)| self.audio.play(&clip, p));
             }
         }
         let scratch = hit.filter(|h| h.spark_anim(&race.world.materials) != 0).and_then(|h| {
             let vol = mat.and_then(|m| m.sound("scratch"))?.volume;
             let pan = if matches!(h.point, 0 | 3) { -SCRAPE_PAN.get() } else { SCRAPE_PAN.get() };
             let (l, r) = pan_2d(pan);
+            // PATCH30 0x4b6fa2: x 1.2
+            let vol = vol * 1.2;
             Some(to_mixer(h.strength() * vol * l, h.strength() * vol * r))
         });
         let scratch = scratch.map(|w| self.focus_vp(w));
-        self.drive_hit_loop(&mut ra.scrape, mat.and_then(|m| m.sound("scratch")), scratch);
+        self.drive_hit_loop(&mut ra.scrape, mat.and_then(|m| m.sound("scratch")), scratch, true, dt);
 
         // ---- hits against props and cars (0x483d4c at 0x48451e): one shared voice
         if let Some(b) = me.car.bump.filter(|_| fresh) {
             let playing = ra.body_hit.is_some_and(|(v, id)| id == b.id && self.audio.with(|m| m.is_playing(v)));
             if !playing {
-                // volume 0.5 + 0.5 * v / 30 (0x4d83f7, 0x4d83ff); the .esd volume is not used
-                let volume = (0.5 + b.impact / 30.0 * 0.5).min(1.0);
+                // PATCH30 0x4b7129: v / 30 * 0.9 + 0.1 (1998 0.5 + 0.5 * v / 30); the .esd volume is not used
+                let volume = (b.impact / 30.0 * 0.9 + 0.1).min(1.0);
                 let (sample, pitch, volume) = match ra.body_hits.get(b.id as usize).and_then(Option::as_ref) {
                     Some((sample, pitch)) if b.id != 0 => (Some(sample.clone()), *pitch, volume),
                     None if b.id != 0 => (None, 0.0, volume),
@@ -867,7 +1325,8 @@ impl RaceAudio {
                     _ => {
                         match (b.impact >= 30.0, ra.alternate()) {
                             (true, _) => (Some("majcrash.wav".to_string()), 0.0, 1.0),
-                            (false, false) => (Some("barrel.wav".to_string()), 0.0, volume),
+                            // PATCH30 0x4b5f4d: barrel at pitch 0.8 too
+                            (false, false) => (Some("barrel.wav".to_string()), 0.8, volume),
                             (false, true) => (Some("crash2.wav".to_string()), 0.8, volume),
                         }
                     }
@@ -981,5 +1440,215 @@ mod tests {
         // b = 0.5: gason halves, the left/right on-throttle loops come in at b * on * 1.8
         let v = engine_volumes(1.0, 0.0, 0.5);
         assert!(close(v[0], 0.5) && close(v[2], 0.5 * LOOP_GAIN.get()) && close(v[2], v[3]) && v[4] == 0.0);
+    }
+
+    /// run `n` frames of 1/60 s of the blend with fixed inputs
+    fn run(b: &mut EngineBlend, n: usize, pedal: f32, rpm: f32, in_car: bool, echo: f32, gear: usize) -> [f32; 6] {
+        let mut v = [0.0; 6];
+        for _ in 0..n {
+            v = b.step(pedal, rpm, in_car, echo, gear, 1.0 / 60.0);
+        }
+        v
+    }
+
+    #[test]
+    fn engine_blend_settles_to_the_game_levels() {
+        for &(pedal, rpm, in_car, echo) in &[(1.0f32, 4000.0f32, false, 0.0f32), (0.0, 9000.0, false, 0.0), (0.0, 13000.0, true, 1.0), (0.7, 9000.0, true, 1.0), (0.0, 5000.0, false, 0.0)] {
+            let mut b = EngineBlend::default();
+            // start from the opposite pedal so there is something to settle
+            run(&mut b, 3, 1.0 - pedal.min(1.0), rpm, in_car, 1.0 - echo, 3);
+            let got = run(&mut b, 240, pedal, rpm, in_car, echo, 3);
+            let (on, off) = engine_levels(pedal, rpm, in_car);
+            let want = engine_volumes(on, off, echo);
+            for k in 0..6 {
+                assert!(close(got[k], want[k]), "pedal {pedal} rpm {rpm} echo {echo} #{k}: {} vs {}", got[k], want[k]);
+            }
+        }
+    }
+
+    #[test]
+    fn engine_blend_lift_off_is_not_a_step() {
+        let mut b = EngineBlend::default();
+        run(&mut b, 120, 1.0, 9000.0, false, 0.0, 3);
+        let mut last = 1.0;
+        let mut biggest: f32 = 0.0;
+        for _ in 0..120 {
+            let v = b.step(0.0, 9000.0, false, 0.0, 3, 1.0 / 60.0);
+            biggest = biggest.max((v[0] - last).abs());
+            last = v[0];
+        }
+        // gason goes 1 -> 0.5 (the game's level at 9000 rpm); the game does it in one frame, here no frame moves it by 0.2
+        assert!(biggest < 0.2 && close(last, 0.5), "step {biggest}, end {last}");
+        // and the pedal comes in as fast as it was set: gason within 3 % after 5 attack times
+        let up = run(&mut b, (5.0 * PEDAL_ATTACK_MS.get() / 1000.0 * 60.0).ceil() as usize + 1, 1.0, 9000.0, false, 0.0, 3);
+        assert!(up[0] > 0.97, "gason {}", up[0]);
+    }
+
+    #[test]
+    fn engine_blend_echo_fade_keeps_its_level() {
+        // the original's linear fade of two different recordings dips to -3 dB at b = 0.5; the blend does not
+        let (c, e) = (|v: &[f32; 6]| v[0], |v: &[f32; 6]| v[2] / LOOP_GAIN.get());
+        for echo in [0.1f32, 0.3, 0.5, 0.7, 0.9] {
+            let mut b = EngineBlend::default();
+            run(&mut b, 1, 1.0, 6000.0, false, echo, 2);
+            let v = run(&mut b, 600, 1.0, 6000.0, false, echo, 2);
+            let energy = c(&v).powi(2) + e(&v).powi(2);
+            assert!((energy - 1.0).abs() < 1e-3, "b {echo}: energy {energy}");
+        }
+    }
+
+    #[test]
+    fn engine_blend_dips_at_a_shift_but_not_into_reverse() {
+        let mut b = EngineBlend::default();
+        let steady = run(&mut b, 120, 1.0, 7000.0, false, 0.0, 2)[0];
+        let dip = b.step(1.0, 5000.0, false, 0.0, 3, 1.0 / 60.0)[0];
+        assert!(close(dip, steady * (1.0 - GEAR_DIP.get())), "dip {dip}");
+        let after = run(&mut b, (5.0 * GEAR_DIP_MS.get() / 1000.0 * 60.0).ceil() as usize, 1.0, 5000.0, false, 0.0, 3)[0];
+        assert!(after > 0.98 * steady, "after {after}");
+        // 1 -> 0 (reverse) and the start itself: no dip
+        let mut b = EngineBlend::default();
+        run(&mut b, 120, 1.0, 3000.0, false, 0.0, 1);
+        assert!(close(b.step(1.0, 3000.0, false, 0.0, 0, 1.0 / 60.0)[0], steady.min(1.0)));
+    }
+
+    #[test]
+    fn engine_blend_levels_feed_the_layers() {
+        for &(pedal, in_car) in &[(1.0f32, false), (0.0, false), (1.0, true), (0.0, true)] {
+            let mut b = EngineBlend::default();
+            let lv = { run(&mut b, 240, pedal, 9000.0, in_car, 0.6, 3); b.levels() };
+            let (on, off) = engine_levels(pedal, 9000.0, in_car);
+            assert!(close(lv.on, on) && close(lv.off, off), "pedal {pedal} in-car {in_car}: {lv:?}");
+            assert!(close(lv.gate, pedal.min(1.0)) && close(lv.scale, if in_car { 0.9 } else { 1.0 }), "{lv:?}");
+        }
+        assert_eq!(db_gain(-60.0), 0.0);
+        assert_eq!(db_gain(0.0), 1.0);
+        assert!(close(db_gain(-6.0), 0.501_187));
+    }
+
+    #[test]
+    fn layers_only_with_enhanced() {
+        let mut ra = RaceAudio::new(Path::new("/nonexistent"), Audio::silent());
+        let f = ra.engine_family(3);
+        assert!(f.body.is_empty() && f.air.is_none() && f.engine.len() == 6 && f.ai.len() == 3);
+        ra.engine_sound = EngineSound::Enhanced;
+        let f = ra.engine_family(3);
+        // no samples here: the slots exist, empty
+        assert_eq!(f.body.len(), 2);
+        assert!(f.air.is_none());
+    }
+
+    #[test]
+    fn engine_sound_words() {
+        assert_eq!(EngineSound::parse("Enhanced"), Some(EngineSound::Enhanced));
+        for v in ["baked", "Live", "simulated", "classic"] {
+            assert_eq!(EngineSound::parse(v), Some(EngineSound::Classic), "{v}");
+        }
+        assert_eq!(EngineSound::parse("nonsense"), None);
+        for e in EngineSound::ALL {
+            assert_eq!(EngineSound::parse(e.key()), Some(e));
+        }
+    }
+
+    #[test]
+    fn character_table() {
+        let t = parse_characters(CHARACTER_TABLE);
+        assert_eq!(t.len(), 14, "one line per car, the ten of the original and the four of patch 3.0");
+        for (car, c) in &t {
+            assert!((1..=14).contains(car));
+            assert!((0.85..=1.15).contains(&c.pitch), "car {car} pitch {}", c.pitch);
+            assert!(c.low_db.abs() <= 6.0 && c.high_db.abs() <= 6.0 && c.level_db.abs() <= 3.0, "car {car} {c:?}");
+            assert!((-15.0..=6.0).contains(&c.body_db) && (-8.0..=6.0).contains(&c.air_db), "car {car} {c:?}");
+        }
+        // the weakest engine (Resonic) is quieter, thinner and has less body than the Titan and the Serpent (#496)
+        for strong in [10, 4] {
+            assert!(t[&8].level_db < t[&strong].level_db && t[&8].low_db < t[&strong].low_db && t[&8].body_db < t[&strong].body_db);
+        }
+        // the heavy cars are lower than the screamers; the Titan is a high-revving V12 since #515
+        assert!(t[&6].pitch < t[&3].pitch && t[&14].pitch < t[&4].pitch && t[&10].pitch > t[&3].pitch);
+        assert_eq!(character(99), Character::NEUTRAL);
+        assert_eq!(t[&6].scaled(0.0), Character::NEUTRAL);
+        assert_eq!(parse_characters("car01 1 2 3 4\ncar01 1 2 3\n// car02 1 1 1 1\ncarx 1 1 1 1\n").len(), 0);
+    }
+
+    #[test]
+    fn character_override() {
+        // car 13's line is overridden here; no other test reads car 13 through `character()` with a different expectation
+        let before = character(13);
+        assert!(override_characters("car13 1.234 1 2 3 4 5 // a comment\n").is_ok());
+        let c = character(13);
+        assert!((c.pitch - 1.234).abs() < 1e-3 && c.air_db == 5.0 * CHARACTER.get(), "{c:?}");
+        assert_ne!(c, before);
+        assert_eq!(character(14), parse_characters(CHARACTER_TABLE)[&14].scaled(CHARACTER.get()), "other cars stay on the table");
+        assert!(override_characters("car13 1 2 3").is_err() && override_characters("hello").is_err());
+    }
+
+    #[test]
+    fn engine_sound_switch_without_a_race() {
+        let mut ra = RaceAudio::new(Path::new("/nonexistent"), Audio::silent());
+        ra.set_engine_sound(EngineSound::Enhanced);
+        assert_eq!(ra.engine_sound, EngineSound::Enhanced);
+        assert!(!ra.active());
+    }
+
+    /// the Enhanced engine's loops wrap without a click, on the install's own samples (skipped without one)
+    #[test]
+    fn enhanced_engine_loops_wrap_smoothly() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.join("motor.exe").exists() {
+            return;
+        }
+        let mut bank = Bank::new(&root);
+        for n in ["gason", "gasrele", "gasotl", "gasotr", "gasrtl", "gasrtr", "enemyeng", "turbo", "inneen"] {
+            let rel = format!("{n}.wav");
+            // the 99th-percentile step of the recording itself: a wrap inside it is an ordinary sample step, not a click
+            let step = |d: &[f32]| {
+                let mut v: Vec<f32> = d.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+                v.sort_by(|a, b| a.total_cmp(b));
+                v[v.len() * 99 / 100]
+            };
+            let jump = |d: &[f32]| (d[d.len() - 1] - d[0]).abs();
+            let (orig, enh) = (bank.get(&rel).unwrap(), bank.get_enhanced(&rel).unwrap());
+            println!("{n:9} wrap jump {:6.0} -> {:6.0}  (p99 step {:6.0}), length {} -> {}", jump(&orig.data) * 32768.0, jump(&enh.data) * 32768.0, step(&enh.data) * 32768.0, orig.data.len(), enh.data.len());
+            // the wrap is no bigger than the steps the recording itself takes
+            assert!(jump(&enh.data) <= step(&enh.data), "{n}");
+            assert!(enh.data.len() >= orig.data.len() * 9 / 10, "{n}: the seam search ate the loop");
+        }
+    }
+
+    /// the air layer is noise of gason's length that loops, not a copy of gason (skipped without an install)
+    #[test]
+    fn air_layer_loops_and_is_noise() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.join("motor.exe").exists() {
+            return;
+        }
+        let mut bank = Bank::new(&root);
+        let (enh, air) = (bank.get_enhanced("gason.wav").unwrap(), bank.get_air("gason.wav").unwrap());
+        assert_eq!(air.data.len(), enh.data.len(), "same length: it plays in step with gason");
+        assert_eq!(air.interp, motor_audio::Interp::Sinc);
+        let mut st: Vec<f32> = air.data.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+        st.sort_by(|a, b| a.total_cmp(b));
+        let wrap = (air.data[air.data.len() - 1] - air.data[0]).abs();
+        assert!(wrap <= st[st.len() * 99 / 100], "wrap {wrap}");
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| *x as f64 * *y as f64).sum::<f64>();
+        let corr = dot(&air.data, &enh.data) / (dot(&air.data, &air.data) * dot(&enh.data, &enh.data)).sqrt();
+        let rms = |x: &[f32]| (dot(x, x) / x.len() as f64).sqrt();
+        println!("air: rms {:.4} (gason {:.4}), correlation with gason {corr:.3}", rms(&air.data), rms(&enh.data));
+        assert!(corr.abs() < 0.2, "correlation {corr}");
+        assert!(rms(&air.data) > 0.01);
+    }
+
+    /// #495: a race track's CD track from its .trk, and the CD tracks of `Music/` (both skip without the install)
+    #[test]
+    fn cd_track_of_a_race_track() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.join("motor.exe").exists() {
+            return;
+        }
+        let n = cd_track(&root, 2).expect("Track2.trk names a CDTrack");
+        assert!(n >= 4, "race tracks play from CD track 4 on, got {n}");
+        if motor_data::fs::find_ci(&root, "Music").is_some() {
+            assert!(index_music(&root).contains_key(&n), "Music/ holds CD track {n}");
+        }
     }
 }

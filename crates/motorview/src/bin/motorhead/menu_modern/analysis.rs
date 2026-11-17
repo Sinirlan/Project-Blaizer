@@ -380,7 +380,7 @@ impl Game {
         let mut m = Mesh::default();
         glass_panel(&mut m, d, (d.x(x), d.y(y), d.d(w), d.d(h)));
         b.mesh(&m);
-        cap(b, d, &format!("{} · {:.2} KM · {} TURNS", tr.name.to_uppercase(), p.length / 1000.0, p.turns.len()), (x + 18.0, y + 12.0), 0.0);
+        cap(b, d, &format!("{} · {:.2} {} · {} TURNS", tr.name.to_uppercase(), self.settings.units.dist(f64::from(p.length)), self.settings.units.dist_cap(), p.turns.len()), (x + 18.0, y + 12.0), 0.0);
         let fit = Self::ana_map_fit(tr, p, d);
         let line = fit.line(p);
         let n = line.len().max(1) as f32;
@@ -459,9 +459,10 @@ impl Game {
             let won = c.minis.iter().filter(|ms| ms.winner == Some([LapSide::A, LapSide::B][i])).count();
             note(b, d, &format!("FASTER IN {won}"), (x + 18.0 + 28.0, ry + (22.0 - l11) * 0.5), 0.0);
         }
-        let tops = format!("TOP {} / {}", c.sides[0].top_kmh.round(), c.sides[1].top_kmh.round());
+        let u = self.settings.units;
+        let tops = format!("TOP {} / {}", u.speed(c.sides[0].top_kmh).round(), u.speed(c.sides[1].top_kmh).round());
         note(b, d, &tops, (x + w - 18.0, y + h - 12.0 - 2.0 * l11), 1.0);
-        note(b, d, "KM/H", (x + w - 18.0, y + h - 12.0 - l11), 1.0);
+        note(b, d, u.speed_cap(), (x + w - 18.0, y + h - 12.0 - l11), 1.0);
     }
 
     /// `chartCard`: the speed plot over the lap with the mini-sector bands, class brackets, turn numbers and gains; the
@@ -473,7 +474,7 @@ impl Game {
         let mut m = Mesh::default();
         glass_panel(&mut m, d, (d.x(x), d.y(y), d.d(w), d.d(h)));
         b.mesh(&m);
-        cap(b, d, "SPEED · KM/H", (x + 70.0, y + 8.0), 0.0);
+        cap(b, d, &format!("SPEED · {}", self.settings.units.speed_cap()), (x + 70.0, y + 8.0), 0.0);
         let n = c.gap.len().min(sa.trace.kmh.len()).min(sb.trace.kmh.len());
         match a.cursor.filter(|_| n > 1) {
             Some(k) => self.ana_readout(b, d, c, (sa, sb), k.min(n - 1), (x + w - 24.0, y + 4.0)),
@@ -579,11 +580,11 @@ impl Game {
         let cap_c = hex(G_DIM, 1.0);
         // (font, size, letter-spacing, colour, text, margin before, margin after)
         let items: [ReadItem; 7] = [
-            (HudFont::GlassMed, 11.0, 1.5, cap_c, format!("AT {m_at} M"), 4.0, 0.0),
-            (HudFont::Glass, 16.0, 0.0, hex(SIDE_COL[0], 1.0), format!("{:.0}", sa.trace.kmh[k]), 0.0, 0.0),
-            (HudFont::GlassMed, 10.0, 0.0, cap_c, "KM/H".into(), 0.0, 8.0),
-            (HudFont::Glass, 16.0, 0.0, hex(SIDE_COL[1], 1.0), format!("{:.0}", sb.trace.kmh[k]), 0.0, 0.0),
-            (HudFont::GlassMed, 10.0, 0.0, cap_c, "KM/H".into(), 0.0, 8.0),
+            (HudFont::GlassMed, 11.0, 1.5, cap_c, format!("AT {} {}", self.settings.units.short(m_at).round(), self.settings.units.short_cap()), 4.0, 0.0),
+            (HudFont::Glass, 16.0, 0.0, hex(SIDE_COL[0], 1.0), format!("{:.0}", self.settings.units.speed(sa.trace.kmh[k])), 0.0, 0.0),
+            (HudFont::GlassMed, 10.0, 0.0, cap_c, self.settings.units.speed_cap().into(), 0.0, 8.0),
+            (HudFont::Glass, 16.0, 0.0, hex(SIDE_COL[1], 1.0), format!("{:.0}", self.settings.units.speed(sb.trace.kmh[k])), 0.0, 0.0),
+            (HudFont::GlassMed, 10.0, 0.0, cap_c, self.settings.units.speed_cap().into(), 0.0, 8.0),
             (HudFont::GlassMed, 11.0, 1.5, cap_c, "GAP".into(), 4.0, 0.0),
             (HudFont::Glass, 16.0, 0.0, WHITE, gap, 0.0, 0.0),
         ];

@@ -51,18 +51,13 @@ motor_tune::tunable! {
     /// Body-vs-body impulse factor: the share of the impulse that turns into spin (`0x4d7f46`) [O].
     /// range: 0..1
     BUMP_SPIN: f32 = 0.1;
-    /// Passes of the world collide per substep (our choice).
+    /// Passes of the world collide per substep: up to three while a pass still hits (`mov esi,3` at 0x481121,
+    /// 03-physics 3.6) [O].
     /// range: 1..10
     COLLIDE_PASSES: usize = 3;
     /// Separation applied to the prop in 0x480400 (`0x4d7f36`) [O].
     /// range: 0..3
     SEPARATION: f32 = 1.2;
-    /// Bounding radius of a car for the sphere test of 0x480400 (rb+0x2c). APPROX [I]: the
-    /// original's value was not traced; the test is only an early-out, so a generous one is safe.
-    /// Per car `CarParams::radius` (scaled by the gulliver cheat).
-    /// range: 1..10
-    /// unit: m
-    pub(crate) CAR_RADIUS: f32 = 2.6;
 }
 
 /// A convex collision hull as the COL files of cars and props store it: planes `n·p + d <= 0`
@@ -500,8 +495,8 @@ fn nudge(vel: &mut Vec3, pose: &mut Pose, lin: Vec3, rot: Vec3) {
 
 /// `0x47eda0`, the car's resting pass after the collide passes: every hull point whose
 /// segment prev -> now touches the surface (within the 0.08 m skin) loses the velocity into it
-/// and adds a push of `n * (1 - t) * 50` (y scaled by `0.2 ny^2`); the body then moves by the
-/// sum times h. Returns whether anything touched and the material of the first hit.
+/// and adds a push of `n * (1 - t) * 50` (y scaled by `0.2 ny^2`); the sum times h is added to the
+/// velocity and the body moves by it (#488). Returns whether anything touched and the material of the first hit.
 pub(crate) fn world_post(points: &[Vec3], vel: &mut Vec3, pose: &mut Pose, prev: &Pose, h: f32, cast: Cast) -> Option<usize> {
     let mut acc = Vec3::ZERO;
     let mut material = None;
@@ -518,6 +513,8 @@ pub(crate) fn world_post(points: &[Vec3], vel: &mut Vec3, pose: &mut Pose, prev:
         out.y *= POST_Y.get() * k2;
         acc += out;
     }
+    // CLASSIC 0x47f0a0..0x47f0dd: the push goes into the velocity too (rb+0x48 += sum * h), then the body moves by it (#488) [O]
+    *vel += acc * h;
     pose.pos += pose.rot * (acc * h);
     material
 }

@@ -40,9 +40,9 @@ You have Motorhead installed already: the game folder is the one that holds `mot
    game folder so `remaster` folder is in same folder as `motorhead`/`motorhead.exe` ([details](#remaster-pack)).
 5. Launch the game, by default it starts in classic/vanilla mode, press `F9` to switch to remaster mode
 
-**No installed game yet?** Optional first step: run **`motorinstall`** from the same package (the
-Windows zip and the Linux archive both contain it), pick your own CD image and an empty folder, and
-press Install. That folder is your game folder for the steps above
+**No installed game yet?** Optional first step: download the installer
+(`motorinstall-<tag>-windows-x86_64.exe` or `motorinstall-<tag>-linux-x86_64.tar.gz`) from the same
+Releases page, run **`motorinstall`**, pick your own CD image and an empty folder, and press Install. That folder is your game folder for the steps above
 ([details](#install-the-game-data)).
 
 ## Download
@@ -52,9 +52,10 @@ for example `v0.9.1-alpha`):
 
 | File | What it is | Who needs it |
 |---|---|---|
-| `motorhead-<tag>-linux-x86_64.tar.gz` | `motorhead` (the game) and `motorinstall` (the installer) for Linux | Linux players |
-| `motorhead-<tag>-windows-x86_64.zip` | The same two programs for Windows 11 (`.exe`) | Windows players |
-| `motorinstall-<tag>-linux-x86_64.tar.gz`, `motorinstall-<tag>-windows-x86_64.exe` | The installer on its own (the same program as in the packages above) | Anyone who only wants the installer |
+| `motorhead-<tag>-linux-x86_64.tar.gz` | `motorhead` (the game) for Linux | Linux players |
+| `motorhead-<tag>-windows-x86_64.zip` | `motorhead.exe` (the game) for Windows 11 | Windows players |
+| `motorinstall-<tag>-linux-x86_64.tar.gz`, `motorinstall-<tag>-windows-x86_64.exe` | `motorinstall`, the installer: builds the game folder from your CD image | Anyone without an installed game |
+| `motorview-<tag>-linux-x86_64.tar.gz`, `motorview-<tag>-windows-x86_64.exe` | `motorview`, the developer viewer: free camera, tuning pages, headless screenshots (point it at your game folder) | Tinkerers; not needed to play |
 | `motorhead-remaster-<tag>.zip` (+ `.sha256`) | The optional **Remaster pack**, about 180 MB | Anyone who wants the full Remaster look |
 | `SHA256SUMS` | Checksums of the program files | Optional check |
 
@@ -73,7 +74,7 @@ On Linux, unpack with `tar -xzf motorhead-<tag>-linux-x86_64.tar.gz`; the execut
 
 ## Install the game data
 
-`motorinstall` builds the game folder from your own disc image. It unpacks the original
+`motorinstall` (its own download, see [Download](#download)) builds the game folder from your own disc image. It unpacks the original
 InstallShield cabinet, copies the movies and rips the CD music to FLAC (`Music/`).
 
 - **With a window:** start `motorinstall` with no arguments, pick the image and the target folder,
@@ -146,7 +147,6 @@ Motorhead/                    <- the game folder: the one that holds motor.exe
 ├── Game/  Data/  Cars/  Tracks/  Sounds/  League/  movies/  Music/   <- the original's folders
 └── remaster/                 <- added by the Remaster pack
     ├── README.txt
-    ├── engines/              <- baked engine loops (simulated engine sound)
     ├── fill/                 <- generated scenery around the tracks (trackNN.fill)
     ├── fog/                  <- per-track fog (trackNN.fog)
     ├── rims/                 <- custom rims (carNN.rim)
@@ -250,8 +250,6 @@ to the Release.
 ## Credits
 
 - Skies of the Remaster pack: HDRIs from [Poly Haven](https://polyhaven.com/hdris), CC0 1.0.
-- Engine loops of the Remaster pack: rendered with
-  [engine-sim](https://github.com/ange-yaghi/engine-sim) by AngeTheGreat (Ange Yaghi), MIT licence.
 - Motorhead is a game by Digital Illusions (1998). This project is not affiliated with its makers.
 
 ## Licence

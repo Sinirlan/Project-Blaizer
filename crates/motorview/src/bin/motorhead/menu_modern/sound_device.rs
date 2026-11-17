@@ -1,4 +1,4 @@
-//! REMASTER Sound screen, Sound device row (#260): the eighth row of the Volume tab and its info card. Mockup
+//! REMASTER Sound screen, Sound device row (#260): the seventh row of the Volume tab and its info card. Mockup
 //! `reference_materials/sound-overhaul/sound.html` (`controlHTML` type `device`, `deviceCardHTML`, styles in
 //! `assets/sound.css`): a wide choice `< NAME >` (System default, then the outputs found), a tag when the pick is not
 //! available, and an info card that lists the outputs with the choice lit. Design px through `Glass`. What the row
@@ -32,7 +32,7 @@ fn ellipsize(b: &Batch, f: HudFont, st: &FontStyle, text: &str, max: f32) -> Str
 }
 
 impl Game {
-    /// The Volume tab's eighth row.
+    /// The Volume tab's seventh row.
     pub(super) fn device_row(&self) -> PauseItem {
         let v = self.sound_device_view();
         let help = if v.none {

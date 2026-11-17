@@ -5,6 +5,7 @@
 //! 19-glass-hud-design-language.
 
 use super::*;
+use crate::hud_layout::HudElem;
 
 /// design px of a row, a section caption, the list window and a row's control column
 const ROW_H: f32 = 36.0;
@@ -49,6 +50,8 @@ pub(super) enum PauseVal {
     Swatch { rgb: [u8; 3], name: String, first: bool, last: bool },
     /// the Sound screen's output choice (#260): a wide `< NAME >` and, in the info card, the list of outputs
     Device(DeviceView),
+    /// a row that opens a screen (the HUD tab's Edit layout, #542): its state and the Enter key's glyph
+    Action(String),
 }
 
 pub(super) struct PauseRow {
@@ -171,7 +174,6 @@ pub(super) fn cap_body(m: &mut Mesh, d: Glass, (x, y, w, h): (f32, f32, f32, f32
 impl Game {
     /// The Sound tab's rows in the pause order (SFX, CD volume, CD music, ambient, engine sound).
     pub(super) fn pause_sound_rows(&self) -> Vec<(OptRow, &'static str)> {
-        // the pause tab's order: SFX, CD volume, CD music, ambient, engine sound
         let mut all: Vec<Option<_>> = self.sound_items().into_iter().map(Some).collect();
         [0, 1, 3, 2, 6].into_iter().map(|i| all[i].take().expect("sound item")).collect()
     }
@@ -242,6 +244,9 @@ impl Game {
                         let (label, val) = self.gfx_row_view_modern(row, &e);
                         let dim = if row.active_in(&self.settings) { 1.0 } else { 0.4 };
                         let mut pr = PauseRow::from_opt(OptRow { label: label.into(), val, dim }, row.help_modern());
+                        if row == GfxRow::HudLayout {
+                            pr.val = PauseVal::Action(if self.settings.hud.layout.custom { "CUSTOM" } else { "STOCK" }.into());
+                        }
                         // the Modern HUD shrinks to fit a small window: say what it is drawn at
                         if let (GfxRow::HudScale, Some(r), true) = (row, r, dim == 1.0) {
                             let (asked, fit) = (self.settings.hud.scale, hud::effective_scale(self, r, b));
@@ -528,6 +533,16 @@ impl Game {
                 b.font_text(HudFont::GlassMed, text, c1 - w, d.cap_top(HudFont::GlassMed, 15.0, mid - d.d(10.0), Some(20.0)), &st);
             }
             PauseVal::Device(_) => {}
+            PauseVal::Action(text) => {
+                // the state, then the Enter key's glyph at the column's right end
+                let (g, tint) = Self::glyph_for(self.controls.last, 2);
+                let gs = FontStyle::new(d.d(17.0), with_a(tint, a));
+                let gw = b.font_width(HudFont::Glyphs, &g.to_string(), &gs);
+                b.font_text(HudFont::Glyphs, &g.to_string(), c1 - gw, mid - gs.size * 0.5, &gs);
+                let st = d.font(HudFont::GlassMed, 17.0, 0.5, hex(0xffffff, a));
+                let w = b.font_width(HudFont::GlassMed, text, &st) - st.tracking;
+                b.font_text(HudFont::GlassMed, text, cc - w * 0.5, d.cap_top(HudFont::GlassMed, 17.0, mid - d.d(10.0), Some(20.0)), &st);
+            }
             PauseVal::Bind(caps) => {
                 let h = d.d(22.0);
                 let (kw, pw) = (self.cap_width(b, d, &caps.key, h, caps.waiting), self.cap_width(b, d, &caps.pad, h, caps.waiting));
@@ -610,7 +625,7 @@ impl Game {
     /// The info card: the tab's icon, the row's name and its place in the list, the help text and
     /// the row's value.
     #[allow(clippy::too_many_arguments)]
-    fn pause_info_card(&self, b: &mut Batch, d: Glass, items: &[PauseItem], sel: usize, tab: &str, icon: char, hud: Option<(&[usize], [bool; 11])>, pulse: f32) {
+    fn pause_info_card(&self, b: &mut Batch, d: Glass, items: &[PauseItem], sel: usize, tab: &str, icon: char, hud: Option<(&[usize], [bool; 14])>, pulse: f32) {
         let (ix, iy, iw, ih) = INFO_CARD;
         let (x, y) = (d.x(ix), d.y(iy));
         let mut m = Mesh::default();
@@ -675,7 +690,7 @@ impl Game {
             PauseVal::Slider(_, text) => {
                 b.font_text(HudFont::Glass, text, vx, d.cap_top(HudFont::Glass, 40.0, vy, Some(44.0)), &d.font(HudFont::Glass, 40.0, 1.0, WHITE));
             }
-            PauseVal::Text { .. } | PauseVal::Swatch { .. } | PauseVal::Device(_) => {}
+            PauseVal::Text { .. } | PauseVal::Swatch { .. } | PauseVal::Device(_) | PauseVal::Action(_) => {}
             PauseVal::Bind(caps) => {
                 let h = d.d(30.0);
                 let mid = vy + h * 0.5;
@@ -696,25 +711,38 @@ impl Game {
         }
     }
 
-    /// Which pieces of the race screen the HUD shows with these settings, in `HUD_PIECES` order.
-    fn hud_pieces_shown(&self) -> [bool; 11] {
+    /// Which pieces of the race screen the HUD shows with these settings, in `THUMB` order.
+    fn hud_pieces_shown(&self) -> [bool; 14] {
         let s = &self.settings;
         let h = s.hud.shown(s.info_detail);
-        [h.cluster, h.clocks[0], h.clocks[1], h.clocks[2], h.lap, h.pos, map_row(s) > 0, h.proximity && s.view.modern_hud(), s.name_plates > 0, s.checkpoint_info > 0 && s.checkpoint_delay > 0 || s.hud.live_gaps && s.checkpoint_info > 0 && s.view.modern_hud(), s.hud.lap_delay > 0 && s.view.modern_hud()]
+        let on = |e| self.race.as_ref().is_none_or(|r| crate::hud::elem_shown(self, r, e)) && s.view.modern_hud();
+        [h.cluster, h.clocks[0], h.clocks[1], h.clocks[2], h.lap, h.pos, map_row(s) > 0, h.proximity && s.view.modern_hud(), s.name_plates > 0, s.checkpoint_info > 0 && s.checkpoint_delay > 0 || s.hud.live_gaps && s.checkpoint_info > 0 && s.view.modern_hud(), s.hud.lap_delay > 0 && s.view.modern_hud(), on(HudElem::Countdown), on(HudElem::WrongWay), on(HudElem::ModeTags)]
     }
 
-    /// `hudPreviewHTML`: a 16:9 thumbnail of the race screen, `w` canvas px wide at (x, y), with a box per
-    /// HUD piece: orange when `lit` names it (the selected row changes it), solid when shown, dashed when hidden.
-    fn pause_hud_preview(&self, b: &mut Batch, d: Glass, (x, y, w): (f32, f32, f32), lit: &[usize], shown: [bool; 11]) {
-        let (h, u) = (w * 9.0 / 16.0, w / 1280.0);
+    /// `hudPreviewHTML`: a thumbnail of the race screen in the window's shape, at most `w` canvas px wide at (x, y), with
+    /// a box per HUD piece where the player's layout puts it (#542 phase 3): orange when `lit` names it (the selected
+    /// row changes it), solid when shown, dashed when hidden.
+    fn pause_hud_preview(&self, b: &mut Batch, d: Glass, (x, y, w): (f32, f32, f32), lit: &[usize], shown: [bool; 14]) {
+        let (slot_h, u) = (w * 9.0 / 16.0, w / 1280.0);
+        let cw = self.hud_edit_w();
+        let aspect = (cw / 480.0).max(0.5);
+        let (fw, fh) = if aspect >= 16.0 / 9.0 { (w, w / aspect) } else { (slot_h * aspect, slot_h) };
+        let (fx, fy) = (x + (w - fw) * 0.5, y + (slot_h - fh) * 0.5);
         let mut m = Mesh::default();
-        let frame = vec::rounded_rect(x, y, w, h, d.d(8.0));
+        let frame = vec::rounded_rect(fx, fy, fw, fh, d.d(8.0));
         m.fill(&frame, [4.0 / 255.0, 9.0 / 255.0, 18.0 / 255.0, 0.55], d.px);
         m.stroke(&frame, true, d.w(1.0), Ends::Round, [190.0 / 255.0, 230.0 / 255.0, 1.0, 0.3], d.px);
         b.mesh(&m);
-        for (k, &(bx, by, bw, bh, label)) in HUD_PIECES.iter().enumerate() {
+        let Some(boxes) = self.race.as_ref().map(|r| crate::hud::layout_boxes(self, r, cw)) else { return };
+        let (kx, ky) = (fw / cw, fh / 480.0);
+        for (k, &(e, sub, label)) in THUMB.iter().enumerate() {
+            let rc = boxes[e as usize];
+            let rc = [rc[0] + rc[2] * sub[0], rc[1] + rc[3] * sub[1], rc[2] * sub[2], rc[3] * sub[3]];
+            if rc[2] < 1.0 || rc[3] < 1.0 {
+                continue;
+            }
             let (hot, on) = (lit.contains(&k), shown[k]);
-            let (rx, ry, rw, rh) = (x + bx * u, y + by * u, bw * u, bh * u);
+            let (rx, ry, rw, rh) = (fx + rc[0] * kx, fy + rc[1] * ky, rc[2] * kx, rc[3] * ky);
             let r = vec::rounded_rect(rx, ry, rw, rh, d.d(4.0));
             let mut m = Mesh::default();
             if hot {
@@ -814,27 +842,26 @@ fn cap_font(d: Glass, h: f32) -> f32 {
     if h > d.d(26.0) { 15.0 } else { 12.0 }
 }
 
-/// The pieces of the HUD preview (1280 x 720 units, `hudPreviewHTML`): x, y, width, height, label.
-/// The order `GfxRow::hud_lit` and `Game::hud_pieces_shown` use (LAP before POS, though POSITION sits
-/// above LAP on screen). REMASTER (#323 phase 6): the boxes follow the Race line HUD's placement, from the
-/// constants of `hud_glass.rs`: the cluster's speed, swoosh and dashed rule (x 36..336, y 22..223); the clocks
-/// (right edge 1244, 236 wide, from y 22), POSITION (top 134) and LAP (top 208) 120 wide, 58 high; the map disc's tick
-/// ring (r 90 round (1143, 585)); the splits' caption and three rows (x 36..286, down to y 684). Design choice:
-/// the clock rows (30 high on screen) are drawn 38 high with 4 between, and POSITION and LAP are 54 high a little lower,
-/// so the 8 px labels fit the thumbnail's boxes. The arrows and the names are 3D / world labels:
-/// their boxes are where they usually are.
-const HUD_PIECES: [(f32, f32, f32, f32, &str); 11] = [
-    (28.0, 18.0, 316.0, 212.0, "SPEED"),
-    (1008.0, 22.0, 236.0, 38.0, "TOTAL"),
-    (1008.0, 64.0, 236.0, 38.0, "LAP TIME"),
-    (1008.0, 106.0, 236.0, 38.0, "BEST"),
-    (1124.0, 216.0, 120.0, 54.0, "LAP"),
-    (1124.0, 154.0, 120.0, 54.0, "POS"),
-    (1051.0, 495.0, 184.0, 180.0, "MAP"),
-    (520.0, 470.0, 240.0, 120.0, "ARROWS"),
-    (540.0, 236.0, 200.0, 34.0, "NAMES"),
-    (36.0, 590.0, 250.0, 94.0, "SPLITS"),
-    (540.0, 40.0, 200.0, 56.0, "LAP TIMES"),
+/// The pieces of the HUD tab's thumbnail, in the order `GfxRow::hud_lit` and `Game::hud_pieces_shown` use (LAP before
+/// POS, though POSITION sits above LAP on screen): the Race line piece whose box it is (`hud::layout_boxes`), the part
+/// of that box as fractions x, y, width, height, and the label. The stack's rows are parts of the stack's box [APPROX:
+/// the fractions of the phase 3 table's old 236 x 248 area; the rows close up in the real HUD when one is hidden, the
+/// thumbnail keeps their places]. The arrows and the names are 3D / world labels: their boxes are where they usually are.
+const THUMB: [(HudElem, [f32; 4], &str); 14] = [
+    (HudElem::Cluster, [0.0, 0.0, 1.0, 1.0], "SPEED"),
+    (HudElem::Stack, [0.0, 0.0, 1.0, 38.0 / 248.0], "TOTAL"),
+    (HudElem::Stack, [0.0, 42.0 / 248.0, 1.0, 38.0 / 248.0], "LAP TIME"),
+    (HudElem::Stack, [0.0, 84.0 / 248.0, 1.0, 38.0 / 248.0], "BEST"),
+    (HudElem::Stack, [116.0 / 236.0, 194.0 / 248.0, 120.0 / 236.0, 54.0 / 248.0], "LAP"),
+    (HudElem::Stack, [116.0 / 236.0, 132.0 / 248.0, 120.0 / 236.0, 54.0 / 248.0], "POS"),
+    (HudElem::Map, [0.0, 0.0, 1.0, 1.0], "MAP"),
+    (HudElem::Proximity, [0.0, 0.0, 1.0, 1.0], "ARROWS"),
+    (HudElem::Plates, [0.0, 0.0, 1.0, 1.0], "NAMES"),
+    (HudElem::Splits, [0.0, 0.0, 1.0, 1.0], "SPLITS"),
+    (HudElem::Messages, [0.0, 0.0, 1.0, 1.0], "LAP TIMES"),
+    (HudElem::Countdown, [0.0, 0.0, 1.0, 1.0], "COUNTDOWN"),
+    (HudElem::WrongWay, [0.0, 0.0, 1.0, 1.0], "WRONG WAY"),
+    (HudElem::ModeTags, [0.0, 0.0, 1.0, 1.0], "TAGS"),
 ];
 
 /// The 11 px caption style (`.cap`).

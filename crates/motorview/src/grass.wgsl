@@ -252,7 +252,11 @@ fn fs_grass(i: GrassOut) -> @location(0) vec4<f32> {
     if (hr >= 1.0 || alpha <= 0.0 || (!ALPHA_TO_COVERAGE && alpha < 0.5)) {
         discard;
     }
-    let tx = textureSampleGrad(tex, samp_hq, i.uv, i.layer, duv_x, duv_y);
+    // #528 the ground polygon's layer clamped when it stays within one tile, as fs_remaster
+    var tx = textureSampleGrad(tex, samp_hq, i.uv, i.layer, duv_x, duv_y);
+    if (layer_clamps(f32(i.layer))) {
+        tx = textureSampleGrad(tex, samp_hq_clamp, i.uv, i.layer, duv_x, duv_y);
+    }
     let shade = mix(1.0, mix(r1.z, 1.0, hr) * (1.0 - GRASS_VARY * 0.5 + GRASS_VARY * h2), att);
     let tint = mix(vec3<f32>(1.0), mix(r2.rgb, r3.rgb, r2.w * hr), att);
     let c = i.color * shade * tint;

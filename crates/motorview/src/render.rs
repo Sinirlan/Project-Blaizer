@@ -594,19 +594,22 @@ motor_tune::tunable! {
 
 /// REMASTER look of one kind of car lamp, headlights and tail lights tuned apart and apart from
 /// the world and scene-object halos [design choice]. A lamp's halo gain is
-/// (`halo` + night × (`night` + `glare` × facing)) × (1 + (`brake_halo` - 1) × brake), with night
-/// = the track's darkness and facing = (beam axis · direction to the eye)^4 (looking into the
-/// beam: oncoming cars, the mirror). Size, burst and spot go from the resting value to the
+/// (lerp(`halo`, `night`, night) + facing × lerp(`glare_day`, `glare`, night)) × (1 + (`brake_halo` - 1) × brake),
+/// with night = the track's darkness and facing = (beam axis · direction to the eye)^4 (looking
+/// into the beam: oncoming cars, the mirror). By day the lamp is only a bright glow: the spot
+/// light on the road is scaled by the darkness and stays off. Size, burst and spot go from the resting value to the
 /// `brake_*` one with the car's brake input. Everything is multiplied into the shared pipeline
 /// values, so 1.0 is "as a world halo".
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct LampTune {
     /// halo gain (× `CAR_HALO_BRIGHTNESS`), by day
     pub halo: f32,
-    /// halo gain added at full darkness, and the extra gain / quad growth looking into the beam
+    /// halo gain at full darkness (blended with `halo` by the track's darkness), and the extra gain / quad growth looking into the beam
     pub night: f32,
     pub glare: f32,
     pub glare_size: f32,
+    /// extra halo gain looking into the beam by day (× (1 - night)); the lamp shines without lighting the road
+    pub glare_day: f32,
     /// halo quad size, and the starburst's size and strength (× the halo's colour), at rest
     pub size: f32,
     pub burst_size: f32,
@@ -646,7 +649,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 impl LampTune {
     pub fn halo_gain(&self, night: f32, facing: f32, brake: f32) -> f32 {
-        (self.halo + night * (self.night + self.glare * facing)) * (1.0 + (self.brake_halo - 1.0) * brake)
+        (lerp(self.halo, self.night, night) + facing * lerp(self.glare_day, self.glare, night)) * (1.0 + (self.brake_halo - 1.0) * brake)
     }
     pub fn halo_size(&self, night: f32, facing: f32, brake: f32) -> f32 {
         lerp(self.size, self.brake_size, brake) * (1.0 + night * self.glare_size * facing)
@@ -686,10 +689,11 @@ impl Default for CarLightTune {
         CarLightTune {
             brake_preview: 0.0,
             head: LampTune {
-                halo: 1.0,
-                night: 2.0,
+                halo: 5.0,
+                night: 3.0,
                 glare: 8.0,
                 glare_size: 0.3,
+                glare_day: 8.0,
                 size: 1.0,
                 burst_size: 1.0,
                 burst_gain: 1.0,
@@ -709,9 +713,10 @@ impl Default for CarLightTune {
             },
             tail: LampTune {
                 halo: 0.5,
-                night: 0.5,
+                night: 1.0,
                 glare: 0.0,
                 glare_size: 0.0,
+                glare_day: 0.0,
                 size: 1.0,
                 burst_size: 0.5,
                 burst_gain: 0.4,
@@ -786,11 +791,14 @@ pub struct Camera {
     /// Cine cameras (#479, design choice): the zoom sets the field across the window at any aspect, as a .cine file's FOV
     /// does. False = the main view's Vert+ (`field_aspect`).
     pub lens_across: bool,
+    /// motorview `--ortho-views` (#513, design choice): a parallel projection, metres from the view's centre to its top
+    /// edge; 0 = the perspective lens (every other camera). The car body levels count the car as near (`car_levels`).
+    pub ortho: f32,
 }
 
 impl Camera {
     pub fn new(pos: Vec3, yaw: f32, pitch: f32) -> Self {
-        Camera { pos, yaw, pitch, roll: 0.0, zoom: 1.0, far_k: 1.0, shift: glam::Vec2::ZERO, lens_across: false }
+        Camera { pos, yaw, pitch, roll: 0.0, zoom: 1.0, far_k: 1.0, shift: glam::Vec2::ZERO, lens_across: false, ortho: 0.0 }
     }
     /// From a game-space orientation (columns right, up, forward; the view space negates z).
     pub fn from_rot(eye_game: Vec3, rot: glam::Mat3, zoom: f32, far_k: f32) -> Self {
@@ -1572,6 +1580,16 @@ impl View {
             RenderMode::Classic => self.distance.min(CLASSIC_MAX_DISTANCE.get()),
             RenderMode::Remaster => self.distance,
         }
+    }
+    /// motorview `--ortho-views` (#513, design choice): this view for an orthographic camera (`Camera::ortho`). The passes
+    /// that read depth as a perspective lens (SSAO, depth of field, velocity blur, lens flares, volumetric fog and its
+    /// shafts) are off, and so are the fog, shadows, halos, smoke, sparks, bloom, vignette and grain: a blueprint of the car alone.
+    pub fn for_ortho(&self) -> View {
+        let mut v = *self;
+        (v.fog, v.shadows, v.halos, v.lens_flares, v.motion_blur, v.smoke, v.sparks, v.show_line) = (false, false, false, false, false, false, false, false);
+        (v.remaster.ssao, v.remaster.bloom, v.remaster.vignette, v.remaster.grain) = (0, 0, 0, 0);
+        v.debug.hide_shafts = true;
+        v
     }
     /// REMASTER: Enhanced car paint is in use
     pub fn enhanced(&self) -> bool {
@@ -2595,7 +2613,9 @@ fn wheel_spin(f: &Frame, mesh: usize) -> f32 {
 /// level of its body entry (the list can be reordered), or its own distance when the body is not in it.
 /// `floor`: the lowest level any body takes (supercars / grem: 3, 0x4392b4; 0 = none).
 fn car_levels(list: &[(usize, Mat4)], cam: &Camera, detail: CarDetail, width: f32, floor: usize) -> Vec<Option<usize>> {
-    let level = |m: &Mat4| detail.body_level(cam.pos.distance(m.w_axis.truncate()), cam.zoom, width).max(floor);
+    // an orthographic view (#513) shows every car at its own size: the near level
+    let dist = |m: &Mat4| if cam.ortho > 0.0 { 0.0 } else { cam.pos.distance(m.w_axis.truncate()) };
+    let level = |m: &Mat4| detail.body_level(dist(m), cam.zoom, width).max(floor);
     list.iter()
         .map(|(mesh, m)| {
             if mesh.is_multiple_of(CAR_MESHES) {
@@ -3315,6 +3335,8 @@ pub struct Gpu {
     prop_lights: wgpu::Buffer,
     prop_of: wgpu::Buffer,
     sampler: wgpu::Sampler,
+    /// #528 `sampler` clamped to the edge, for the layers within one tile (`Scene::layer_clamp`; shader `samp_clamp`)
+    sampler_clamp: wgpu::Sampler,
     scene: Option<GpuScene>,
     /// REMASTER local light (#83): the loaded scene's bake input (kept: a new sun rebakes, #192)
     local_src: Option<std::sync::Arc<crate::probes::BakeSource>>,
@@ -3948,6 +3970,8 @@ struct GpuScene {
     cars: Vec<(wgpu::Buffer, u32)>,
     /// REMASTER the same for `Scene::remaster_cars` (None: draw the original); read through `car`
     remaster_cars: Vec<Option<(wgpu::Buffer, u32)>>,
+    /// REMASTER (#530): `Scene::remaster_drop`, per car; applied by `lowered`
+    remaster_drop: Vec<f32>,
     /// CLASSIC body levels OBJ1, OBJ2, OBJ3 per car (`Scene::car_lods`; None: draw OBJ0)
     car_lods: Vec<[Option<(wgpu::Buffer, u32)>; 3]>,
     car_binds: Vec<wgpu::BindGroup>,
@@ -4023,6 +4047,20 @@ impl GpuScene {
     /// Classic shading, whatever it makes of the generated parts' env tags).
     fn gen_for(&self, mesh: usize, generated: bool) -> bool {
         generated != (self.car_swap == Some(mesh / CAR_MESHES))
+    }
+
+    /// REMASTER (#530): `cars` (mesh, model matrix) with every mesh of a car that draws its generated
+    /// set (`gen_for`) moved down by the car's `remaster_drop`, times the matrix's size (the car-size
+    /// cheat), so its smaller wheels still stand on the road. Straight down in world space: the same
+    /// shift for body and wheels, so the car stays rigid [design choice: on a 30° bank the tyres end up
+    /// at most about 1.4 cm sideways of a drop along the car's own up]. CLASSIC cars stay as they are.
+    fn lowered(&self, cars: &[(usize, Mat4)], generated: bool) -> Vec<(usize, Mat4)> {
+        cars.iter()
+            .map(|&(mesh, m)| {
+                let d = if self.gen_for(mesh, generated) { self.remaster_drop.get(mesh / CAR_MESHES).copied().unwrap_or(0.0) } else { 0.0 };
+                (mesh, crate::scene::remaster_lowered(m, d))
+            })
+            .collect()
     }
 
     /// Car mesh `mesh`: REMASTER the generated one when `generated` and there is one, else the
@@ -4378,6 +4416,13 @@ impl Gpu {
                     ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None },
                     count: None,
                 },
+                // #528 the texture sampler clamped to the edge (`samp_clamp`)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -4387,12 +4432,13 @@ impl Gpu {
         });
         let aniso_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("anisotropic sampler"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+            // `samp_hq` and (#528) its clamp-to-edge twin `samp_hq_clamp` (binding 4: grass.wgsl's blade pass has 1-3)
+            entries: &[0, 4].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
-            }],
+            }),
         });
         let blur_layout = blur_bind_layout(&device);
         // REMASTER car shadows: group 2 samples the map (read) or holds its uniform (caster pass)
@@ -4542,14 +4588,21 @@ impl Gpu {
             ..Default::default()
         };
         let sampler = device.create_sampler(&filtering);
+        // #528 the same, clamped to the edge: the layers of polygons within one tile (`Scene::layer_clamp`)
+        let clamped = |d: wgpu::SamplerDescriptor<'static>| wgpu::SamplerDescriptor { address_mode_u: wgpu::AddressMode::ClampToEdge, address_mode_v: wgpu::AddressMode::ClampToEdge, ..d };
+        let sampler_clamp = device.create_sampler(&clamped(filtering.clone()));
         let aniso = RemasterView::ANISOTROPY_LEVELS
             .iter()
             .map(|&a| {
-                let s = device.create_sampler(&wgpu::SamplerDescriptor { anisotropy_clamp: a, ..filtering.clone() });
+                let d = wgpu::SamplerDescriptor { anisotropy_clamp: a, ..filtering.clone() };
+                let (s, sc) = (device.create_sampler(&d), device.create_sampler(&clamped(d.clone())));
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("anisotropic sampler"),
                     layout: &aniso_layout,
-                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&s) }],
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::Sampler(&s) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sc) },
+                    ],
                 })
             })
             .collect();
@@ -4638,6 +4691,7 @@ impl Gpu {
             prop_lights,
             prop_of,
             sampler,
+            sampler_clamp,
             scene: None,
             local_src: None,
             local_bake: None,
@@ -6547,7 +6601,7 @@ impl Gpu {
         let array = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() });
         let sky_view = l.sky.take().expect("the sky step runs before the last").create_view(&Default::default());
         let views = [array(&l.tex), sky_view, l.hdri.create_view(&Default::default()), array(&l.pack_tex)];
-        let pack_map = self.pack_map(&s.pack, l.pack_layers);
+        let pack_map = self.pack_map(&s.pack, l.pack_layers, &s.layer_clamp);
         let local = self.local_textures(None);
         let GlobalBinds { bind, car_binds, prop_bind, probe_bind, probe_car_binds, probe_prop_bind } = self.global_binds(&views, &pack_map, &local);
         let (grass_bind, grass_trail) = self.grass_bind(s.grass_edge.as_ref());
@@ -6578,6 +6632,7 @@ impl Gpu {
             // small (a few thousand triangles per wheel), so uploaded with the scene: F9 then
             // switches without a stall
             remaster_cars: (0..s.remaster_cars.len()).map(|i| take(VSrc::RemasterCar(i))).collect(),
+            remaster_drop: s.remaster_drop.clone(),
             car_lods: (0..s.car_lods.len()).map(|i| [take(VSrc::Lod(i, 0)), take(VSrc::Lod(i, 1)), take(VSrc::Lod(i, 2))]).collect(),
             car_binds,
             prop_bind,
@@ -6633,6 +6688,7 @@ impl Gpu {
                     wgpu::BindGroupEntry { binding: 10, resource: pack_map.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 11, resource: self.prop_lights.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 12, resource: self.prop_of.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.sampler_clamp) },
                 ],
             })
         };
@@ -6652,14 +6708,29 @@ impl Gpu {
     /// `vec4<i32>` (-1: the original; `n` = the pack array's layers). Normal layers keep their
     /// plain box mips (`SceneUpload`): the averaged vectors get shorter, which flattens the bumps
     /// with distance (`map_normal` normalises the result).
-    fn pack_map(&self, pack: &crate::texpack::Pack, n: u32) -> wgpu::Buffer {
+    /// After the ids, the World mapping scales (#521): per base layer (u, v), two layers to a `vec4<f32>`
+    /// (shader.wgsl `PackMap.world`; 0 = the layer's own UVs).
+    /// Then (#528, both modes) one bit per base layer, set when it is sampled clamp-to-edge (`PackMap.clamp`,
+    /// `Scene::layer_clamp`).
+    fn pack_map(&self, pack: &crate::texpack::Pack, n: u32, clamp: &[bool]) -> wgpu::Buffer {
         let mut ids = vec![-1i32; crate::scene::MAX_LAYERS * 2];
         for (k, m) in pack.map.iter().enumerate().take(crate::scene::MAX_LAYERS) {
             let ok = |v: i32| if (v as u32) < n { v } else { -1 };
             ids[2 * k] = ok(m[0]);
             ids[2 * k + 1] = ok(m[1]);
         }
-        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("texture pack ids"), contents: bytemuck::cast_slice(&ids), usage: wgpu::BufferUsages::UNIFORM })
+        let mut world = vec![0f32; crate::scene::MAX_LAYERS * 2];
+        for (k, w) in pack.world.iter().enumerate().take(crate::scene::MAX_LAYERS) {
+            world[2 * k..2 * k + 2].copy_from_slice(w);
+        }
+        let mut bits = vec![0u32; crate::scene::MAX_LAYERS / 32];
+        for (k, _) in clamp.iter().enumerate().take(crate::scene::MAX_LAYERS).filter(|(_, &c)| c) {
+            bits[k / 32] |= 1 << (k % 32);
+        }
+        let mut bytes = bytemuck::cast_slice::<i32, u8>(&ids).to_vec();
+        bytes.extend_from_slice(bytemuck::cast_slice(&world));
+        bytes.extend_from_slice(bytemuck::cast_slice(&bits));
+        self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("texture pack ids"), contents: &bytes, usage: wgpu::BufferUsages::UNIFORM })
     }
 
     /// REMASTER local light (#83): the volume's textures, or 1x1x1 dummies (`p` None).
@@ -6783,6 +6854,14 @@ impl Gpu {
         let mk = |d: &Vec<Vertex>, label| (self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents: bytemuck::cast_slice(d), usage: wgpu::BufferUsages::VERTEX }), d.len() as u32);
         g.water = (!m.verts.is_empty()).then(|| mk(&m.verts, "water"));
         g.tris_dry = remaster_world(&s.tris, &m.hide, &m.bed, &s.tree_hide, &s.trees).map(|w| (mk(&w.verts, "world without water").0, w.off, w.on));
+        g.water_params = m.params.clone();
+    }
+
+    /// REMASTER: replace the water surface only (`procgen::water::preview`, the World Editor while a drag is held): the
+    /// world without the hidden polygons and the bed stay as the last `set_water` left them.
+    pub fn set_water_surface(&mut self, m: &crate::procgen::water::Mesh) {
+        let Some(g) = &mut self.scene else { return };
+        g.water = (!m.verts.is_empty()).then(|| (self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("water"), contents: bytemuck::cast_slice(&m.verts), usage: wgpu::BufferUsages::VERTEX }), m.verts.len() as u32));
         g.water_params = m.params.clone();
     }
 
@@ -7540,25 +7619,9 @@ impl Gpu {
         out
     }
 
-    /// REMASTER menu car preview (#325): the studio frame drawn 4x multisampled into its own transparent offscreen
-    /// target, then laid over `target` with premultiplied blending (the main view's MSAA does not reach the overlay
-    /// frames). `APPROX`: a cut-out texel's partial alpha-to-coverage edge blends slightly off; invisible at preview
-    /// size. Returns false when it cannot (no MSAA, another target format): the caller draws the frame plainly.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_studio_aa(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera, v: &View, f: &Frame) -> bool {
-        let Some(vp) = f.viewport else { return false };
-        if v.mode != RenderMode::Remaster || self.scene.is_none() || target.texture().format() != self.color_format || self.msaa_samples(STUDIO_MSAA) < 2 {
-            return false;
-        }
-        // the view's rectangle in whole window pixels (as the main pass clamps it, grown to the pixels it touches)
-        let (x, y) = (vp[0].clamp(0.0, size.0 as f32), vp[1].clamp(0.0, size.1 as f32));
-        let (x1, y1) = ((x + vp[2]).min(size.0 as f32).ceil(), (y + vp[3]).min(size.1 as f32).ceil());
-        let (x0, y0) = (x.floor(), y.floor());
-        let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
-        if w < 1 || h < 1 {
-            return true;
-        }
-        let sa = self.studio.get_or_init(|| {
+    /// REMASTER menu car preview: the composite of `draw_studio_aa`, built on first use (or by `warm_studio`).
+    fn studio_composite(&self) -> &StudioAa {
+        self.studio.get_or_init(|| {
             let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("studio aa"), source: wgpu::ShaderSource::Wgsl(crate::shaders::src("studioaa.wgsl")) });
             let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("studio aa"),
@@ -7587,7 +7650,39 @@ impl Gpu {
                 cache: None,
             });
             StudioAa { pipe, layout, frame: RefCell::new(None) }
-        });
+        })
+    }
+
+    /// #543 build the menu car preview's pipelines now (start-up), not on the Car screen's first frame (about
+    /// 0.2 s of shader work). Remaster only does it; the sample count is fixed per device (`STUDIO_MSAA`).
+    pub fn warm_studio(&self) {
+        let samples = self.msaa_samples(STUDIO_MSAA);
+        if samples < 2 {
+            return; // `draw_studio_aa` draws no offscreen frame then
+        }
+        self.studio_pipes(samples);
+        self.studio_composite();
+    }
+
+    /// REMASTER menu car preview (#325): the studio frame drawn 4x multisampled into its own transparent offscreen
+    /// target, then laid over `target` with premultiplied blending (the main view's MSAA does not reach the overlay
+    /// frames). `APPROX`: a cut-out texel's partial alpha-to-coverage edge blends slightly off; invisible at preview
+    /// size. Returns false when it cannot (no MSAA, another target format): the caller draws the frame plainly.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_studio_aa(&self, enc: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, depth: &wgpu::TextureView, size: (u32, u32), cam: &Camera, v: &View, f: &Frame) -> bool {
+        let Some(vp) = f.viewport else { return false };
+        if v.mode != RenderMode::Remaster || self.scene.is_none() || target.texture().format() != self.color_format || self.msaa_samples(STUDIO_MSAA) < 2 {
+            return false;
+        }
+        // the view's rectangle in whole window pixels (as the main pass clamps it, grown to the pixels it touches)
+        let (x, y) = (vp[0].clamp(0.0, size.0 as f32), vp[1].clamp(0.0, size.1 as f32));
+        let (x1, y1) = ((x + vp[2]).min(size.0 as f32).ceil(), (y + vp[3]).min(size.1 as f32).ceil());
+        let (x0, y0) = (x.floor(), y.floor());
+        let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        if w < 1 || h < 1 {
+            return true;
+        }
+        let sa = self.studio_composite();
         let mut frame = sa.frame.borrow_mut();
         if frame.as_ref().is_none_or(|t| t.0 != (w, h)) {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -7643,8 +7738,19 @@ impl Gpu {
         if f.studio && !self.studio_aa.get() && self.draw_studio_aa(enc, target, depth, size, cam, v, f) {
             return;
         }
-        let cars = f.cars;
         let Some(s) = &self.scene else { return };
+        // REMASTER (#530): the generated cars drawn lower (`GpuScene::lowered`), once per drawn view (the
+        // frosted, warped and studio paths above come back here); CLASSIC keeps the list as it is
+        let lowered;
+        let f = if (v.generated_cars() || s.car_swap.is_some()) && s.remaster_drop.iter().any(|&d| d > 0.0) {
+            let g = v.generated_cars();
+            let (cars, light, ghost) = (s.lowered(f.cars, g), s.lowered(f.light_cars, g), s.lowered(f.ghost_cars, g));
+            lowered = (cars, light, ghost);
+            &Frame { cars: &lowered.0, light_cars: &lowered.1, ghost_cars: &lowered.2, ..f.clone() }
+        } else {
+            f
+        };
+        let cars = f.cars;
         // CHEAT lemmy / ace (#316), ramlosa / h2o (#317): the cloud ceiling replaces the sky in both modes, so no HDRI dome (its
         // sky ambient, reflections and fog colour go with it)
         let v_hell;
@@ -7694,7 +7800,14 @@ impl Gpu {
         // overlays (the Remaster menus' car previews) and the Cine cameras keep `FOV_X` across
         let field = field_aspect(f.viewport.is_none() && !f.mirror && !f.overlay && !cam.lens_across, aspect);
         let fov = 2.0 * ((v.fov_x.to_radians() / 2.0).tan() / cam.zoom / field).atan();
-        let mut proj = glam::camera::rh::proj::directx::perspective(fov, aspect, NEAR, clip_far);
+        let mut proj = if cam.ortho > 0.0 {
+            // motorview --ortho-views (#513): parallel rays, `cam.ortho` metres up from the centre (the perspective-only
+            // passes are off in its view, `View::for_ortho`)
+            let (h, w) = (cam.ortho, cam.ortho * aspect);
+            glam::camera::rh::proj::directx::orthographic(-w, w, -h, h, NEAR, clip_far)
+        } else {
+            glam::camera::rh::proj::directx::perspective(fov, aspect, NEAR, clip_far)
+        };
         if f.mirror {
             // flipping x reverses the winding: drawn with `tri_pipe_mirror`
             proj = Mat4::from_scale(Vec3::new(-1.0, 1.0, 1.0)) * proj;
@@ -10574,5 +10687,8 @@ mod car_detail_tests {
         assert_eq!(car_levels(&list, &cam, CarDetail::Low, 640.0, 0), [None, Some(2), Some(2), None]);
         // supercars / grem: every body at OBJ3, so no separate wheels at any distance
         assert_eq!(car_levels(&list, &cam, CarDetail::High, 640.0, 3), [None, Some(3), Some(3), None]);
+        // an orthographic camera (#513) draws every car at the near level
+        let ortho = Camera { ortho: 3.0, ..cam };
+        assert_eq!(car_levels(&list, &ortho, CarDetail::High, 640.0, 0), [Some(0), Some(0), Some(0), Some(0)]);
     }
 }

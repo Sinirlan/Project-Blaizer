@@ -18,6 +18,7 @@ use motorview::ghost::{runs, Follow, Sync, ViewerGhost};
 use motorview::gui::{wheel_drag, wheel_slider};
 use motorview::icons as ic;
 use motorview::inspect::{Passes, Tab};
+use motorview::race_audio::EngineSound;
 use motorview::render::{aa_stop, CarShading, DebugShade, FogStyle, GrassLevel, LightShadows, PostAaKind, RemasterView, RenderAaKind, RenderMode, ShadowQuality, Tonemap, View, AA_STOPS, AA_STOP_STRENGTH};
 use motorview::tune::{Page, Tune, CAM_MODES};
 use motorview::wire::WireStyle;
@@ -83,7 +84,47 @@ impl RTab {
 
 /// The game's own track and car names (`TrackName` / `CarName` of `Game/TrackN.trk` / `carNN.car`).
 pub(crate) const TRACKS: [&str; 8] = ["RedRock", "NolbyHills", "NeoCity", "Atlantika", "OkkunSpeedway", "Olympos", "RuhrStadt", "Goldbridge"];
-pub(crate) const CARS: [&str; 10] = ["Kobra X3", "Adder Mk2", "Python V12", "Serpent", "ASC II", "Avalanche", "ASC", "Resonic", "R-Build 2", "Titan"];
+/// The original ten cars, the list until `init_cars` reads the install's.
+const ORIGINAL_CARS: [&str; 10] = ["Kobra X3", "Adder Mk2", "Python V12", "Serpent", "ASC II", "Avalanche", "ASC", "Resonic", "R-Build 2", "Titan"];
+static CAR_LIST: std::sync::OnceLock<(Vec<u32>, Vec<&'static str>)> = std::sync::OnceLock::new();
+
+/// The cars of the install (`Game/carNN.car`: the ten of the original, 14 with patch 3.0, #365): file numbers and the game's
+/// own names, in number order. Called once at start; without it the list is the original ten.
+pub(crate) fn init_cars(root: &std::path::Path) {
+    let ids = motor_data::fs::car_ids(root);
+    if ids.is_empty() {
+        return;
+    }
+    let names = ids.iter().map(|&id| &*Box::leak(motorview::scene::car_name(root, id).into_boxed_str())).collect();
+    let _ = CAR_LIST.set((ids, names));
+}
+
+fn car_list() -> (&'static [u32], &'static [&'static str]) {
+    match CAR_LIST.get() {
+        Some((ids, names)) => (ids, names),
+        None => (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], &ORIGINAL_CARS),
+    }
+}
+
+/// Car file numbers and names for the pickers.
+pub(crate) fn car_ids() -> &'static [u32] {
+    car_list().0
+}
+pub(crate) fn car_names() -> &'static [&'static str] {
+    car_list().1
+}
+/// The picker row of car file number `car` (0 when the install lacks it).
+pub(crate) fn car_pos(car: u32) -> usize {
+    car_ids().iter().position(|&c| c == car).unwrap_or(0)
+}
+/// The car file number of picker row `i`.
+pub(crate) fn car_at(i: usize) -> u32 {
+    car_ids().get(i).copied().unwrap_or(1)
+}
+/// The car after `car` in number order, wrapping (the C key).
+pub(crate) fn next_car(car: u32) -> u32 {
+    car_at((car_pos(car) + 1) % car_ids().len())
+}
 
 /// The ribbon's own state (kept by the viewer between frames).
 pub struct RibbonState {
@@ -157,6 +198,12 @@ pub struct Ribbon<'a> {
     pub car: u32,
     /// the followed car drawn with the other model (`Act::SwapMesh`)
     pub mesh_swap: bool,
+    /// the speaker button's switches (`Act::Sound` / `Act::Music`, #495) and whether the machine has no output to play on
+    pub sound: bool,
+    pub music: bool,
+    pub no_sound_device: bool,
+    /// the engine sound the speaker button shows (`Act::Engine`)
+    pub engine: motorview::race_audio::EngineSound,
     /// world editor open
     pub world: Option<&'a mut WorldEdit>,
     /// the loaded ghost, and the ghost window's camera when it is open
@@ -706,6 +753,7 @@ impl Ribbon<'_> {
                 if glass_ui::ibtn(ui, if self.st.minimised { ic::CHEVRON_DOWN } else { ic::CHEVRON_UP }, false).on_hover_text(shelf_tip).clicked() {
                     self.acts.push((Act::MenuBar, 0));
                 }
+                self.sound_button(ui);
                 let dock_on = self.tune.page.is_some();
                 if glass_ui::ibtn_shape(ui, dock_on, glass_ui::dock_icon).on_hover_text(format!("properties dock  [{}]", key_name(Act::Tune))).clicked() {
                     self.acts.push((Act::Tune, 0));
@@ -726,8 +774,8 @@ impl Ribbon<'_> {
                     }
                 }
                 glass_ui::vsep(ui, 28.0);
-                let car = (self.car.clamp(1, 10) - 1) as usize;
-                if let Some(i) = glass_ui::dropdown(ui, ic::CAR, &CARS, car, 2, if tiny { 96.0 } else { 118.0 }, self.st.pick == Some(Pick::Car)) {
+                let car = car_pos(self.car);
+                if let Some(i) = glass_ui::dropdown(ui, ic::CAR, car_names(), car, 2, if tiny { 96.0 } else { 118.0 }, self.st.pick == Some(Pick::Car)) {
                     self.acts.push((Act::Car, i));
                 }
                 let track = (self.track.clamp(1, 8) - 1) as usize;
@@ -736,6 +784,36 @@ impl Ribbon<'_> {
                 }
             });
         }
+    }
+
+    /// The speaker button (#495): lit while Sound or Music is on; a click opens the two switches under it. `--ribbon-pick sound` holds it open.
+    fn sound_button(&mut self, ui: &mut Ui) {
+        let on = self.sound || self.music;
+        let r = glass_ui::ibtn(ui, if on { ic::VOLUME } else { ic::VOLUME_OFF }, on).on_hover_text("sound and music");
+        if self.st.pick == Some(Pick::Item("sound".into())) {
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&r));
+        }
+        egui::Popup::menu(&r).width(260.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.set_min_width(260.0);
+            if glass_ui::row_check(ui, ic::VOLUME, "Sound", "", self.sound) {
+                self.acts.push((Act::Sound, 0));
+            }
+            if glass_ui::row_check(ui, ic::MUSIC, "Music", "", self.music) {
+                self.acts.push((Act::Music, 0));
+            }
+            // Enhanced plays in the Remaster mode only (as in the game, #494)
+            let engine = self.engine;
+            if glass_ui::row_choice(ui, ic::GAUGE, "Engine", "", engine.label(), engine == EngineSound::Enhanced, engine == EngineSound::Classic) != 0 {
+                self.acts.push((Act::Engine, 0));
+            }
+            if engine == EngineSound::Enhanced && self.view.mode == RenderMode::Classic {
+                ui.label(RichText::new("Enhanced plays in Remaster (F9)").size(13.0).color(theme::DIM));
+            }
+            if self.no_sound_device && on {
+                ui.label(RichText::new("no sound device").size(13.0).color(theme::DIM));
+            }
+        });
     }
 
     fn world_open(&self) -> bool {
@@ -852,13 +930,14 @@ impl Ribbon<'_> {
 
     fn sim_car(&mut self, ui: &mut Ui, l: Look) {
         self.press_act(ui, l, It::new(ic::RELOAD, "Reload car recipes", "Reload").act(Act::ReloadCars), true);
-        self.press_act(ui, l, It::new(ic::DOWNLOAD, "Export body (.obj to the Exports folder)", "Export .obj").act(Act::ExportBody), true);
+        self.press_act(ui, l, It::new(ic::DOWNLOAD, "Export body (.obj with materials, to Exports)", "Export .obj").act(Act::ExportBody), true);
+        self.press_act(ui, l, It::new(ic::DOWNLOAD, "Export blueprint (.glb, to Exports)", "Export .glb").act(Act::ExportBlueprint), true);
         self.tog_act(ui, l, It::new(ic::BOX, "Swap mesh (original / generated)", "Swap mesh").act(Act::SwapMesh), self.mesh_swap);
         if l == Look::Fly {
-            let sel = (self.car.clamp(1, 10) - 1) as usize;
+            let sel = car_pos(self.car);
             let hold = glass_ui::is_held(ui.ctx(), &["Sim car"]);
             // the car switch rebuilds the race, so the wheel does not step it
-            if let Some(i) = glass_ui::row_pick(ui, ic::CAR, "Car", key_name(Act::NextCar), &CARS, sel, glass_ui::ListOpts { digits: Some(2), hold, ..Default::default() }) {
+            if let Some(i) = glass_ui::row_pick(ui, ic::CAR, "Car", key_name(Act::NextCar), car_names(), sel, glass_ui::ListOpts { digits: Some(2), hold, ..Default::default() }) {
                 self.acts.push((Act::Car, i));
             }
         }

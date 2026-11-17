@@ -60,6 +60,21 @@ Vent from=10,10,10 lo=0,0.6,1.5 hi=0.4,0.8,1.66 rgb=3,3,5 frame=0.008 inset=0.03
 Push lo=0.389,0.768,1.262 hi=0.399,0.778,1.272 by=0.02,0.03045,0.00842
 Push lo=0.325,0.625,1.522 hi=0.335,0.635,1.532 by=0.067714,0.10542,0
 
+# [O] the lower nose: a lip 5-9 cm tall all round the front, 68 (|x| < 0.322) from the chin 39
+# (0.322 0.217 2.065) up to the grille's bottom edge 93 (0.322 0.308 2.021), 65 (38 92 93 39) and
+# 66 (94 95 92 38) to the corner, 67 (35 95 94) back to the front arch. It leans back from the
+# chin (68 26 deg: the chin 4.4 cm ahead of the grille), so its top edge, 93-92-95 under the
+# grille, 199 and the corner 173, was a concave fold all round the nose, the "dished" lower nose.
+# Fifth pass, phase 3 (#534, the user's request: a full, round front): the chin goes back 6 cm,
+# so the lip leans 10 deg forward and rolls under; 38 and 94 go back 4.07 and 2.70 cm, the depths
+# that keep the quads 65 and 66 planar (a quad's lattice lies on the plane through its first
+# corner, so a non-planar one gets springs 5 mm off its edges and its paint ripples: the first
+# try, 7/5/3.5 cm, did). The folds at the lip's top are convex now, 10-14 deg; their faces have
+# a box of their own in the zone (below).
+Push lo=0.317,0.212,2.06 hi=0.327,0.222,2.07 by=0,0,-0.06
+Push lo=0.732,0.212,1.862 hi=0.742,0.222,1.872 by=0,0,-0.0407
+Push lo=0.806,0.212,1.771 hi=0.816,0.222,1.781 by=0,0,-0.027
+
 # [O] the tail's lower centre: the black panel 124 (5 5 5, Holes3.iff, |x| < 0.416, y 0.350-0.611,
 # z -2.034..-2.021, n 0 -0.05 -1) between the red bumper corners 121 (x 0.416-0.843), the
 # Holes3 slope 123 (45 45 45) under it down to the underside's edge 26/27 (0.4217 0.258 -1.968),
@@ -78,11 +93,20 @@ Push lo=0.325,0.625,1.522 hi=0.335,0.635,1.532 by=0.067714,0.10542,0
 #   so the slope 123 has no area and goes, the valance 120 is a triangle and the underside 13
 #   runs straight up to the panel's foot (26/27 moved to the plane instead left 123 in it, and
 #   the ramp's wall pieces cut from 123 and 124 sat on one edge: 10 non-manifold edges; 5 mm short
-#   of it, 123's lifted inner part was a 5 mm lip the bevel could not inset: 4). The red corners 121 (and the valance 120 and the band
-#   1 over them) are cut at |x| 0.45 first (`Slice`), so only the 3.4 cm strip inside the cut
-#   follows the moved corners: it becomes the side wall of the set-back centre, 7.5 cm deep,
-#   65 deg to the tail plane, and the corners outside the cut keep their sweep as the F80's
-#   protruding side panels do.
+#   of it, 123's lifted inner part was a 5 mm lip the bevel could not inset: 4).
+# - Fifth pass (#534, the user's note: two protrusions either side of the outlet): the red corners
+#   121 (and the valance 120 and the band 1 over them) follow the moved corners whole. The fourth
+#   pass cut them at |x| 0.45 first (`Slice`), so that only a 3.4 cm strip did, the side wall of
+#   a 7.5 cm step (the F80's protruding side panels); outside the cut the corners kept the
+#   original's depth (z -2.027 at |x| 0.45 against the centre's -1.948), and from above and from
+#   the rear quarter their inner edges were two blades. Now the bumper face runs from the
+#   centre's plane at |x| 0.416 to its outer corners 2 (0.843 0.611 -1.950) and 159 (0.811 0.350
+#   -1.942), which move 4.5 cm forward (`Push`), so it sweeps 6 deg forward in plan like the
+#   lamps' bottom edge over it (0.400 -1.952 to 0.765 -1.880), the band 1 between them 3-13 deg
+#   off both: one convex tail. [D] Folds as the zone sees them (after `round_arches`, which moves
+#   the arch's top corner 1 to 0.888 0.585 -1.764): corner 121/122 61.5 deg, bottom 120/122 63.7,
+#   the band 1 to the corner triangle 0 69.7 (55.9 before), so the tail box's `max_deg` is 72
+#   (below); at 65 that fold stayed a crease from the lamp's corner down to 2, an ear in plan.
 # - the underside between the arches ramps up to the panel's foot (`Diffuser`, as the Serpent's
 #   #388, no keel): from z -1.72, where it lies on the floor (0.251), to 0.37 at z -1.948,
 #   steepening; the channel |x| < 0.396 with its walls leaning out 1.988 cm to the panel's own
@@ -96,9 +120,10 @@ Push lo=0.325,0.625,1.522 hi=0.335,0.635,1.532 by=0.067714,0.10542,0
 #   frame, and one wide outlet on the centre line in the recess (`Exhaust centre=1`): 32 x 10 cm
 #   in a 1.2 cm rim, its lower corners chamfered 2 cm, every corner rounded 1.5 cm, its lip in the
 #   lamps' plane (3 cm proud of the recess floor), centred at y 0.525.
-Slice lo=0.42,0.25,-2.1 hi=0.9,0.65,-1.85 axis=x at=0.45
 Push lo=0.41,0.606,-2.039 hi=0.42,0.616,-2.029 by=0,0,0.08561
 Push lo=0.41,0.345,-2.026 hi=0.42,0.355,-2.016 by=0,0,0.07322
+Push lo=0.838,0.606,-1.955 hi=0.848,0.616,-1.945 by=0,0,0.045
+Push lo=0.806,0.345,-1.947 hi=0.816,0.355,-1.937 by=0,0,0.045
 Push lo=0.4205,0.2565,-1.9695 hi=0.4225,0.259,-1.9665 by=-0.00577,0.09215,0.01986
 Diffuser lo=0,0.15,-2.1 hi=0.4158,0.63,-1.72 width=0.396 wall=0.01988 roof=-1.72,0.251;-1.80,0.27;-1.87,0.305;-1.92,0.345;-1.948,0.37 keel=-1.948,0.1 keel_bottom=0 keel_top=0 keel_round=0 step=0.0228
 Paint from=45,45,45 lo=0,0.2,-2.1 hi=0.42,0.45,-1.9 like=0,0,0
@@ -173,8 +198,44 @@ Carbon from=45,45,45 lo=0.3,0.94,-1.4 hi=0.52,1.16,-0.55
 # stayed sharp. Design choice (#465, the user's request: that corner rounded): the valance joins
 # the zone (its tag in `from`, the outboard tail box down to y 0), so the corner rounds to the
 # bottom; the outline corner is now 28 under the car (y 0.26), where the side 122 meets the arch.
+# Fifth pass (#534): the outboard tail box's `max_deg` 65 -> 72, for the 69.7 deg fold of the
+# band 1 to the corner triangle 0 once the bumper's corners move forward (above); [D] no other
+# fold in that box lies between 65 and 72 (the zone's only others over 65 are the scoop lips').
+# Fifth pass, phase 2 (#534, the user's note: the edge running back from the scoop's top stays a
+# hard line for most of its length): [O] ahead of the cut the upper lip's 114 deg fold was the
+# zone's outline (the bevel's 1-2 cm round, the apex on the cage's line 84-78), and behind it the
+# 0.3 round pulled the apex 5 cm in within 10 cm of the cut, a hook at the end of the hard line.
+# Design choice: the shoulder 163 and the underside 60 ahead of the cut get a box of their own
+# (centroids outboard of x 0.82 and over y 0.6, so the door 51 under the overhang, the ledge and
+# its 70 deg lip stay as they were) with `max_deg` 120 and a `round` growing along z (a ramp,
+# value@z, linear): 4.5 cm at the vent (its top corner 84, z 0.643, is an outline point), 10 at
+# z 0, 17 at the cut, so the edge rounds a little at the vent and more towards the back. [D]
+# Sections of the exported body: the apex 2 cm in from the cage's line at the vent, 4.5 at z 0,
+# 5.7 at the cut; the tightest radius 2 cm at the vent, 4 at z 0, 7 at the cut; both rise
+# steadily and run on into the 0.3 behind the cut, which is unchanged. (Stepped box by box with
+# more `Slice`s at z 0.3 / 0 or 0.4 / 0.15 / -0.1, the round left a flat stretch by the vent or a
+# 1 cm step at each cut. The third pass saw a sawtooth from rounds under twice the 2.5 cm
+# lattice; at 4.5 cm by the vent the close-ups and the normals view show none.)
+# Fifth pass, phase 3 (#534, the user's note: the side behind the front wheel to bulge out flush
+# with the vent's edge): [O] the side 129/128 (x 0.919) folds 53 deg to the shoulder 192 along
+# 84-25, from the vent's top corner 84 (0.919 0.756 0.643, an outline point: the scoop's faces are
+# not in the zone) to the arch. The outboard box's 0.25 pulled that fold's apex 4 cm in (x 0.875
+# at y 0.756, z 0.7) right beside the pinned corner: from above, the vent's edge stood proud of
+# the side ahead of it, with a saddle (kmin -2.6/m) round the corner. Design choice: 129, 128 and
+# 192 get a box of their own (centroids outboard of x 0.86, y 0.55-0.85, z 0.66-0.85) with a ramp
+# as the shoulder's behind the vent: 4.5 cm at the vent, 10 at the arch (the fenders' 0.1 ahead
+# of it), so the shoulder line rounds alike either side of the corner. [D] Sections: the side
+# runs flush to x 0.918 up to the corner's height (before: 0.905, a notch), the fold's radius
+# 3-4 cm by the vent, about 10 at z 0.8.
+# Fifth pass, phase 3 (#534): the lip 68/65/66/67 (above) is a strip 5-9 cm tall between its
+# rounded top fold and its bottom edge, an outline (the underside is out of the zone). At the
+# outboard boxes' 0.25 the fold's rounding pulled its top in against the pinned bottom: a band
+# concave upright (kmin -2 to -3/m) round the lower corners, and a deeper pinch at the grille's
+# corner 93. The lip's faces get the first box (centroids under y 0.3 ahead of z 1.6) with
+# `round` 0.06: [D] kmin -0.4 to +1.1/m along the lip, -2.6 at the grille's corner (the base had
+# -3.3 there, the lip's concave fold).
 Slice lo=0.7,0.28,-1.0 hi=1.0,0.93,0.65 axis=z at=-0.3
-Smooth from=239,159,4;228,42,4;45,45,45;33,35,33;101,99,94 lo=0.7,0.5,0.9;0.8,0.5,-1.8;0.7,0.28,-0.75;0,0.6,1.0;0.38,0,-2.3;0,0.36,-2.3;0,0.83,-2.3;0.47,0,-1.7;0.42,0.97,-1.3;0,0,-0.55 hi=0.95,0.85,1.85;0.95,0.95,-0.5;1.0,0.93,-0.3;0.43,0.86,1.66;1.0,1.3,-1.7;0.38,0.72,-1.7;0.38,1.3,-1.7;1.0,1.3,2.3;0.47,1.2,-0.5;0.47,1.3,2.3 max_deg=65;65;120;65;65;65;65;65;65;65 step=0.025 loose=0 round=0.1;0.1;0.3;0.04;0.25;0.25;0.25;0.25;0.25;0.25
+Smooth from=239,159,4;228,42,4;45,45,45;33,35,33;101,99,94 lo=0,0.2,1.6;0.7,0.5,0.9;0.8,0.5,-1.8;0.7,0.28,-0.75;0.82,0.6,-0.3;0.86,0.55,0.66;0,0.6,1.0;0.38,0,-2.3;0,0.36,-2.3;0,0.83,-2.3;0.47,0,-1.7;0.42,0.97,-1.3;0,0,-0.55 hi=0.95,0.3,2.1;0.95,0.85,1.85;0.95,0.95,-0.5;1.0,0.93,-0.3;1.0,0.93,0.65;1.0,0.85,0.85;0.43,0.86,1.66;1.0,1.3,-1.7;0.38,0.72,-1.7;0.38,1.3,-1.7;1.0,1.3,2.3;0.47,1.2,-0.5;0.47,1.3,2.3 max_deg=65;65;65;120;120;65;65;72;65;65;65;65;65 step=0.025 loose=0 round=0.06;0.1;0.1;0.3;0.17@-0.3:0.1@0:0.045@0.62;0.045@0.64:0.1@1.0;0.04;0.25;0.25;0.25;0.25;0.25;0.25
 # [O] the glass is flat facets too: the windscreen's centre 77 and its corner wraps 76 fold
 # 14.7 deg, the rear window 84/86/89 3-6 deg, the side windows 91-93 and 97/98 3-7 deg. Design
 # choice (#465, as the Serpent's canopy): one zone, faired before the glass is recessed, with a
@@ -191,3 +252,31 @@ Refine step=0.04
 # 2 cm along the centre line, fading to the fender crowns (|x| 0.8), the lamps (y 0.5) and the
 # windscreen's base (z 1.0); the nose at z 1.95 stays.
 Warp by=0,0.02,0 x=0,1;0.45,0.7;0.8,0 y=0.5,0;0.62,1 z=1.0,0;1.45,1;1.95,0
+# Fifth pass, phase 3 (#534, the user's request: a full, rounded front, closer to the round
+# shape the original's shading paints on; [O] its corner normals tilt 10-20 deg off the nose's
+# and the front wings' faces, so its environment map lays a dome of rings over the nose):
+# [O] sections of the exported body: the sides at z 0.7 and z 1.6 are flat and upright from
+# y 0.22 to 0.6 (curvature H 0.00/m on the panel behind the front arch), the nose flat across
+# its centre (|x| < 0.3) in plan and over the bonnet's front slope 203 and the nose 174 (H 0.2).
+# The `Smooth` fairing never adds crown: it holds every point to the flat facets. Design choice:
+# - the sides tuck under, a tumblehome from the nose to the rear arch: the side moves in 2 cm at
+#   its bottom edge (y 0.215), along a parabola that is level at y 0.6 (0.27 of it at y 0.4), so
+#   it curves the same way everywhere below 0.6 (an inward move whose weight curves up is
+#   convex; a weight with a level foot would leave a concave band) and leaves everything above
+#   0.6 alone; along the car it is even (no foot in z, so no dents along the sill), fading only
+#   inside the rear arch (z -1.3..-0.95). Across, it grows from 0 at |x| 0.1 to 1 at 0.6, on
+#   the underside and the nose's front, which it slides along. [D] The tyres' outer faces
+#   (x 0.926, 0.6 cm outside the side) stand 0.7 cm further out of the arch at hub height, up
+#   to 2 cm at the arches' bottom ends.
+# - the nose crowns: 2.5 cm forward at the centre line and 1.7 cm up (the upward part only from
+#   y 0.35 to 0.5 up, so the underside's front edge stays straight), both falling to 0 at |x|
+#   0.6, where the fold to the fender slopes and the corner take the foot, and from the nose
+#   (z 1.75) back to the windscreen's base (z 1.1). The added parts follow (`cuts::warp_point`):
+#   the grille and the bonnet's mouth curve with it. [D] kmin +0.1 to +0.45/m over the bonnet's
+#   front, the nose and the lip's centre (before: +0.02 to +0.35, the lip flat).
+# (A first try bulged the whole flank out 2.5 cm, from the nose to the rear arch, with a crown
+# in y: the door under the overhang moved out more than the shoulder above it and the crease
+# between them went dark; and a crown with level ends in y leaves a concave foot on the side.)
+Warp by=-0.02,0,0 x=0.1,0;0.6,1 y=0.0,2.43;0.215,1;0.4,0.27;0.6,0 z=-1.3,0;-0.95,1
+Warp by=0,0,0.025 x=0,1;0.6,0 z=1.1,0;1.75,1
+Warp by=0,0.017,0 x=0,1;0.6,0 y=0.35,0;0.5,1 z=1.1,0;1.75,1

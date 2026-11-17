@@ -1,6 +1,7 @@
 name: release
 
-# A pushed tag vX.Y.Z[-stage] builds the Linux and Windows packages and creates a GitHub Release.
+# A pushed tag vX.Y.Z[-stage] builds the Linux and Windows packages (the game; the installer and the viewer as
+# their own downloads) and creates a GitHub Release.
 # "Run workflow" (workflow_dispatch) does the same build and checks, keeps the packages as
 # workflow artifacts and creates no Release.
 on:
@@ -47,24 +48,26 @@ jobs:
             echo "VERSION=$ver"
             echo "PKG=motorhead-$tag-${{ matrix.platform }}"
             echo "INSTALLER=motorinstall-$tag-${{ matrix.platform }}"
+            echo "VIEWER=motorview-$tag-${{ matrix.platform }}"
             echo "MOTOR_GIT_HASH=${GITHUB_SHA::7}"
           } >> "$GITHUB_ENV"
 
       - name: Build
-        run: cargo build --release --locked --bin motorhead --bin motorinstall
+        run: cargo build --release --locked --bin motorhead --bin motorinstall --bin motorview
 
       - name: Stage the package (allowlist)
         run: |
           rm -rf "$PKG" && mkdir "$PKG"
-          cp "target/release/motorhead${{ matrix.exe }}" "target/release/motorinstall${{ matrix.exe }}" "$PKG/"
+          cp "target/release/motorhead${{ matrix.exe }}" "$PKG/"
           cp LICENSE "$PKG/"
           cat > "$PKG/README.txt" <<'EOF'
           Motorhead (Rust reimplementation)
 
-          This package contains the programs only: it has NO game data. You need your own copy of
+          This package contains the game program only: it has NO game data. You need your own copy of
           Motorhead (Digital Illusions, 1998).
 
-          1. Run motorinstall (no arguments opens a window) and pick your CD image and a target folder.
+          1. No installed game yet? Download motorinstall-<version>-<platform> from the same Release
+             page, run it (no arguments opens a window) and pick your CD image and a target folder.
           2. Copy motorhead next to motor.exe in that folder and start it there, or start it with the
              folder as its argument: motorhead /path/to/folder
           3. Optional, for the Remaster look: download motorhead-remaster-<version>.zip from the same
@@ -74,6 +77,22 @@ jobs:
           Licence: GNU AGPL-3.0-or-later (LICENSE). The source of this build is the tagged commit of the
           repository this release belongs to.
           EOF
+
+      - name: Stage the standalone tools (separate downloads)
+        run: |
+          # Windows: the bare .exe. Linux: a tar.gz, because an artifact upload drops the executable bit.
+          stage() {  # stage <program> <download name> <env var that receives the file name>
+            if [[ "${{ matrix.archive }}" == tar.gz ]]; then
+              mkdir "$2" && cp "target/release/$1" LICENSE "$2/"
+              tar -czf "$2.tar.gz" "$2"
+              echo "$3=$2.tar.gz" >> "$GITHUB_ENV"
+            else
+              cp "target/release/$1.exe" "$2.exe"
+              echo "$3=$2.exe" >> "$GITHUB_ENV"
+            fi
+          }
+          stage motorinstall "$INSTALLER" INSTALLER_FILE
+          stage motorview "$VIEWER" VIEWER_FILE
 
       - name: Checks (version, file list, size, leaks)
         run: |
@@ -86,29 +105,26 @@ jobs:
             [[ $out == *" ${GITHUB_SHA::7}" ]] || { echo "--version does not end with the commit ${GITHUB_SHA::7}" >&2; exit 1; }
           fi
           # 2. Exactly the allowlisted files: no game data, nothing else.
-          want=$(printf '%s\n' LICENSE README.txt "motorhead${{ matrix.exe }}" "motorinstall${{ matrix.exe }}" | sort)
+          want=$(printf '%s\n' LICENSE README.txt "motorhead${{ matrix.exe }}" | sort)
           have=$(cd "$PKG" && find . -type f | sed 's|^\./||' | sort)
           [[ $want == "$have" ]] || { echo "package content differs from the allowlist:" >&2; echo "$have" >&2; exit 1; }
           # 3. Size: a stray game file or debug build would show here.
           kb=$(du -sk "$PKG" | cut -f1)
           echo "package: $kb KB"
           (( kb < 102400 )) || { echo "package is over 100 MB" >&2; exit 1; }
-          # 4. No build-machine paths in the programs. The source tree is already audited by the export
+          # 4. The tool downloads: present, not empty, and of a sane size (installer 50 MB, viewer 150 MB).
+          for f in "$INSTALLER_FILE:51200" "$VIEWER_FILE:153600"; do
+            file=${f%:*}; max=${f#*:}
+            [[ -s $file ]] || { echo "$file is missing or empty" >&2; exit 1; }
+            kb=$(du -k "$file" | cut -f1)
+            echo "$file: $kb KB"
+            (( kb < max )) || { echo "$file is over $((max / 1024)) MB" >&2; exit 1; }
+          done
+          # 5. No build-machine paths in the programs. The source tree is already audited by the export
           #    script, so only paths of the build environment can add anything (the runner's own are fine).
-          if grep -raPl -- '/home/(?!runner)[a-z]|[A-Za-z]:[\\/]Users[\\/](?!runneradmin)' "$PKG"/motor*; then
+          if grep -raPl -- '/home/(?!runner)[a-z]|[A-Za-z]:[\\/]Users[\\/](?!runneradmin)' \
+              "$PKG/motorhead${{ matrix.exe }}" "target/release/motorinstall${{ matrix.exe }}" "target/release/motorview${{ matrix.exe }}"; then
             echo "user home paths in the programs" >&2; exit 1
-          fi
-
-      - name: Stage the standalone installer (separate download)
-        run: |
-          # Windows: the bare .exe. Linux: a tar.gz, because an artifact upload drops the executable bit.
-          if [[ "${{ matrix.archive }}" == tar.gz ]]; then
-            mkdir "$INSTALLER" && cp "target/release/motorinstall" LICENSE "$INSTALLER/"
-            tar -czf "$INSTALLER.tar.gz" "$INSTALLER"
-            echo "INSTALLER_FILE=$INSTALLER.tar.gz" >> "$GITHUB_ENV"
-          else
-            cp "target/release/motorinstall.exe" "$INSTALLER.exe"
-            echo "INSTALLER_FILE=$INSTALLER.exe" >> "$GITHUB_ENV"
           fi
 
       - name: Archive
@@ -118,21 +134,14 @@ jobs:
           else
             7z a -tzip "$PKG.zip" "$PKG" >/dev/null
           fi
-          ls -l "$PKG.${{ matrix.archive }}" "$INSTALLER_FILE"
-          # The installer download is the same program as the one in the package, and not empty.
-          [[ -s $INSTALLER_FILE ]] || { echo "$INSTALLER_FILE is missing or empty" >&2; exit 1; }
-          if [[ "${{ matrix.archive }}" == zip ]]; then
-            cmp "$INSTALLER_FILE" "$PKG/motorinstall.exe" || { echo "installer differs from the packaged one" >&2; exit 1; }
-          else
-            tar -xzOf "$INSTALLER_FILE" "$INSTALLER/motorinstall" | cmp - "$PKG/motorinstall" \
-              || { echo "installer differs from the packaged one" >&2; exit 1; }
-          fi
+          ls -l "$PKG.${{ matrix.archive }}" "$INSTALLER_FILE" "$VIEWER_FILE"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PKG }}
           path: |
             ${{ env.PKG }}.${{ matrix.archive }}
             ${{ env.INSTALLER_FILE }}
+            ${{ env.VIEWER_FILE }}
           if-no-files-found: error
 
   release:
@@ -173,7 +182,7 @@ jobs:
 
           ${pre}The packages contain the programs only and **no game data**: you need your own copy of Motorhead (\`motorinstall\` builds the install folder from your CD image). \`SHA256SUMS\` lists the checksums.
 
-          Downloads: \`motorhead-$TAG-<platform>\` is the game with the installer; \`motorinstall-$TAG-<platform>\` is the installer alone; \`motorhead-remaster-$TAG.zip\` is the optional Remaster data (unzip it over the install folder; it is added a few minutes after the release is created, with its own \`.sha256\` file).
+          Downloads: \`motorhead-$TAG-<platform>\` is the game; \`motorinstall-$TAG-<platform>\` is the installer (only needed to build the game folder from your CD image); \`motorview-$TAG-<platform>\` is the developer viewer (optional: free camera, tuning pages, screenshots); \`motorhead-remaster-$TAG.zip\` is the optional Remaster data (unzip it over the install folder; it is added a few minutes after the release is created, with its own \`.sha256\` file).
 
           Source: these programs were built from the commit tagged \`$TAG\` in this repository (GNU AGPL-3.0-or-later).
           EOF

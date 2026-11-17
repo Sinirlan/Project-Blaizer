@@ -13,6 +13,15 @@ pub struct Painted {
     prims: Vec<egui::ClippedPrimitive>,
     textures: egui::TexturesDelta,
     ppp: f32,
+    /// when egui wants the next pass (`Duration::MAX` = not until there is input)
+    delay: std::time::Duration,
+}
+
+impl Painted {
+    /// When egui asked for the next pass: zero = at once (an animation), `Duration::MAX` = on input only.
+    pub fn repaint_delay(&self) -> std::time::Duration {
+        self.delay
+    }
 }
 
 pub struct Gui {
@@ -57,7 +66,8 @@ impl Gui {
         let s = self.state.as_mut()?;
         let out = self.ctx.run_ui(s.take_egui_input(window), ui);
         s.handle_platform_output(window, out.platform_output);
-        Some(Painted { prims: self.ctx.tessellate(out.shapes, out.pixels_per_point), textures: out.textures_delta, ppp: out.pixels_per_point })
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map_or(std::time::Duration::MAX, |v| v.repaint_delay);
+        Some(Painted { prims: self.ctx.tessellate(out.shapes, out.pixels_per_point), textures: out.textures_delta, ppp: out.pixels_per_point, delay })
     }
 
     /// Headless pass for a `size` pixel shot. Two passes: the first lays the windows out.
@@ -69,7 +79,25 @@ impl Gui {
         // the first pass's delta holds the font atlas
         let mut textures = first.textures_delta;
         textures.append(out.textures_delta);
-        Painted { prims: self.ctx.tessellate(out.shapes, out.pixels_per_point), textures, ppp: out.pixels_per_point }
+        Painted { prims: self.ctx.tessellate(out.shapes, out.pixels_per_point), textures, ppp: out.pixels_per_point, delay: std::time::Duration::MAX }
+    }
+
+    /// One headless pass at `time` seconds, for a tool that runs several frames without a window (rimshop's
+    /// `RIMSHOP_GUI_SHOT`); paint every pass, since each one's texture delta holds what is new.
+    pub fn run_headless_frame(&mut self, size: (u32, u32), time: f64, ui: impl FnMut(&mut egui::Ui)) -> Painted {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size.0 as f32, size.1 as f32))), time: Some(time), ..Default::default() };
+        let out = self.ctx.run_ui(input, ui);
+        Painted { prims: self.ctx.tessellate(out.shapes, out.pixels_per_point), textures: out.textures_delta, ppp: out.pixels_per_point, delay: std::time::Duration::MAX }
+    }
+
+    /// A texture of the caller's own (an offscreen preview) as an egui image.
+    pub fn register_native_texture(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, filter: wgpu::FilterMode) -> egui::TextureId {
+        self.renderer.register_native_texture(device, view, filter)
+    }
+
+    /// Point a `register_native_texture` id at a new view (the preview target was recreated).
+    pub fn update_native_texture(&mut self, device: &wgpu::Device, view: &wgpu::TextureView, filter: wgpu::FilterMode, id: egui::TextureId) {
+        self.renderer.update_egui_texture_from_wgpu_texture(device, view, filter, id);
     }
 
     /// Draw a pass over `target` (loaded, no depth).

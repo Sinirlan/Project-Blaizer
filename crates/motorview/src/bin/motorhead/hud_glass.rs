@@ -20,17 +20,11 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 pub const CLUSTER_ANCHOR: (f32, f32) = (12.0, 8.0);
 
 /// The fill from which the swoosh counts as at the redline (mockup `Live.rev >= .92`).
-pub const REDLINE: f32 = 0.92;
-/// The redline pulse: the mockup's `redPulse .22s ease-in-out infinite alternate` (a full cycle is 0.44 s)
-/// takes the lit part from opacity 1 down to .55.
-const PULSE_PERIOD: f32 = 0.44;
-const PULSE_DIM: f32 = 0.45;
-/// The tube's half-width against the full meter (mockup `thin: 0.62`).
-const THIN: f32 = 0.62;
+pub const REDLINE: f32 = revmeter::GLASS_REDLINE;
 /// Where KM/H and GEAR sit: design px of speed per digit (mockup `clusterHTML`: `w = digits x 52`).
 const SPEED_DIGIT: f32 = 52.0;
 /// The swoosh's width, design px.
-const SWOOSH_W: f32 = 300.0;
+const SWOOSH_W: f32 = revmeter::GLASS_WIDTH;
 /// The dashed rule closing the group: x, y and length, design px. The mockup's is 360 long; here it ends with
 /// the swoosh (six dashes shorter), the user's tweak after the shots of #323 phase 6.
 const RULE: (f32, f32, f32) = (36.0, 222.0, SWOOSH_W);
@@ -43,7 +37,10 @@ pub fn cluster_size() -> (f32, f32) {
 
 /// What the cluster shows.
 pub struct Cluster<'a> {
+    /// the speed in the player's units (km/h or mph, #501)
     pub kmh: u32,
+    /// its caption: "KM/H" or "MPH"
+    pub unit: &'static str,
     /// "R" or the gear number
     pub gear: &'a str,
     /// rev fill 0..1
@@ -52,7 +49,7 @@ pub struct Cluster<'a> {
     pub clock: f32,
 }
 
-/// `.cl`: bed, speed with KM/H and GEAR, the swoosh, the dashed rule.
+/// `.cl`: bed, speed with KM/H (or MPH) and GEAR, the swoosh, the dashed rule.
 pub fn cluster(b: &mut Batch, d: Glass, c: &Cluster, tune: &RevMeterTune) {
     let red = c.frac >= REDLINE;
     // bed (`.wedge`): a soft dark wash so the text reads over bright sky and grass
@@ -87,7 +84,7 @@ pub fn cluster(b: &mut Batch, d: Glass, c: &Cluster, tune: &RevMeterTune) {
     // are narrower than this, so the caption keeps the mockup's distance)
     let after = d.l(36.0 + SPEED_DIGIT * speed.len() as f32);
     let cap = d.font(HudFont::GlassMed, 13.0, 1.5, hex(G_TEXT, 1.0));
-    b.font_text(HudFont::GlassMed, "KM/H", after + d.d(6.0), d.cap_top(HudFont::GlassMed, 13.0, d.t(82.0), None), &cap);
+    b.font_text(HudFont::GlassMed, c.unit, after + d.d(6.0), d.cap_top(HudFont::GlassMed, 13.0, d.t(82.0), None), &cap);
     let gx = after + d.d(64.0);
     let num = d.font(HudFont::Clock, 36.0, 0.0, WHITE);
     let num_top = d.cap_top(HudFont::Clock, 36.0, d.t(56.0), None);
@@ -105,8 +102,8 @@ pub fn cluster(b: &mut Batch, d: Glass, c: &Cluster, tune: &RevMeterTune) {
 
     // the swoosh (`.rev`): the glass rev meter, longer and thinner; at the redline its lit part pulses
     // and the glass edge turns red
-    let thin = RevMeterTune { thickness: (tune.thickness as f32 * THIN).round() as u32, ..*tune };
-    let rev = if red { RevRed { dim: PULSE_DIM * (0.5 - 0.5 * (TAU * c.clock / PULSE_PERIOD).cos()), rim: 1.0 } } else { RevRed::default() };
+    let thin = revmeter::glass_tune(tune);
+    let rev = if red { revmeter::glass_red(c.clock) } else { RevRed::default() };
     b.rev_meter_sized(d.l(36.0), d.t(112.0), d.d(SWOOSH_W), c.frac, &thin, rev);
     debug_assert!(revmeter::size_for(d.d(SWOOSH_W)).1 > 0.0);
 
@@ -790,6 +787,13 @@ fn msg_sub_h() -> f32 {
     normal_line(HudFont::Glass, 14.0).max(normal_line(HudFont::Clock, 16.0))
 }
 
+/// The messages' box for the layout (#542, a nominal one: the column's width changes with its content): centred, from
+/// the top of the stack down the tallest single message (FINISHED's title over its times).
+pub fn messages_home(d: Glass) -> [f32; 4] {
+    let (w, h) = (d.d(440.0), d.d(msg_title_h() + MSG_SUB_GAP + msg_sub_h()));
+    [d.cw * 0.5 - w * 0.5, d.t(MSG_TOP), w, h]
+}
+
 /// The messages' column, each centred on the canvas (`.cmsg`): Glass 30 / 3 with a 18 px glow in its colour, the
 /// times in Audiowide; orange for BEST LAP, FINAL LAP and FINISHED, white for LAST LAP.
 pub fn messages(b: &mut Batch, d: Glass, msgs: &[Msg]) {
@@ -914,6 +918,12 @@ fn sub(b: &mut Batch, d: Glass, y: f32, pairs: &[(&str, String)]) {
     }
 }
 
+/// WRONG WAY's box for the layout (#542, nominal): the triangle and the text, centred at design y 280.
+pub fn wrong_way_home(d: Glass) -> [f32; 4] {
+    let (w, h) = (d.d(380.0), d.d(44.0));
+    [d.cw * 0.5 - w * 0.5, d.t(280.0), w, h]
+}
+
 /// WRONG WAY (`.msg.warn`): a warning triangle and Glass 40 / 2 in red with a red glow, centred at design y 280.
 /// The 200 ms blink is the caller's.
 pub fn wrong_way(b: &mut Batch, d: Glass) {
@@ -1002,6 +1012,12 @@ impl Mode {
             Mode::Demo => Some(ui_font::icon::VIDEO),
         }
     }
+}
+
+/// The tags' box for the layout (#542, nominal: the width follows how many tags show).
+pub fn mode_tags_home(d: Glass) -> [f32; 4] {
+    let w = d.d(300.0);
+    [d.cw * 0.5 - w * 0.5, d.t(MODE_TOP), w, d.d(MODE_LINE)]
 }
 
 /// The tags, top centre between two hairlines (`.mt`): an icon (REC: a red dot that pulses, `t` = the clock) and the label
@@ -1160,14 +1176,15 @@ fn plate_box(b: &Batch, d: Glass, p: &Plate, style: PlateStyle, sc: f32) -> (Pla
 }
 
 /// The rivals' plates, far to near so a near one lies over a far one; a far plate that a nearer one covers by more
-/// than half is left out. They are drawn first of the HUD, under its groups and messages.
-pub fn plates(b: &mut Batch, d: Glass, style: PlateStyle, mut list: Vec<Plate>) {
+/// than half is left out. They are drawn first of the HUD, under its groups and messages. `scale` is the layout's
+/// (#542; 1.0 = stock).
+pub fn plates(b: &mut Batch, d: Glass, style: PlateStyle, scale: f32, mut list: Vec<Plate>) {
     list.sort_by(|a, c| a.z.total_cmp(&c.z));
     let (cw, ch) = (b.canvas.w, b.canvas.h);
     let mut kept: Vec<(PlateBox, usize, f32, f32, f32, f32)> = Vec::new();
     for (i, p) in list.iter().enumerate() {
         let (sc, op) = plate_fade(p.z);
-        let sc = sc * PLATE_SIZE;
+        let sc = sc * PLATE_SIZE * scale;
         let (bx, pl, nm) = plate_box(b, d, p, style, sc);
         if bx.x + bx.w < 0.0 || bx.x > cw || bx.y + bx.h < 0.0 || bx.y > ch || kept.iter().any(|k| covered(&k.0, &bx)) {
             continue;

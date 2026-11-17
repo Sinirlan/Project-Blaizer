@@ -665,11 +665,12 @@ fn car_lights(ui: &mut Ui, c: &mut CarLightTune) {
 }
 
 fn lamp(ui: &mut Ui, l: &mut LampTune) {
-    let rows: [(&str, &mut f32, f32); 20] = [
+    let rows: [(&str, &mut f32, f32); 21] = [
         ("halo", &mut l.halo, 0.01),
         ("halo night", &mut l.night, 0.01),
         ("glare", &mut l.glare, 0.05),
         ("glare size", &mut l.glare_size, 0.01),
+        ("glare day", &mut l.glare_day, 0.05),
         ("size", &mut l.size, 0.01),
         ("burst size", &mut l.burst_size, 0.01),
         ("burst gain", &mut l.burst_gain, 0.01),
@@ -742,18 +743,18 @@ fn vec3(ui: &mut Ui, name: &str, v: &mut Vec3, speed: f32, orig: Option<Vec3>) -
 /// A collapsible section (`.sect`): glass header with chevron, icon and dashed rule, `reset` adds a reset button at
 /// its right end (true when it was clicked, or the page header's reset was). While the property search has text
 /// every section is open and its rows are filtered.
-pub(crate) fn section(ui: &mut Ui, icon: &str, title: &str, reset: bool, body: impl FnOnce(&mut Ui)) -> bool {
+pub fn section(ui: &mut Ui, icon: &str, title: &str, reset: bool, body: impl FnOnce(&mut Ui)) -> bool {
     section_open(ui, icon, title, reset, true, body)
 }
 
 /// `section` with its first state: `open` false = shut until the user opens it.
-pub(crate) fn section_open(ui: &mut Ui, icon: &str, title: &str, reset: bool, open: bool, body: impl FnOnce(&mut Ui)) -> bool {
+pub fn section_open(ui: &mut Ui, icon: &str, title: &str, reset: bool, open: bool, body: impl FnOnce(&mut Ui)) -> bool {
     section_counted(ui, icon, title, None, reset, open, body)
 }
 
 /// `section_open` with a count after the name (the outliner's piece count).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn section_counted(ui: &mut Ui, icon: &str, title: &str, count: Option<&str>, reset: bool, open: bool, body: impl FnOnce(&mut Ui)) -> bool {
+pub fn section_counted(ui: &mut Ui, icon: &str, title: &str, count: Option<&str>, reset: bool, open: bool, body: impl FnOnce(&mut Ui)) -> bool {
     // a harvest (#436): the title and every row, unseen, whether the section is open or not; no state is touched
     if glass_ui::harvesting() {
         glass_ui::harvest_section(title);

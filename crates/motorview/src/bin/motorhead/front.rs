@@ -21,6 +21,7 @@ use motor_sim::replay::{GhostTrack, Header, LapRecorder, Recording};
 use crate::demo::DemoCars;
 use crate::playback::{self, Playback};
 use motor_sim::AiRow;
+use motorview::race_audio::EngineSound;
 use motorview::drive::{lineup, CamMode, FrameParts, Session};
 use motorview::loading::{Progress, Stage, CANCELLED};
 use motorview::minimap;
@@ -267,6 +268,9 @@ pub enum Screen {
     PauseControls,
     /// REMASTER in-race Camera options (the modern pause menu's tab; GfxEdit with the camera rows)
     PauseCam,
+    /// REMASTER HUD layout editor (#542, `menu_modern/hud_edit.rs`): the race frozen, the Race line HUD's pieces moved,
+    /// scaled and hidden; opened from the HUD tab's Edit layout row
+    HudEdit,
     Credits,
     /// the original's intro movies (movie.rs, #42): `movies.pak` #0, #1, #2 before the main menu
     Intro,
@@ -347,6 +351,16 @@ impl Screen {
         )
     }
 
+    /// The race paused under a menu: the pause menu, its tabs and the HUD layout editor.
+    pub fn race_paused(self) -> bool {
+        matches!(self, Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam | Screen::HudEdit)
+    }
+
+    /// The race on screen, running or paused.
+    pub fn in_race(self) -> bool {
+        self == Screen::Race || self.race_paused()
+    }
+
     /// A screen that plays a movie (movie.rs).
     pub fn is_movie(self) -> bool {
         matches!(self, Screen::Intro | Screen::LeagueMovie)
@@ -369,6 +383,7 @@ impl Screen {
             "pausecontrols" => Screen::PauseControls,
             "pausecam" => Screen::PauseCam,
             "pausegfx" => Screen::PauseGfx,
+            "hudedit" => Screen::HudEdit,
             "credits" => Screen::Credits,
             "intro" => Screen::Intro,
             "leaguemovie" => Screen::LeagueMovie,
@@ -450,8 +465,8 @@ impl Settings {
              Brightness {bright} {bright} {bright}\nInfoDetail {}\nCheckpointInfo {}\nCheckpointDelay {}\nRoadMap {}\n\
              DetailMode {}\nSkidMarks {}\nNamePlates {}\nSkyImage {}\nMotionBlur {}\nLensFlares {}\nSparks {}\nSmoke {}\nTrackDetail {}\nCarDetail {}\nPerspectiveOn {}\nPerspective {}\n\
              GraphicsMode {}\nGraphicsModeSwitch {}\nRemasterCarPaint {}\nRemasterDynamicLights {}\nRemasterRenderAA {}\nRemasterRenderAAStrength {}\nRemasterPostAA {}\nRemasterPostAAStrength {}\nRemasterAnisotropy {}\nRemasterPixelLight {}\nRemasterPixelFog {}\nRemasterFogStyle {}\nRemasterFogStrength {}\nRemasterSkyHDRI {}\nRemasterClearCoat {}\nRemasterSigns {}\nRemasterWorldFill {}\nRemasterTreeModels {}\nRemasterWater {}\nRemasterWaterReflections {}\nRemasterLocalLight {}\nRemasterTexturePack {}\nRemasterGrass {}\nRemasterGrassRange {}\nRemasterColourGrade {}\nRemasterVignette {}\nRemasterGrain {}\nRemasterHDR {}\nRemasterTonemap {}\nRemasterExposure {}\nRemasterBloom {}\nRemasterSSAO {}\nRemasterHalos {}\nRemasterFlares {}\nRemasterShadows {}\nRemasterHud {}\nRemasterMenu {}\nRemasterMotionBlur {}\nRemasterSkidMarks {}\nRemasterCarModels {}\nRemasterCarLodDistance {}\nRemasterLightShadows {}\nRemasterShadowQuality {}\nRemasterRevMeter {}\n\
-             HudCluster {}\nHudClocks {} {} {}\nHudLap {}\nHudPos {}\nHudMap {}\nHudProximity {}\nHudScale {}\nHudMargin {}\nHudMapMode {}\nHudMapRotate {}\nHudMapNumbers {}\nHudPlateFrame {}\nHudLapDelay {}\nHudLiveGaps {}\nHudSectorDelay {}\n\
-             Intro {}\nCDLoop {}\nMenuConfirmation {}\nMenuCDTrack {}\nCameraStart {}\nCameraMirror {}\nCameraFreeLook {}\nCameraPullIn {}\nCameraFollow {}\n{}\
+             HudCluster {}\nHudClocks {} {} {}\nHudLap {}\nHudPos {}\nHudMap {}\nHudProximity {}\nHudScale {}\nHudMargin {}\nHudMapMode {}\nHudMapRotate {}\nHudMapNumbers {}\nHudPlateFrame {}\nHudLapDelay {}\nHudLiveGaps {}\nHudSectorDelay {}\n{}\
+             Intro {}\nCDLoop {}\nMenuConfirmation {}\nUnits {}\nMenuCDTrack {}\nCameraStart {}\nCameraMirror {}\nCameraFreeLook {}\nCameraPullIn {}\nCameraFollow {}\n{}\
              PadStickDeadZone {}\nPadTriggerDeadZone {}\nPadSteerSensitivity {}\nPadVibration {}\n{}{}{}",
             cars.get(self.car).copied().unwrap_or(self.car as u32 + 1),
             // the track's file number (TrackN.trk), not its place in the Division-sorted list
@@ -464,7 +479,7 @@ impl Settings {
             self.vol_sfx,
             self.vol_music,
             self.vol_ambient,
-            if self.engine_sound { "Simulated" } else { "Classic" },
+            self.engine_sound.key(),
             // the id keeps the pick, the name is what the menu shows while the output is not connected
             self.sound_device.as_ref().map_or(String::new(), |d| format!("SoundDevice {}\nSoundDeviceName {}\n", d.id, d.name)),
             b(v.shadows),
@@ -570,9 +585,11 @@ impl Settings {
             self.hud.lap_delay,
             b(self.hud.live_gaps),
             self.hud.sector_delay,
+            self.hud.extra_text(),
             b(self.intro),
             b(self.cd_loop),
             CONFIRMATIONS[self.menu_confirmation],
+            self.units.name(),
             self.menu_cd_track,
             CAM_STARTS[self.cam.start],
             b(self.cam.mirror),
@@ -624,7 +641,7 @@ impl Settings {
                 "sfxvolume" => self.vol_sfx = u(100).unwrap_or(self.vol_sfx),
                 "musicvolume" => self.vol_music = u(100).unwrap_or(self.vol_music),
                 "ambientvolume" => self.vol_ambient = u(100).unwrap_or(self.vol_ambient),
-                "enginesound" => self.engine_sound = v.eq_ignore_ascii_case("simulated"),
+                "enginesound" => self.engine_sound = EngineSound::parse(v).unwrap_or(self.engine_sound),
                 // the rest of the line: ids and names hold spaces and commas (#260)
                 "sounddevice" => {
                     let id = line.trim()[k.len()..].trim();
@@ -699,11 +716,23 @@ impl Settings {
                 "hudplateframe" => self.hud.plate_frame = on.unwrap_or(self.hud.plate_frame),
                 "hudlivegaps" => self.hud.live_gaps = on.unwrap_or(self.hud.live_gaps),
                 "hudsectordelay" => self.hud.sector_delay = u(crate::hud_layout::LAP_DELAY_MAX as i64).unwrap_or(self.hud.sector_delay),
+                // REMASTER (#542): the hide toggles of the other pieces and the player's own placement
+                "hudcountdown" => self.hud.countdown = on.unwrap_or(self.hud.countdown),
+                "hudmessages" => self.hud.messages = on.unwrap_or(self.hud.messages),
+                "hudwrongway" => self.hud.wrong_way = on.unwrap_or(self.hud.wrong_way),
+                "hudmodetags" => self.hud.mode_tags = on.unwrap_or(self.hud.mode_tags),
+                "hudsplits" => self.hud.splits = on.unwrap_or(self.hud.splits),
+                "hudsnap" => self.hud.snap = on.unwrap_or(self.hud.snap),
+                "hudplates" => self.hud.plates = on.unwrap_or(self.hud.plates),
+                "hudplace" => {
+                    self.hud.layout.apply_place(v, &mut it);
+                }
                 "hudlapdelay" => self.hud.lap_delay = u(crate::hud_layout::LAP_DELAY_MAX as i64).unwrap_or(self.hud.lap_delay),
                 "trackdetail" => self.track_detail = pick(v, &TRACK_DETAILS).unwrap_or(self.track_detail),
                 "perspectiveon" => self.perspective_on = pick(v, &PERSPECTIVE_ON).unwrap_or(self.perspective_on),
                 "perspective" => self.perspective = pick(v, &PERSPECTIVES).unwrap_or(self.perspective),
                 "intro" => self.intro = on.unwrap_or(self.intro),
+                "units" => self.units = Units::parse(v).unwrap_or(self.units),
                 "cdloop" => self.cd_loop = on.unwrap_or(self.cd_loop),
                 "menuconfirmation" => self.menu_confirmation = pick(v, &CONFIRMATIONS).unwrap_or(self.menu_confirmation),
                 "camerastart" => self.cam.start = pick(v, &CAM_STARTS).unwrap_or(self.cam.start),
@@ -894,8 +923,9 @@ pub struct Settings {
     pub vol_sfx: u32,
     pub vol_music: u32,
     pub vol_ambient: u32,
-    /// REMASTER: the engine sound baked from engine-sim (engine_sim.rs) instead of the original loops
-    pub engine_sound: bool,
+    /// REMASTER: the player's engine sound. Classic is the only value (the engine-sim Baked / Live engines were
+    /// removed, #493); kept, with no menu row, for the enhanced-samples engine to add its value (#492).
+    pub engine_sound: EngineSound,
     /// the audio output the player picked on the Sound screen (#260); None = the system default
     pub sound_device: Option<motor_audio::OutputDevice>,
     pub view: View,
@@ -955,6 +985,8 @@ pub struct Settings {
     pub name_plates: usize,
     /// Intro: play the intro movies at start-up (our key, the original always plays them: 0x457ecc)
     pub intro: bool,
+    /// Units: Metric (km/h, km) or Imperial (mph, miles) for every speed and distance readout (#501)
+    pub units: Units,
     /// CDLoop: repeat the CD track
     pub cd_loop: bool,
     /// MenuConfirmation: an index into CONFIRMATIONS
@@ -978,6 +1010,81 @@ pub const PLATES: [&str; 3] = ["None", "Flat", "Transparent"];
 pub const DETAIL_MODES: [&str; 5] = ["Low", "Medium", "High", "Max", "Custom"];
 const CUSTOM_DETAIL: usize = 4;
 const CONFIRMATIONS: [&str; 3] = ["Off", "On", "NoExit"];
+/// The `Units` file values, in `Units` order.
+const UNIT_NAMES: [&str; 2] = ["Metric", "Imperial"];
+
+/// The measuring system of the speed and distance readouts: km/h and km, or mph and miles. Patch 3.0 has it as the
+/// "System: Metric (KPH) / Imperial (MPH)" Personal row (0x485740) and the `Tkmh01.TGA` HUD label (0x421cfe);
+/// ours also converts the Remaster readouts and the distances [design choice, #501]. Stored data stays metric.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Units {
+    #[default]
+    Metric,
+    Imperial,
+}
+
+impl Units {
+    pub fn imperial(self) -> bool {
+        self == Units::Imperial
+    }
+    /// A speed given in km/h, in this system.
+    pub fn speed(self, kmh: f32) -> f32 {
+        if self.imperial() { kmh * 0.621_371 } else { kmh }
+    }
+    /// A distance given in metres, in km or miles.
+    pub fn dist(self, m: f64) -> f64 {
+        if self.imperial() { m / 1609.344 } else { m / 1000.0 }
+    }
+    /// Upper case, for the Remaster captions: KM/H or MPH.
+    pub fn speed_cap(self) -> &'static str {
+        if self.imperial() { "MPH" } else { "KM/H" }
+    }
+    /// Lower case, for the Classic text lists: km/h or mph.
+    pub fn speed_unit(self) -> &'static str {
+        if self.imperial() { "mph" } else { "km/h" }
+    }
+    /// A short distance given in metres (a drift, a jump), in metres or yards.
+    pub fn short(self, m: f32) -> f32 {
+        if self.imperial() { m * 1.093_61 } else { m }
+    }
+    /// Upper case: M or YD.
+    pub fn short_cap(self) -> &'static str {
+        if self.imperial() { "YD" } else { "M" }
+    }
+    /// Lower case: m or yd.
+    pub fn short_unit(self) -> &'static str {
+        if self.imperial() { "yd" } else { "m" }
+    }
+    /// A height given in metres (a track's climb), in metres or feet.
+    pub fn height(self, m: f32) -> f32 {
+        if self.imperial() { m * 3.280_84 } else { m }
+    }
+    /// Upper case: M or FT.
+    pub fn height_cap(self) -> &'static str {
+        if self.imperial() { "FT" } else { "M" }
+    }
+    /// Upper case: KM or MI.
+    pub fn dist_cap(self) -> &'static str {
+        if self.imperial() { "MI" } else { "KM" }
+    }
+    /// Lower case: km or mi.
+    pub fn dist_unit(self) -> &'static str {
+        if self.imperial() { "mi" } else { "km" }
+    }
+    pub fn name(self) -> &'static str {
+        UNIT_NAMES[self.imperial() as usize]
+    }
+    fn parse(v: &str) -> Option<Units> {
+        match UNIT_NAMES.iter().position(|n| n.eq_ignore_ascii_case(v))? {
+            0 => Some(Units::Metric),
+            _ => Some(Units::Imperial),
+        }
+    }
+    /// The other system.
+    pub fn flip(self) -> Units {
+        if self.imperial() { Units::Metric } else { Units::Imperial }
+    }
+}
 const TRACK_DETAILS: [&str; 2] = ["Medium", "High"];
 /// The Remaster Carshading row's index (Gouraud, Reflection, Enhanced); Classic's Flat shows as Gouraud
 fn remaster_shading(c: CarShading, enhanced: bool) -> usize {
@@ -1074,7 +1181,7 @@ impl Default for Settings {
             vol_sfx: 80,
             vol_music: 70,
             vol_ambient: 80,
-            engine_sound: false,
+            engine_sound: EngineSound::Classic,
             sound_device: None,
             // Classic by default, to stay faithful (09-remaster 9.7)
             view: View {
@@ -1127,6 +1234,7 @@ impl Default for Settings {
             cam: CamOpts::default(),
             name_plates: 1,
             intro: true,
+            units: Units::Metric,
             cd_loop: true,
             menu_confirmation: 1,
             menu_cd_track: 3,
@@ -1478,6 +1586,18 @@ impl PicFade {
     }
 }
 
+/// REMASTER Car screen (#543): the disc while the garage loads, or the car scanning in (seconds since it appeared).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CarReveal {
+    Wait,
+    Reveal(f32),
+}
+
+/// #543 the modern Car screen's reveal: the scan line's run from the top of the disc to its foot, seconds
+pub(crate) const CAR_REVEAL: f32 = 0.4;
+/// #543 the classic-shaped Car screen: the photo fading out over the 3D car once the garage is up, seconds
+const CAR_PHOTO_FADE: f32 = 0.3;
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Loaded {
     None,
@@ -1504,9 +1624,6 @@ struct LoadPlan {
     /// the AI drivers' records paint their cars (0x47b9c4)
     driver_paint: bool,
     demo: Option<DemoPlan>,
-    /// the audio's car and engine setting (`race_sounds`)
-    car_id: u32,
-    engine_sound: bool,
     /// the name cheats the scene is built with: Hell's / underwater's one brightness (#316, #317), Tron's polygon codes (#320)
     cheat: scene::SceneCheat,
 }
@@ -1585,7 +1702,8 @@ struct LoadJob {
 /// REMASTER loading screen (#90): how long READY and the full bar stay up before the race (s) [design choice]
 const READY_BEAT: f32 = 0.5;
 
-/// The GPU upload's time per frame behind the loading screen (#335).
+/// The GPU upload's time per frame behind the loading screen (#335), and behind the Car screen's scanning disc (#543:
+/// its steps overrun the budget by up to ~8 ms, so the menu frame stays near 16 ms).
 const UPLOAD_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 impl LoadPlan {
@@ -1625,7 +1743,7 @@ impl LoadPlan {
         sess.set_wheels(&sc);
         p.set(Stage::Remaster, 0.9)?;
         let bake = motorview::probes::BakeSource::new(&sc, &sess.race.world);
-        let sounds = crate::audio::race_sounds(&self.root, self.track, &sess.race.world.materials, self.car_id, self.engine_sound, p)?;
+        let sounds = crate::audio::race_sounds(&self.root, self.track, &sess.race.world.materials, p)?;
         p.set(Stage::Grid, 0.0)?;
         let upload = SceneUpload::new(&sc);
         Ok(RaceLoad { sess, sc, demo, bake: Some(bake), upload: Some(upload), sounds: Some(sounds) })
@@ -1870,6 +1988,8 @@ pub(super) enum GfxRow {
     // the race HUD's rows (the pause menu's HUD tab, #300 phase 3)
     HudScale,
     HudMargin,
+    /// REMASTER (#542): opens the HUD layout editor (`Screen::HudEdit`)
+    HudLayout,
     HudCluster,
     HudTotal,
     HudLapTime,
@@ -1889,6 +2009,8 @@ pub(super) enum GfxRow {
     LapDelay,
     /// the live gap to the car ahead and behind in the bottom-left block (Modern HUD, #302)
     LiveGaps,
+    /// Metric / Imperial for every speed and distance readout (#501; Classic has the Personal row)
+    UnitSystem,
     /// the delta against the best lap at each checkpoint and the line (Modern HUD, #409)
     SectorDelta,
 }
@@ -1953,7 +2075,9 @@ impl GfxRow {
     /// (Scale, Margin and Proximity arrows only work in the Modern HUD; the map's rows need the map)
     pub(super) fn active_in(self, s: &Settings) -> bool {
         match self {
-            GfxRow::HudScale | GfxRow::HudMargin | GfxRow::Proximity | GfxRow::LapDelay | GfxRow::LiveGaps | GfxRow::SectorDelta => s.view.modern_hud(),
+            GfxRow::HudScale | GfxRow::HudLayout | GfxRow::Proximity | GfxRow::LapDelay | GfxRow::LiveGaps | GfxRow::SectorDelta => s.view.modern_hud(),
+            // an edited layout places every piece itself (#542)
+            GfxRow::HudMargin => s.view.modern_hud() && !s.hud.layout.custom,
             GfxRow::MapView | GfxRow::MapNumbers => map_row(s) > 0,
             GfxRow::PlateFrame => s.view.modern_hud() && s.name_plates == 2,
             GfxRow::MapTurns => map_row(s) > 0 && s.hud.map_mode == MapMode::Close,
@@ -1961,7 +2085,7 @@ impl GfxRow {
             _ => self.active(&s.view),
         }
     }
-    /// The HUD preview's pieces (`menu_modern::HUD_PIECES` order) that this row changes
+    /// The HUD preview's pieces (`menu_modern::THUMB` order) that this row changes
     pub(super) fn hud_lit(self) -> &'static [usize] {
         use GfxRow::*;
         match self {
@@ -1977,14 +2101,15 @@ impl GfxRow {
             NamePlates | PlateFrame => &[8],
             LapDelay | SectorDelta => &[10],
             CheckpointInfo | CheckpointDelay | LiveGaps => &[9],
-            _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            UnitSystem => &[0],
+            _ => &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
         }
     }
     /// a Remaster-only option: hidden in Classic mode (a Remaster style of an original option, like
     /// the shadows, is a value of that option's row instead)
     pub(super) fn remaster(self) -> bool {
         use GfxRow::*;
-        matches!(self, CamPullIn | CamFollow | DynamicLights | LocalLight | TexturePack | RenderAa | RenderAaStrength | PostAa | PostAaStrength | Anisotropic | PixelLight | PixelFog | ClearCoat | Signs | WorldFill | TreeModels | Water | WaterReflect | Grass | GrassRange | FogStrength | ColourGrade | Vignette | Grain | Hdr | Tonemap | Exposure | Bloom | Ssao | HudStyle | MenuStyle | CarModels | CarLodDistance | LightShadows | ShadowQuality | HudScale | HudMargin | HudCluster | HudTotal | HudLapTime | HudBest | HudLap | HudPos | HudMap | MapView | MapTurns | MapNumbers | Proximity | PlateFrame | LapDelay | LiveGaps | SectorDelta)
+        matches!(self, CamPullIn | CamFollow | DynamicLights | LocalLight | TexturePack | RenderAa | RenderAaStrength | PostAa | PostAaStrength | Anisotropic | PixelLight | PixelFog | ClearCoat | Signs | WorldFill | TreeModels | Water | WaterReflect | Grass | GrassRange | FogStrength | ColourGrade | Vignette | Grain | Hdr | Tonemap | Exposure | Bloom | Ssao | HudStyle | MenuStyle | CarModels | CarLodDistance | LightShadows | ShadowQuality | HudScale | HudMargin | HudLayout | HudCluster | HudTotal | HudLapTime | HudBest | HudLap | HudPos | HudMap | MapView | MapTurns | MapNumbers | Proximity | PlateFrame | LapDelay | LiveGaps | UnitSystem | SectorDelta)
     }
     /// Restore this row to the default: the display rows on the draft `d`, the others live.
     /// Mode and MenuStyle are left: resetting them would drop the user out of the modern menu.
@@ -2034,6 +2159,7 @@ impl GfxRow {
             CamFollow => s.cam.follow = def.cam.follow,
             HudScale => s.hud.scale = def.hud.scale,
             HudMargin => s.hud.margin = def.hud.margin,
+            HudLayout => s.hud.layout = def.hud.layout,
             HudCluster => s.hud.cluster = def.hud.cluster,
             HudTotal => s.hud.clocks[0] = def.hud.clocks[0],
             HudLapTime => s.hud.clocks[1] = def.hud.clocks[1],
@@ -2046,6 +2172,7 @@ impl GfxRow {
             MapNumbers => s.hud.map_numbers = def.hud.map_numbers,
             PlateFrame => s.hud.plate_frame = def.hud.plate_frame,
             LiveGaps => s.hud.live_gaps = def.hud.live_gaps,
+            UnitSystem => s.units = def.units,
             SectorDelta => s.hud.sector_delay = def.hud.sector_delay,
             Proximity => s.hud.proximity = def.hud.proximity,
             Mode | MenuStyle => {}
@@ -2159,7 +2286,8 @@ impl GfxRow {
             CamPullIn => "The chase camera moves closer to the car when a wall is in the way, instead of going through it.",
             CamFollow => "How closely the chase camera follows the car: Loose lags more in corners, Tight stays behind it.",
             HudScale => "The size of the HUD. It shrinks to fit a small window. Modern HUD only.",
-            HudMargin => "The gap between the HUD and the window's edges. Modern HUD only.",
+            HudMargin => "The gap between the HUD and the window's edges. Modern HUD only; not used once the layout is edited.",
+            HudLayout => "Opens the layout editor over the paused race: drag, resize and hide each piece of the HUD with the mouse, the keys or a pad. Done keeps the layout, Cancel puts it back. Modern HUD only.",
             HudCluster => "The speed, the gear and the rev meter. Modern HUD: a big speed over a swoosh that turns red at the redline.",
             HudTotal => "The race clock.",
             HudLapTime => "The clock of the lap in progress.",
@@ -2174,6 +2302,7 @@ impl GfxRow {
             PlateFrame => "The glass frame round each See-through name plate. Off leaves only the colour bar and the name. Modern HUD only.",
             LapDelay => "How long BEST LAP and LAST LAP stay at the top of the screen after each lap. Modern HUD only.",
             SectorDelta => "How long the time difference stays on screen at each checkpoint and on BEST / LAP / LAST LAP, against your best earlier lap of this race: green when you are ahead of it, red when behind. From the second lap on. Off hides it. Modern HUD only.",
+            UnitSystem => "Metric shows km/h and km, Imperial mph and miles, on the speedometer, the replays, the lap analysis, the statistics and the track lengths. Patch 3.0 has the same choice for its speedometer (Metric (KPH) / Imperial (MPH)).",
             LiveGaps => "The gap to the car ahead and the car behind, bottom left, all race, as the Checkpoint splits row says: Nearby = the cars either side of you, All cars = the whole field, Off = none. It replaces the checkpoint list in races (a chime still marks each checkpoint); Time Attack keeps its list. Modern HUD only.",
         }
     }
@@ -2260,8 +2389,8 @@ pub(super) const CAMERA_ROWS: &[GfxRow] = &[GfxRow::CamStart, GfxRow::CamMirror,
 pub(super) const HUD_SECTIONS: [(&str, &[GfxRow]); 4] = {
     use GfxRow::*;
     [
-        ("Look", &[HudStyle, HudScale, HudMargin]),
-        ("On screen", &[InfoDetail, HudCluster, HudTotal, HudLapTime, HudBest, HudLap, HudPos, LapDelay, SectorDelta]),
+        ("Look", &[HudStyle, HudScale, HudMargin, HudLayout]),
+        ("On screen", &[InfoDetail, HudCluster, UnitSystem, HudTotal, HudLapTime, HudBest, HudLap, HudPos, LapDelay, SectorDelta]),
         ("Map", &[HudMap, MapView, MapTurns, MapNumbers]),
         ("Rivals", &[NamePlates, PlateFrame, Proximity, LiveGaps, CheckpointInfo, CheckpointDelay]),
     ]
@@ -2286,8 +2415,9 @@ pub(super) fn gfx_page_rows(screen: Screen, page: usize, v: &View) -> Vec<GfxRow
 const GFX_LIST_ROWS: usize = 15;
 /// Rows of the personal screen, Back included (the Statistics row is the one before Back).
 /// CLASSIC 0x466b70: 0 Name, 1 Team, 2 Colour, 3..=12 Key 0..9, 13 Car colours, 14..=16 Car colour 1..3
-/// (only while Car colours is On); ours after them: 17 Confirmations, 18 Intro movies, 19 Statistics, 20 Back.
-const PERSONAL_ROWS: usize = 21;
+/// (only while Car colours is On); ours after them: 17 Confirmations, 18 Intro movies, 19 System (3.0's row, #501),
+/// 20 Statistics, 21 Back.
+const PERSONAL_ROWS: usize = 22;
 /// The rows the cursor can reach (0x466f44: the car colour rows only with Car colours On).
 /// Rows of the personal screen shown at once (the menu canvas is 400 px tall, 17 px apart from y 96).
 const PERSONAL_SLOTS: usize = 18;
@@ -2334,6 +2464,8 @@ const SOUND_TABLE: usize = 3;
 /// The sound device line (#260): a fifth item drawn above the first, so Up from the sound effects dial reaches it and
 /// Down leaves it (the other items keep their numbers).
 const SOUND_DEVICE: usize = 4;
+/// REMASTER Sound screen, Volume tab: the engine sound row (#494) of `sound_items`
+const SOUND_ENGINE_ROW: usize = 6;
 /// REMASTER Sound screen, Volume tab: the sound device is the eighth row (#260), after the seven of `sound_items`
 pub(super) const SOUND_DEVICE_ROW: usize = 7;
 /// REMASTER Sound screen tabs (#259)
@@ -2545,6 +2677,12 @@ pub struct Game {
     cam_dirty: bool,
     /// REMASTER pause menu: the Restart / Exit hold
     pub pause_hold: Hold,
+    /// REMASTER HUD layout editor (#542) while `Screen::HudEdit` is up
+    pub(super) hud_edit: Option<menu_modern::HudEdit>,
+    /// Shift is held (`main` sets it before each key): the layout editor's 10 px moves and Shift+Tab
+    pub shift: bool,
+    /// The window's size in pixels (`main` keeps it; the layout editor's canvas width for its keys)
+    pub view_size: (u32, u32),
     dial_carry: f32,
     /// the menu sound a Sound screen key asked for, instead of the generic one `key` derives
     ev_override: Option<u32>,
@@ -2599,10 +2737,26 @@ pub struct Game {
     garage_wheels: Vec<([Vec3; 4], f32)>,
     /// REMASTER: the garage scene, kept after its upload so the next visit only uploads it again
     garage_scene: Option<scene::Scene>,
-    /// REMASTER: the garage scene being built on a worker while a screen before the Car screen is open
-    garage_job: Option<mpsc::Receiver<Result<scene::Scene, String>>>,
+    /// REMASTER: the CPU half of `garage_scene`'s first upload, built with it on the worker (#543; later visits build
+    /// it when they upload); dropped unused when a race starts
+    garage_upload: Option<SceneUpload>,
+    /// REMASTER: the garage scene (and its upload) being built on a worker while the menus are open
+    garage_job: Option<mpsc::Receiver<Result<(scene::Scene, SceneUpload), String>>>,
     /// start `garage_job` in the background (the window, not the headless shots)
     pub prefetch: bool,
+    /// the Car screen waits for its garage (built and uploaded at once, as the headless shots need); false in the
+    /// window, where it opens at once and the car materializes once the garage is up (#543)
+    pub garage_wait: bool,
+    /// #543 a screen asked for the garage this frame (`request_garage`); without it an upload in progress is dropped
+    garage_want: bool,
+    /// #543 the garage scene's GPU upload, a slice a frame (`UPLOAD_BUDGET`); the screen's last scene draws meanwhile
+    garage_load: Option<(scene::Scene, SceneLoad)>,
+    /// #543 `clock` when the garage car appeared in the Car screen's disc (its reveal); None: no reveal
+    garage_shown: Option<f32>,
+    /// `--car-reveal`: the Car screen's disc as it scans (`Wait`) or `Reveal(t)` seconds into the reveal
+    pub car_reveal: Option<CarReveal>,
+    /// the Car screen's preview pipelines were built ahead (`Gpu::warm_studio`, #543)
+    studio_warm: bool,
     /// the Car and Track screens' picture
     pic: PicFade,
     menu_drive: Option<MenuDrive>,
@@ -2778,6 +2932,12 @@ fn step_device_choice(cur: Option<usize>, d: i32, n: usize) -> Option<usize> {
     }
 }
 
+/// REMASTER (#494): the engine sound row's Left / Right, one step along `EngineSound::ALL`, no wrap.
+fn step_engine_sound(cur: EngineSound, right: bool) -> EngineSound {
+    let i = EngineSound::ALL.iter().position(|&e| e == cur).unwrap_or(0);
+    EngineSound::ALL[if right { (i + 1).min(EngineSound::ALL.len() - 1) } else { i.saturating_sub(1) }]
+}
+
 fn step_cd_track(cur: u32, tracks: &[u32], d: i32) -> u32 {
     let Some(last) = tracks.len().checked_sub(1) else { return cur };
     let i = tracks.iter().position(|&t| t >= cur).unwrap_or(last);
@@ -2885,7 +3045,8 @@ impl Game {
         let assets = Assets::load(&root);
         let has_movies = motor_data::fs::find_ci(&root, "movies/movies.pak").is_some();
         let menu_fx = crate::menu_fx::MenuFx::load(&root);
-        let mut cars = (1..=10)
+        let mut cars = motor_data::fs::car_ids(&root)
+            .into_iter()
             .filter_map(|id| {
                 let c = motor_data::fs::config(&root, &format!("Game/car{id:02}.car")).ok()?;
                 Some(CarInfo {
@@ -2999,6 +3160,9 @@ impl Game {
             arrows_held: (false, false),
             cam_dirty: false,
             pause_hold: Hold::default(),
+            hud_edit: None,
+            shift: false,
+            view_size: (1280, 720),
             dial_carry: 0.0,
             ev_override: None,
             settings: Settings { laps, layout, ..Settings::default() },
@@ -3029,8 +3193,15 @@ impl Game {
             spot: (Vec3::ZERO, Vec3::NEG_Z),
             garage_wheels: Vec::new(),
             garage_scene: None,
+            garage_upload: None,
             garage_job: None,
+            garage_wait: true,
+            garage_want: false,
+            garage_load: None,
+            garage_shown: None,
+            car_reveal: None,
             prefetch: false,
+            studio_warm: false,
             pic: PicFade::default(),
             menu_drive: None,
             steer: SteerKeys::default(),
@@ -3218,7 +3389,18 @@ impl Game {
         if self.input_seen() {
             return;
         }
-        let modern_pause = matches!(self.screen, Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam) && self.settings.view.modern_menu();
+        // REMASTER (#542 phase 3): the layout editor takes the mouse itself: a left press picks, drags and presses its
+        // controls, the wheel resizes the selected piece (up = bigger), a right press does nothing (a stray click must
+        // not throw the edits away)
+        if self.screen == Screen::HudEdit {
+            match k {
+                KeyCode::Enter => self.hud_edit_press(),
+                KeyCode::ArrowLeft | KeyCode::ArrowRight => self.hud_edit_wheel(k == KeyCode::ArrowLeft),
+                _ => {}
+            }
+            return;
+        }
+        let modern_pause = self.screen.race_paused() && self.settings.view.modern_menu();
         if modern_pause || self.capture.is_some() || self.editing.is_some() || matches!(self.screen, Screen::Race | Screen::Loading) {
             return;
         }
@@ -3408,6 +3590,10 @@ impl Game {
         // (and the modern Personal screen: the parked car behind the cards, #91)
         if s == Screen::Car || (s == Screen::Personal && self.settings.view.modern_menu()) {
             if self.settings.view.mode == RenderMode::Remaster {
+                // #543 a garage still up from the last visit: the car scans in again
+                if s == Screen::Car && self.loaded == Loaded::Garage && !self.garage_wait {
+                    self.garage_shown = Some(self.clock);
+                }
                 self.ensure_garage();
             }
         } else if self.holo_screen() {
@@ -3470,6 +3656,10 @@ impl Game {
         if self.loaded == Loaded::Garage {
             return;
         }
+        if !self.garage_wait {
+            self.request_garage();
+            return;
+        }
         self.collect_garage(true);
         let loaded = match self.garage_scene.take() {
             Some(sc) => Ok(sc),
@@ -3483,6 +3673,8 @@ impl Game {
                 // the AI line start is lifted 0.3 m above the road (scene.rs)
                 self.spot = (sc.start_pos - Vec3::Y * 0.3, sc.start_dir);
                 self.garage_wheels = sc.wheel_hubs.clone();
+                // the worker's upload half on the first visit (#543), else `prepare` builds it
+                self.pending_upload = self.garage_upload.take();
                 self.pending = Some(sc);
                 self.loaded = Loaded::Garage;
             }
@@ -3490,16 +3682,25 @@ impl Game {
         }
     }
 
-    /// REMASTER: build the garage scene on a worker while the player is on a screen that leads to
-    /// the Car screen, so opening it does not stall (the generated car bodies take over a second).
+    /// REMASTER: build the garage scene on a worker while the menus are open (from the intro on, #543), so
+    /// opening the Car screen does not stall (the scene takes seconds: the generated car bodies, the
+    /// texture pack, the tree pack). The worker also builds the upload's CPU half.
     fn prefetch_garage(&mut self) {
-        if self.garage_scene.is_some() || self.garage_job.is_some() || self.loaded == Loaded::Garage {
+        if self.garage_scene.is_some() || self.garage_job.is_some() || self.garage_load.is_some() || self.loaded == Loaded::Garage {
             return;
         }
+        self.start_garage_job();
+    }
+
+    /// Build the garage scene and its upload's CPU half on a worker (`garage_job`).
+    fn start_garage_job(&mut self) {
         let (root, ids) = (self.root.clone(), self.cars.iter().map(|c| c.id).collect::<Vec<u32>>());
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(scene::load(&root, GARAGE_TRACK, &ids, &[]));
+            let _ = tx.send(scene::load(&root, GARAGE_TRACK, &ids, &[]).map(|sc| {
+                let up = SceneUpload::new(&sc);
+                (sc, up)
+            }));
         });
         self.garage_job = Some(rx);
     }
@@ -3509,8 +3710,12 @@ impl Game {
         let Some(rx) = &self.garage_job else { return };
         let got = if wait { rx.recv().map_err(|_| mpsc::TryRecvError::Disconnected) } else { rx.try_recv() };
         match got {
-            Ok(Ok(sc)) => {
+            Ok(Ok((sc, up))) => {
+                // #543 the parked pose is known before the upload: the Car screen's floor stands where the car will
+                self.spot = (sc.start_pos - Vec3::Y * 0.3, sc.start_dir);
+                self.garage_wheels = sc.wheel_hubs.clone();
                 self.garage_scene = Some(sc);
+                self.garage_upload = Some(up);
                 self.garage_job = None;
             }
             Ok(Err(e)) => {
@@ -3522,8 +3727,85 @@ impl Game {
         }
     }
 
+    /// #543 the window's garage, never waited for: the scene comes from its worker (built now if no prefetch ran),
+    /// a kept scene's upload half is built on a worker too, and `step_garage` uploads it over frames. The screen
+    /// shows its waiting state until `loaded` is `Garage`.
+    fn request_garage(&mut self) {
+        self.garage_want = true;
+        if self.garage_load.is_some() {
+            return;
+        }
+        self.collect_garage(false);
+        if self.garage_job.is_some() {
+            return;
+        }
+        match self.garage_scene.take() {
+            Some(sc) if self.garage_upload.is_none() => {
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let up = SceneUpload::new(&sc);
+                    let _ = tx.send(Ok((sc, up)));
+                });
+                self.garage_job = Some(rx);
+            }
+            Some(sc) => self.garage_scene = Some(sc),
+            None => self.start_garage_job(),
+        }
+    }
+
+    /// #543 a slice of the garage's GPU upload while a screen wants it (`garage_want`), swapped in at the end (the car
+    /// then scans in); a screen that no longer wants it drops the upload and keeps the scene for the next visit.
+    fn step_garage(&mut self, gpu: &mut Gpu) {
+        if !self.garage_want {
+            if let Some((sc, _)) = self.garage_load.take() {
+                self.garage_scene = Some(sc);
+            }
+            return;
+        }
+        if self.garage_load.is_none() && self.garage_upload.is_some() {
+            if let (Some(sc), Some(up)) = (self.garage_scene.take(), self.garage_upload.take()) {
+                let l = gpu.begin_load(&sc, up);
+                self.garage_load = Some((sc, l));
+            }
+        }
+        let Some((sc, l)) = &mut self.garage_load else { return };
+        if gpu.load_step(l, sc, Some(UPLOAD_BUDGET)) {
+            if let Some((sc, _)) = self.garage_load.take() {
+                self.spot = (sc.start_pos - Vec3::Y * 0.3, sc.start_dir);
+                self.garage_wheels = sc.wheel_hubs.clone();
+                self.garage_scene = Some(sc);
+            }
+            self.loaded = Loaded::Garage;
+            self.garage_shown = Some(self.clock);
+        }
+    }
+
+    /// REMASTER Car screen (#543): the disc's state: `Wait` until the garage is up, then `Reveal` for `CAR_REVEAL`
+    /// seconds; None once the car shows (and always without the garage, the headless shots). `--car-reveal` wins.
+    pub(crate) fn car_disc(&self) -> Option<CarReveal> {
+        if let Some(r) = self.car_reveal {
+            return match r {
+                CarReveal::Reveal(t) if t >= CAR_REVEAL => None,
+                r => Some(r),
+            };
+        }
+        if self.loaded != Loaded::Garage {
+            return Some(CarReveal::Wait);
+        }
+        let t = self.clock - self.garage_shown?;
+        (t < CAR_REVEAL).then_some(CarReveal::Reveal(t))
+    }
+
     /// Upload whatever scene the current screen needs.
     pub fn prepare(&mut self, gpu: &mut Gpu) {
+        // #543 REMASTER: the Car screen's preview pipelines built with the first menu frame, where the start-up and
+        // the menu hologram's load hide them, not when the Car screen first opens
+        if self.prefetch && !self.studio_warm && self.settings.view.mode == RenderMode::Remaster && matches!(self.screen, Screen::Intro | Screen::Main) {
+            self.studio_warm = true;
+            gpu.warm_studio();
+        }
+        // #543 asked again below by the screens that show the garage
+        self.garage_want = false;
         // the modern Main, Graphics and Controls screens show the car from the first frame
         if self.holo_screen() {
             self.ensure_menu_drive();
@@ -3532,6 +3814,7 @@ impl Game {
         if (self.screen == Screen::Car || (self.screen == Screen::Personal && self.settings.view.modern_menu())) && self.settings.view.mode == RenderMode::Remaster {
             self.ensure_garage();
         }
+        self.step_garage(gpu);
         // #335 the loaded race's scene, a slice a frame behind the loading screen
         if let Some(job) = self.loading.as_mut().filter(|j| !j.uploaded) {
             if let Some(done) = &mut job.done {
@@ -4135,7 +4418,7 @@ impl Game {
         let name_cheat = player.and_then(|_| crate::cheats::NameCheat::of(&self.settings.player_name, &self.settings.team));
         let cheat = scene::SceneCheat { brightness: motor_sim::cheats::brightness(name_cheat), tron: motor_sim::cheats::tron(name_cheat) };
         let demo = ghost_demo.map(|mde| DemoPlan { mde, first_mesh: ids.len(), skip: None, cars: self.car_table(), fallback: car });
-        let plan = LoadPlan { root: self.root.clone(), track: tr.n, ids: ids.clone(), player, row, laps: laps_set, catchup, drivers: drivers.map(|d| d.1), paint, driver_paint: true, demo, car_id: self.cars.get(self.settings.car).map_or(1, |c| c.id), engine_sound: self.settings.engine_sound, cheat };
+        let plan = LoadPlan { root: self.root.clone(), track: tr.n, ids: ids.clone(), player, row, laps: laps_set, catchup, drivers: drivers.map(|d| d.1), paint, driver_paint: true, demo, cheat };
         let fin = Finish::Race(RaceFinish { track_idx, track_n: tr.n, track_name: tr.name.clone(), car, ids, player, human_slot, is_league, row, catchup, rules });
         Ok((plan, fin))
     }
@@ -4712,6 +4995,7 @@ impl Game {
                 v.car_detail as u32,
                 s.perspective_on as u32,
                 s.perspective as u32,
+                s.engine_sound as u32,
             ],
             vec![
                 s.catchup,
@@ -4750,7 +5034,6 @@ impl Game {
                 v.remaster.modern_menu,
                 v.remaster.generated_cars,
                 s.cd_loop,
-                s.engine_sound,
                 s.custom_car_colours,
                 s.hud.cluster,
                 s.hud.clocks[0],
@@ -4800,7 +5083,7 @@ impl Game {
     /// The graphics-mode key (F9) is free: not a task of the control layout in use, and no
     /// binding or text entry is waiting for a key.
     pub fn is_render_mode_key(&self, k: KeyCode) -> bool {
-        k == KeyCode::F9 && self.capture.is_none() && self.editing.is_none() && !self.controls.layout().bind.contains(&Some(Code::Key(k)))
+        k == KeyCode::F9 && self.capture.is_none() && self.editing.is_none() && self.screen != Screen::HudEdit && !self.controls.layout().bind.contains(&Some(Code::Key(k)))
     }
 
     /// Graphic options Apply (`leave` = OK): display changes go to the window and wait for
@@ -5112,7 +5395,7 @@ impl Game {
         let rgb = |v: u32| [(v >> 16) as u8, (v >> 8) as u8, v as u8];
         let paint: Vec<(usize, scene::CarPaint)> = Some(&info).filter(|i| i.colours[..3].iter().any(|&v| v != 0)).map(|i| (0, scene::CarPaint::gloss([rgb(i.colours[0]), rgb(i.colours[1]), rgb(i.colours[2])]))).into_iter().collect();
         let demo = DemoPlan { mde: m, first_mesh: 1, skip: Some(slot), cars: self.car_table(), fallback: own };
-        let plan = LoadPlan { root: self.root.clone(), track: tr.n, ids: vec![pid], player: Some(0), row: AiRow::Difficulty(self.settings.difficulty), laps, catchup, drivers: None, paint, driver_paint: false, demo: Some(demo), car_id: self.cars.get(self.settings.car).map_or(1, |c| c.id), engine_sound: self.settings.engine_sound, cheat: scene::SceneCheat::default() };
+        let plan = LoadPlan { root: self.root.clone(), track: tr.n, ids: vec![pid], player: Some(0), row: AiRow::Difficulty(self.settings.difficulty), laps, catchup, drivers: None, paint, driver_paint: false, demo: Some(demo), cheat: scene::SceneCheat::default() };
         let fin = Finish::Watch(WatchFinish { track_idx: ti, track_name: tr.name.clone(), block, name: info.name.clone(), laps });
         Ok((plan, fin))
     }
@@ -5414,8 +5697,9 @@ impl Game {
         let saved_text = self.settings.to_text(&self.car_ids(), &self.track_ids());
         let in_menu = !matches!(self.screen, Screen::Race | Screen::Loading);
         self.key_inner(k);
-        // save whatever the key changed, so no setting depends on the snapshot lists
-        if self.settings.to_text(&self.car_ids(), &self.track_ids()) != saved_text {
+        // save whatever the key changed, so no setting depends on the snapshot lists; the HUD layout editor saves on
+        // Done only, so Cancel leaves the file as it was (#542)
+        if self.screen != Screen::HudEdit && self.settings.to_text(&self.car_ids(), &self.track_ids()) != saved_text {
             self.save_settings();
         }
         if !in_menu {
@@ -5855,7 +6139,13 @@ impl Game {
             GfxRow::PlateFrame if active => s.hud.plate_frame ^= true,
             GfxRow::Proximity if active => s.hud.proximity ^= true,
             GfxRow::LiveGaps if active => s.hud.live_gaps ^= true,
+            GfxRow::UnitSystem => {
+                let imperial = if enter { !s.units.imperial() } else { !left };
+                s.units = if imperial { Units::Imperial } else { Units::Metric };
+            }
             GfxRow::HudScale | GfxRow::HudMargin | GfxRow::MapView | GfxRow::MapTurns | GfxRow::MapNumbers | GfxRow::PlateFrame | GfxRow::Proximity | GfxRow::LiveGaps => {}
+            // Enter on it opens the editor (`graphics_key_modern`)
+            GfxRow::HudLayout => {}
             GfxRow::ViewDistance | GfxRow::GrassRange | GfxRow::CarLodDistance | GfxRow::FogStrength | GfxRow::ColourGrade | GfxRow::Vignette | GfxRow::Grain | GfxRow::Exposure | GfxRow::Bloom | GfxRow::Ssao => {}
         }
         if row.preset() {
@@ -5887,7 +6177,13 @@ impl Game {
             Self::cycle(&mut self.sel, rows.len(), down);
         } else if left || right || k == KeyCode::Enter || k == KeyCode::NumpadEnter {
             let row = rows[self.sel.min(rows.len() - 1)];
-            self.change_gfx_row(&mut e, row, left, !(left || right));
+            if row != GfxRow::HudLayout {
+                self.change_gfx_row(&mut e, row, left, !(left || right));
+            } else if !(left || right) && row.active_in(&self.settings) {
+                // REMASTER (#542): the HUD layout editor over the frozen race
+                self.gfx = Some(e);
+                return self.hud_edit_open();
+            }
         } else if matches!(k, KeyCode::KeyR | KeyCode::F6) {
             let def = Settings::default();
             for &row in &rows {
@@ -6349,6 +6645,7 @@ impl Game {
                 }
             }
             Screen::PauseCam => self.graphics_key_modern(k),
+            Screen::HudEdit => self.hud_edit_key(k),
             Screen::PauseHud if self.settings.view.modern_menu() => self.graphics_key_modern(k),
             Screen::Graphics | Screen::PauseGfx if self.settings.view.modern_menu() => self.graphics_key_modern(k),
             Screen::Graphics | Screen::PauseGfx => self.graphics_key(up, down, left, right, enter, back),
@@ -6461,7 +6758,8 @@ impl Game {
             Screen::PauseSfx => {
                 // the rows plus "Back" (REMASTER: the tabbed panel has no Back row)
                 let modern = self.settings.view.modern_menu();
-                let n = if modern { 5 } else { 4 }; // modern: SFX, CD volume, CD music, ambient, engine sound
+                // modern: SFX, CD volume, CD music, ambient, engine sound; Classic: SFX, music, ambient, Back
+                let n = if modern { 5 } else { 4 };
                 if up || down {
                     Self::cycle(&mut self.sel, n, down);
                 }
@@ -6476,7 +6774,7 @@ impl Game {
                         2 if modern => s.music ^= true,
                         2 => step(&mut s.vol_ambient),
                         3 if modern => step(&mut s.vol_ambient),
-                        4 if modern => s.engine_sound ^= true,
+                        4 if modern && !enter => s.engine_sound = step_engine_sound(s.engine_sound, right),
                         _ => {}
                     }
                 }
@@ -6490,22 +6788,24 @@ impl Game {
             }
             Screen::Sound if self.settings.view.modern_menu() && self.sound_page == SOUND_SONGS => self.sound_songs_key(up, down, left, right, enter, back),
             Screen::Sound if self.settings.view.modern_menu() => {
-                // REMASTER: the list's eight rows: three volumes, CD music, CD loop, menu CD track, engine sound, sound device (#260)
+                // REMASTER: the list's eight rows: three volumes, CD music, CD loop, menu CD track, engine sound (#494),
+                // sound device (#260)
                 if up || down {
-                    Self::cycle(&mut self.sel, 8, down);
+                    Self::cycle(&mut self.sel, SOUND_DEVICE_ROW + 1, down);
                 }
                 if self.sel == SOUND_DEVICE_ROW && (left || right) {
                     self.step_sound_device(left);
                 }
                 let s = &mut self.settings;
-                let toggle = matches!(self.sel, 3 | 4 | 6);
-                if self.sel != SOUND_DEVICE_ROW && (left || right || (enter && toggle)) {
+                let toggle = matches!(self.sel, 3 | 4);
+                if self.sel == SOUND_ENGINE_ROW && (left || right) {
+                    s.engine_sound = step_engine_sound(s.engine_sound, right);
+                } else if self.sel != SOUND_DEVICE_ROW && (left || right || (enter && toggle)) {
                     let d: i32 = if left { -1 } else { 1 };
                     match self.sel {
                         3 => s.music ^= true,
                         4 => s.cd_loop ^= true,
                         5 => s.menu_cd_track = step_cd_track(s.menu_cd_track, &self.cd_tracks, d),
-                        6 => s.engine_sound ^= true,
                         0 => s.vol_sfx = step_volume(s.vol_sfx, d),
                         1 => s.vol_music = step_volume(s.vol_music, d),
                         _ => s.vol_ambient = step_volume(s.vol_ambient, d),
@@ -6597,13 +6897,15 @@ impl Game {
                         }
                         17 => Self::cycle(&mut s.menu_confirmation, CONFIRMATIONS.len(), right),
                         18 => s.intro ^= true,
-                        19 | 20 => {}
+                        19 => s.units = s.units.flip(),
+                        20 | 21 => {}
                         _ => e = Some(ev::SELECT_ERROR),
                     }
                 } else if enter {
                     match self.sel {
                         17 => Self::cycle(&mut s.menu_confirmation, CONFIRMATIONS.len(), true),
                         18 => s.intro ^= true,
+                        19 => s.units = s.units.flip(),
                         _ => {}
                     }
                 }
@@ -6992,11 +7294,12 @@ impl Game {
             (self.idle_s, self.idle_limit) = (0.0, ATTRACT_IDLE_S);
         }
         let holo = self.holo_screen();
-        if let (true, Loaded::MenuDrive, Some(d)) = (holo, self.loaded, &mut self.menu_drive) {
+        // #543 and behind the Car screen while its garage loads
+        if let (true, Loaded::MenuDrive, Some(d)) = (holo || self.garage_want, self.loaded, &mut self.menu_drive) {
             d.sess.step(dt.min(0.05), Input::default());
             d.pose(dt);
         }
-        if !matches!(self.screen, Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam) {
+        if !self.screen.in_race() {
             self.menu_fx.update(dt);
         }
         // CLASSIC 0x4668ba: the difficulty word rolls one `emh` frame per menu frame towards its value
@@ -7066,10 +7369,18 @@ impl Game {
             }
             _ => {}
         }
-        // REMASTER: the Car screen's garage is built ahead, on the screens that lead to it
+        // REMASTER: the Car screen's garage is built ahead, from the intro on (#543: the build takes seconds, and
+        // the screens just before the Car screen left too little of them), never during a race
         if self.prefetch && self.settings.view.mode == RenderMode::Remaster {
             self.collect_garage(false);
-            if matches!(self.screen, Screen::Single | Screen::Track | Screen::League | Screen::Replays | Screen::Options) {
+            let racing = matches!(
+                self.screen,
+                Screen::Loading | Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam | Screen::HudEdit
+            );
+            if racing {
+                // its upload half is big (mips, hologram edges): the next visit builds it again
+                self.garage_upload = None;
+            } else {
                 self.prefetch_garage();
             }
         }
@@ -7079,6 +7390,9 @@ impl Game {
             for (g, t) in self.gauges.iter_mut().zip(target) {
                 *g += (t - *g) * k;
             }
+        }
+        if self.screen == Screen::HudEdit {
+            self.hud_edit_update(dt, keys);
         }
         if let Some(kd) = &mut self.keep_display {
             kd.left -= dt;
@@ -7283,7 +7597,7 @@ impl Game {
             // the pointer: its press on a control is that control's act, a drag on the bar or diagram a seek (#352)
             let ms = motor_sim::demo::race_ms(&r.sess.race);
             let hits = match self.pointer {
-                Some((_, cw)) => crate::hud_transport::targets(menu_modern::Glass::hud(cw, 1.0), &pb.view(ms), playback::cam_label(r.sess.cam)),
+                Some((_, cw)) => crate::hud_transport::targets(menu_modern::Glass::hud(cw, 1.0), &pb.view(ms, self.settings.units), playback::cam_label(r.sess.cam)),
                 None => Vec::new(),
             };
             let scrub = pb.mouse(&hits, self.pointer.map(|p| p.0), self.controls.mouse_down(0), &mut held);
@@ -7636,6 +7950,7 @@ impl Game {
             Screen::Personal if self.settings.view.modern_menu() => self.personal_modern(size),
             Screen::Personal => vec![self.ui(self.menu_canvas(), |g, b| g.personal_screen(b))],
             Screen::Statistics => vec![self.ui(self.menu_canvas(), |g, b| g.statistics_screen(b))],
+            Screen::HudEdit => self.hud_edit_layers(size),
             Screen::Race | Screen::Pause | Screen::PauseGfx | Screen::PauseSfx | Screen::PauseHud | Screen::PauseControls | Screen::PauseCam => {
                 let Some(r) = &self.race else { return Vec::new() };
                 let mut parts = self.race_parts(r);
@@ -8223,6 +8538,7 @@ impl Game {
         match row {
             GfxRow::HudScale => ("Scale:", slider((h.scale - lo) as f32 / (hi - lo) as f32, format!("{}%", h.scale))),
             GfxRow::HudMargin => ("Margin:", slider(h.margin as f32 / 100.0, format!("{}%", h.margin))),
+            GfxRow::HudLayout => ("Edit layout:", names(&[if h.layout.custom { "Custom" } else { "Stock" }])),
             GfxRow::HudCluster => ("Speed and revs:", sw(h.cluster)),
             GfxRow::HudTotal => ("Total time:", sw(h.clocks[0])),
             GfxRow::HudLapTime => ("Lap time:", sw(h.clocks[1])),
@@ -8236,6 +8552,7 @@ impl Game {
             GfxRow::PlateFrame => ("Plate frame:", sw(h.plate_frame)),
             GfxRow::Proximity => ("Proximity arrows:", sw(h.proximity)),
             GfxRow::LiveGaps => ("Live gaps:", sw(h.live_gaps)),
+            GfxRow::UnitSystem => ("Units:", with(names(&UNIT_NAMES), s.units.imperial() as usize)),
             GfxRow::SectorDelta => {
                 let d = h.sector_delay;
                 ("Sector delta:", slider(d as f32 / crate::hud_layout::LAP_DELAY_MAX as f32, if d == 0 { "Off".into() } else { format!("{d} s") }))
@@ -8654,7 +8971,17 @@ impl Game {
         let (cx, cy, rx, ry) = (CAR_WINDOW.0 + dx, CAR_WINDOW.1 + dy, CAR_WINDOW.2, CAR_WINDOW.3);
         let mut out = Vec::new();
         // REMASTER: the 3D car; CLASSIC (and a garage that did not load) shows the car's photo
-        let garage = self.settings.view.mode == RenderMode::Remaster && self.loaded == Loaded::Garage;
+        let mut garage = self.settings.view.mode == RenderMode::Remaster && self.loaded == Loaded::Garage;
+        // #543 the photo stays until the garage is up, then fades out over the 3D car (`--car-reveal` in shots)
+        let since = match self.car_reveal {
+            Some(CarReveal::Wait) => {
+                garage = false;
+                None
+            }
+            Some(CarReveal::Reveal(t)) => Some(t),
+            None => self.garage_shown.map(|at| self.clock - at),
+        };
+        let photo = if garage { since.map_or(0.0, |t| (1.0 - t / CAR_PHOTO_FADE).clamp(0.0, 1.0)) } else { 1.0 };
         if garage {
             // circle the selected car parked on the garage track, close in like the original
             let (spot, dir) = self.spot;
@@ -8683,11 +9010,14 @@ impl Game {
             }
             // CLASSIC 0x46d551: the car's photo (`_menuimg.TGA`, 324 x 270), centred at slot 0x1e of
             // set 3 and faded by `PicFade`, inside the ring
-            if let Some(car) = g.cars.get(g.pic.shown).filter(|_| !garage) {
+            if let Some(car) = g.cars.get(g.pic.shown).filter(|_| photo > 0.0) {
                 let (px, py) = (g.sp().x(CAR_SET, 0x1e) as f32, g.sp().y(CAR_SET, 0x1e) as f32);
                 b.clip_ellipse(cx, cy, rx, ry);
                 // a browsed-but-locked car is drawn at 30 % (0x46d03d)
-                let tint = if g.car_locked() { g.pic.tint_dim(0.3) } else { g.pic.tint() };
+                let mut tint = if g.car_locked() { g.pic.tint_dim(0.3) } else { g.pic.tint() };
+                if photo < 1.0 {
+                    tint[3] *= photo;
+                }
                 b.image_scaled(&format!("car:{}", car.id), px - CAR_PHOTO.0 / 2.0, py - CAR_PHOTO.1 / 2.0, CAR_PHOTO.0, CAR_PHOTO.1, tint);
                 b.clip_none();
             }
@@ -8997,7 +9327,9 @@ impl Game {
                 // the HUD rows (info detail, checkpoints, road map) are in the graphic options' HUD page
                 17 => line(b, vx_own, "Confirmations:", &CONFIRMATIONS, s.menu_confirmation),
                 18 => line(b, vx_own, "Intro movies:", &["Off", "On"], s.intro as usize),
-                19 => line(b, vx_own, "Statistics:", &["Open"], usize::MAX),
+                // 3.0's wording (0x485740, 0x485867)
+                19 => line(b, vx_own, "System:", &["Metric (KPH)", "Imperial (MPH)"], s.units.imperial() as usize),
+                20 => line(b, vx_own, "Statistics:", &["Open"], usize::MAX),
                 _ => {
                     if self.sel == row {
                         let w = b.fnt_width("Back", 1.0);
@@ -9034,7 +9366,8 @@ impl Game {
         menu_label(b, "Statistics:", 54.0, 78.0, MenuRow { sel: true, on: true });
         menu_choices(b, &STATS_PAGES, self.stats_page, 180.0, 78.0, MenuRow { sel: true, on: true });
         let pct = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{:.0} %", v * 100.0));
-        let km = |m: f64| format!("{:.1} km", m / 1000.0);
+        let u = self.settings.units;
+        let km = |m: f64| format!("{:.1} {}", u.dist(m), u.dist_unit());
         let lap = |ms: u32| fmt_rank_time(ms);
         let car_name = |id: u32| self.cars.iter().find(|c| c.id == id).map_or(format!("#{id}"), |c| c.name.clone());
         let rows: Vec<(&str, String)> = match self.stats_page {
@@ -9047,7 +9380,7 @@ impl Game {
                 ("Play time:", fmt_hms(st.play_s)),
                 ("Favourite:", st.favourite().map_or("-".into(), |(n, t)| format!("{n} ({}x)", t.plays))),
                 ("Fastest lap:", st.fastest().map_or("-".into(), |(ms, n, c)| format!("{} {n}, {}", lap(ms), car_name(c)))),
-                ("Top speed:", st.top_speed.as_ref().map_or("-".into(), |t| format!("{:.0} km/h {}, {}", t.kmh, t.track, car_name(t.car)))),
+                ("Top speed:", st.top_speed.as_ref().map_or("-".into(), |t| format!("{:.0} {} {}, {}", u.speed(t.kmh), u.speed_unit(), t.track, car_name(t.car)))),
             ],
             1 => vec![
                 ("Distance:", km(st.total.distance_m)),
@@ -9055,7 +9388,7 @@ impl Game {
                 ("Car collisions:", st.total.car_hits.to_string()),
                 ("Wall collisions:", st.total.wall_hits.to_string()),
                 ("Drift distance:", km(st.total.drift_m)),
-                ("Longest drift:", format!("{:.0} m", st.longest_drift_m)),
+                ("Longest drift:", format!("{:.0} {}", u.short(st.longest_drift_m), u.short_unit())),
                 ("Air time:", format!("{:.1} s", st.total.air_s)),
                 ("Jumps:", st.total.jumps.to_string()),
                 ("Longest jump:", format!("{:.2} s", st.longest_jump_s)),
@@ -9798,7 +10131,7 @@ mod tests {
             vol_sfx: 35,
             vol_music: 60,
             vol_ambient: 5,
-            engine_sound: true,
+            engine_sound: EngineSound::Classic,
             sound_device: Some(motor_audio::OutputDevice { id: "alsa:sysdefault:CARD=PCH".into(), name: "HDA Intel PCH, ALC3246 Analog".into() }),
             view: View {
                 brightness: 1.4,
@@ -9860,9 +10193,10 @@ mod tests {
             cd_loop: false,
             menu_confirmation: 2,
             intro: false,
+            units: Units::Imperial,
             menu_cd_track: 5,
             track_cd: BTreeMap::from([(3, 7)]),
-            hud: HudSettings { cluster: false, clocks: [true, false, true], lap: false, pos: true, map: false, proximity: false, scale: 150, margin: 40, map_mode: MapMode::Close, map_rotate: true, map_numbers: false, plate_frame: false, lap_delay: 7, live_gaps: true, sector_delay: 9 },
+            hud: HudSettings { cluster: false, clocks: [true, false, true], lap: false, pos: true, map: false, proximity: false, scale: 150, margin: 40, map_mode: MapMode::Close, map_rotate: true, map_numbers: false, plate_frame: false, lap_delay: 7, live_gaps: true, sector_delay: 9, ..HudSettings::default() },
         }
     }
 
@@ -9893,6 +10227,28 @@ mod tests {
         assert_eq!(b.sound_device, a.sound_device);
         b.apply("SoundDevice default\n", &IDS, &TRACK_IDS, 30);
         assert_eq!(b.sound_device, None);
+    }
+
+    /// The removed engine-sim engine sounds in an old settings.cfg start the game on Classic, and their fidelity key is ignored (#493).
+    #[test]
+    fn removed_engine_sounds_read_as_classic() {
+        for v in ["Live", "Simulated", "baked", "Classic"] {
+            let mut s = Settings::default();
+            s.apply(&format!("EngineSound {v}\nEngineFidelity 3\nSFXVolume 42\n"), &IDS, &TRACK_IDS, 30);
+            assert_eq!(s.engine_sound, EngineSound::Classic, "{v}");
+            assert_eq!(s.vol_sfx, 42, "the lines after the old keys still apply");
+            assert!(s.to_text(&IDS, &TRACK_IDS).contains("EngineSound Classic\n"));
+            assert!(!s.to_text(&IDS, &TRACK_IDS).contains("EngineFidelity"));
+        }
+    }
+
+    /// Left / Right on the Engine sound row (#494): no wrap.
+    #[test]
+    fn engine_sound_row_steps_and_clamps() {
+        assert_eq!(step_engine_sound(EngineSound::Classic, true), EngineSound::Enhanced);
+        assert_eq!(step_engine_sound(EngineSound::Enhanced, true), EngineSound::Enhanced);
+        assert_eq!(step_engine_sound(EngineSound::Enhanced, false), EngineSound::Classic);
+        assert_eq!(step_engine_sound(EngineSound::Classic, false), EngineSound::Classic);
     }
 
     /// Left / Right on the Sound device row: no wrap, and a pick that is not connected is left only to the right.
@@ -9989,6 +10345,62 @@ mod tests {
         let mut c = Settings::default();
         c.apply(&old, &IDS, &TRACK_IDS, 30);
         assert_eq!(c.hud.lap_delay, crate::hud_layout::LAP_DELAY_DEFAULT);
+    }
+
+    /// "Units" (#501) round-trips through the file; an old file without the key reads Metric, a bad value keeps the old one.
+    #[test]
+    fn units_setting_round_trips() {
+        assert_eq!(Settings::default().units, Units::Metric);
+        let a = settings();
+        assert_eq!(a.units, Units::Imperial);
+        let mut b = Settings::default();
+        b.apply(&a.to_text(&IDS, &TRACK_IDS), &IDS, &TRACK_IDS, 30);
+        assert_eq!(b.units, Units::Imperial);
+        b.apply("Units sideways\n", &IDS, &TRACK_IDS, 30);
+        assert_eq!(b.units, Units::Imperial);
+        let old: String = a.to_text(&IDS, &TRACK_IDS).lines().filter(|l| !l.starts_with("Units")).collect::<Vec<_>>().join("\n");
+        let mut c = Settings::default();
+        c.apply(&old, &IDS, &TRACK_IDS, 30);
+        assert_eq!(c.units, Units::Metric);
+    }
+
+    /// The conversions the readouts use.
+    #[test]
+    fn unit_conversions() {
+        assert_eq!(Units::Metric.speed(100.0), 100.0);
+        assert!((Units::Imperial.speed(100.0) - 62.1371).abs() < 1e-3);
+        assert_eq!(Units::Metric.dist(1500.0), 1.5);
+        assert!((Units::Imperial.dist(1609.344) - 1.0).abs() < 1e-9);
+        assert_eq!((Units::Imperial.speed_cap(), Units::Imperial.dist_cap()), ("MPH", "MI"));
+        assert_eq!((Units::Metric.speed_cap(), Units::Metric.dist_cap()), ("KM/H", "KM"));
+    }
+
+    /// The Race line layout (#542): a stock layout writes no `HudPlace` line, a custom one round-trips, and an old
+    /// file (no `HudPlace`, no new toggles) loads as the stock layout with every piece shown.
+    #[test]
+    fn hud_layout_round_trips() {
+        use crate::hud_layout::{Anchor, ElemLayout, HudElem};
+        let mut a = settings();
+        assert!(!a.to_text(&IDS, &TRACK_IDS).contains("HudPlace"));
+        a.hud.splits = false;
+        a.hud.layout.elems[HudElem::Stack as usize] = ElemLayout { anchor: Anchor::BottomRight, off: (-40, -120), scale: 80 };
+        a.hud.layout.custom = true;
+        let text = a.to_text(&IDS, &TRACK_IDS);
+        assert_eq!(text.matches("HudPlace ").count(), 10);
+        let mut b = Settings::default();
+        b.apply(&text, &IDS, &TRACK_IDS, 30);
+        assert_eq!(b.hud.layout, a.hud.layout);
+        assert!(!b.hud.splits && b.hud.countdown && b.hud.messages && b.hud.wrong_way && b.hud.mode_tags && b.hud.plates && b.hud.snap);
+        // the editor's Snap switch (#542 phase 3) round-trips; an old file keeps it on
+        a.hud.snap = false;
+        let mut d = Settings::default();
+        d.apply(&a.to_text(&IDS, &TRACK_IDS), &IDS, &TRACK_IDS, 30);
+        assert!(!d.hud.snap);
+        let old: String = text.lines().filter(|l| !l.starts_with("HudPlace") && !l.starts_with("HudSplits") && !l.starts_with("HudSnap")).collect::<Vec<_>>().join("\n");
+        let mut c = Settings::default();
+        c.apply(&old, &IDS, &TRACK_IDS, 30);
+        assert_eq!(c.hud.layout, crate::hud_layout::HudLayout::stock());
+        assert!(!c.hud.layout.custom && c.hud.splits);
     }
 
     /// "Live gaps" (#302) round-trips through the file; an old file without the key has it off.

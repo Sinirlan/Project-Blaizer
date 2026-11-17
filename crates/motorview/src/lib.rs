@@ -7,7 +7,6 @@ pub mod cine_edit;
 pub mod consts;
 pub mod debug;
 pub mod drive;
-pub mod engine_sim;
 pub mod world_edit;
 pub mod fill_gizmo;
 pub mod fog;
@@ -42,6 +41,7 @@ pub mod ui_font;
 pub mod ui_sdf;
 pub mod ui_vector;
 pub mod view_settings;
+pub mod view_sound;
 pub mod wire;
 pub mod volfog;
 

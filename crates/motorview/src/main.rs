@@ -71,7 +71,7 @@ mod status;
 mod transport;
 
 const USAGE: &str = "usage: motorview [installed_game] [--track N] [--car NN] [--free [--drive-free]] [--difficulty easy|medium|hard|beginner] \
-                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--sim-toast running|paused] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--cam-pose X,Y,Z,M0..M8[,ZOOM]] [--lineup N,N,..] [--car-states FILE] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--sky-lines N] [--sky-stretch] [--confirm-exit [unsaved|changes|both]] [--confirm-switch track|car] [--confirm-cine close|new|open|exit] [--confirm-world] [--solid-ui] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts,halos] [--racing-line] [--limited-distance|--unlimited-distance|--view-distance PERCENT] [--flashlight] [--car-sheet sheet.png] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|render|remaster|debug|world|ghost|cine|help] [--ribbon-flyout GROUP] [--ribbon-pick car|track|NAME]] [--tune-search TEXT] [--command [TEXT]] [--tune-set KEY=VALUE,... (mass, acc-force, gear-2-top, centre-of-mass-y, chase-eye-y, max-lag, gravity)] [--changes] [--wgsl NAME=VALUE]... [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--trees on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
+                     [--shot out.png [--view chase|side|near|hood|quarter|top] [--cam chase|far|incar|bumper] [--sim-seconds S [--seek S]] [--sim-toast running|paused] [--replay FILE.mhr] [--size WxH] [--eye X,Y,Z --at X,Y,Z] [--cam-pose X,Y,Z,M0..M8[,ZOOM]] [--lineup N,N,..] [--car-states FILE] [--overlay] [--wireframe [lines|solid|check]] [--backdrop R,G,B] [--sky-lines N] [--sky-stretch] [--confirm-exit [unsaved|changes|both]] [--confirm-switch track|car] [--confirm-cine close|new|open|exit] [--confirm-world] [--solid-ui] [--debug car,all,track,col,bounds,lights,probes] [--debug-view normals|uv|texture|lighting|depth|lampshadow] [--hide world,sky,props,bodies,wheels,sprites,skids,shadows,blades,shafts,halos] [--racing-line] [--limited-distance|--unlimited-distance|--view-distance PERCENT] [--flashlight] [--car-sheet sheet.png] [--ortho-views DIR [--ortho-scale PX_PER_M] [--ortho-frame M] [--ortho-sides front,rear,..]] [--env-cube cube.png] [--paint R,G,B/R,G,B/R,G,B [--car-finish gloss|metallic|pearl[,F,F]]] [--swap-mesh] [--no-settings] [--cars-dir DIR] [--classic] [--inspect] [--ghost FILE.ghl|.mhr [--ghost-sync lap|loop] [--ghost-window] [--ghost-follow ghost|SLOT] [--ghost-shot out.png [--ghost-cam chase|far|incar|bumper|tv]]] [--tune [car|camera|fog|sky|lamps|carlights|world|ghost|cine|sim]] [--menu [view|sim|render|remaster|debug|world|ghost|cine|help] [--ribbon-flyout GROUP] [--ribbon-pick car|track|NAME]] [--tune-search TEXT] [--command [TEXT]] [--tune-set KEY=VALUE,... (mass, acc-force, gear-2-top, centre-of-mass-y, chase-eye-y, max-lag, gravity)] [--changes] [--wgsl NAME=VALUE]... [--browse textures|props|cars[:N]] [--panel] [--focus N] [--dump] [--car-shading flat|gouraud|reflection] [--car-detail low|medium|high] [--remaster [--no-enhanced-paint] [--no-dynamic-lights] [--no-msaa] [--no-hdr] [--grass off|short|full|ultra] [--grass-range P] [--car-lod-distance P] [--fog-strength P] [--fog-tune key=value,...] [--shadows classic|real] [--skids off|on|detailed] [--water on|off] [--trees on|off] [--water-reflect sky|scene] [--local-light on|off [--local-tune OCCLUSION,BOUNCE]] [--texture-pack on|off] [--colour-grade] [--brake-preview 0..1]]] \
                      [--cine FILE.cine [--export-tv | --render out.mp4 [--from S] [--to S] [--fps N] [--codec h264|hevc|nvenc|png] [--no-audio] | --shot out.png --at-time S | --cine-edit [--shot out.png [--at-time S] [--cine-preview air|selected] [--cine-sel N] [--cine-gizmo move|rotate]]] [--size WxH] [--classic|--remaster ...]] \
                      [--fill-auto [--seed S] [--force]] [--probes-stats [--track N|all]] [--export-body N OUT.obj [--cars-dir DIR]] [--export-blueprint N OUT.glb [--cars-dir DIR]] [--check-model N [--cars-dir DIR]] [--car-source imported|generated|original] [--world-edit [--world-gizmo move|rotate[:N]] [--world-holes off|on] [--world-select N|none] [--paused] [--world-tool KIND] [--world-stamp N] [--world-water N] [--world-grass N] [--world-capture X Z]]";
 
@@ -87,6 +87,16 @@ struct Args {
     shot: Option<PathBuf>,
     /// the focus car from four sides in one image (2 x 2 tiles of `size`), for a body recipe check
     car_sheet: Option<PathBuf>,
+    /// #513 `--ortho-views DIR`: the focus car alone, orthographic from six sides, into DIR (`ortho_views`)
+    ortho_views: Option<PathBuf>,
+    /// `--ortho-scale`: pixels per metre of the ortho views
+    ortho_scale: f32,
+    /// `--ortho-frame`: the side of the ortho views' square frame, metres
+    ortho_frame: f32,
+    /// `--ortho-sides`: the ortho views to render (empty = all six); one process per few views keeps 8K frames inside the video memory
+    ortho_sides: Vec<String>,
+    /// `--sim-seconds` was given (the ortho views settle the car `ORTHO_SETTLE` seconds otherwise)
+    sim_set: bool,
     /// DEBUG the Enhanced paint's env cube after the shot, six faces as a vertical strip (#196)
     env_cube: Option<PathBuf>,
     /// CustomCarColours CarColour1..3 for the followed car (shots); Swap mesh on from the start
@@ -234,6 +244,8 @@ struct Args {
     no_audio: bool,
     /// the game's saved sound output (settings.cfg `SoundDevice`), for the Cine editor's live sound (#349)
     sound_device: Option<String>,
+    /// the game's volumes, engine sound and song table, for the speaker button's Sound / Music (#495)
+    sound_prefs: motorview::view_settings::SoundPrefs,
     at_time: Option<f32>,
     /// `--size` was given (else the cine file's `Output Size` applies)
     size_set: bool,
@@ -277,6 +289,11 @@ fn parse_args() -> Result<Args, String> {
         drive_free: false,
         shot: None,
         car_sheet: None,
+        ortho_views: None,
+        ortho_scale: 256.0,
+        ortho_frame: 6.0,
+        ortho_sides: Vec::new(),
+        sim_set: false,
         env_cube: None,
         paint: None,
         car_finish: [scene::Finish::Gloss; 3],
@@ -355,6 +372,7 @@ fn parse_args() -> Result<Args, String> {
         codec: motorview::cine_render::Codec::H264,
         no_audio: false,
         sound_device: loaded.as_ref().and_then(|l| l.sound_device.clone()),
+        sound_prefs: loaded.as_ref().map(|l| l.sound.clone()).unwrap_or_default(),
         at_time: None,
         cine_edit: false,
         export_tv: false,
@@ -647,6 +665,15 @@ fn parse_args() -> Result<Args, String> {
             }
             "--shot" => a.shot = Some(val("--shot")?.into()),
             "--car-sheet" => a.car_sheet = Some(val("--car-sheet")?.into()),
+            "--ortho-views" => a.ortho_views = Some(val("--ortho-views")?.into()),
+            "--ortho-scale" => a.ortho_scale = val("--ortho-scale")?.parse().ok().filter(|&k: &f32| k >= 1.0).ok_or("bad --ortho-scale (pixels per metre, 1 or more)")?,
+            "--ortho-sides" => {
+                a.ortho_sides = val("--ortho-sides")?.split(',').map(str::to_string).collect();
+                if let Some(bad) = a.ortho_sides.iter().find(|s| !ORTHO_SIDES.iter().any(|o| o.0 == s.as_str())) {
+                    return Err(format!("bad --ortho-sides {bad:?} (front, rear, left, right, top, bottom)"));
+                }
+            }
+            "--ortho-frame" => a.ortho_frame = val("--ortho-frame")?.parse().ok().filter(|&m: &f32| m > 0.1).ok_or("bad --ortho-frame (metres)")?,
             "--env-cube" => a.env_cube = Some(val("--env-cube")?.into()),
             "--paint" => {
                 let v = val("--paint")?;
@@ -694,14 +721,17 @@ fn parse_args() -> Result<Args, String> {
             }
             "--lineup" => {
                 let v: Vec<u32> = val(&x)?.split(',').map(|c| c.trim().parse()).collect::<Result<_, _>>().map_err(|_| "bad --lineup N,N,..")?;
-                if v.is_empty() || v.iter().any(|&c| !(1..=10).contains(&c)) {
-                    return Err("--lineup: car numbers 1..10".into());
+                if v.is_empty() || v.iter().any(|&c| !(1..=99).contains(&c)) {
+                    return Err("--lineup: car numbers 1..99".into());
                 }
                 a.lineup = Some(v);
             }
             "--car-states" => a.car_states = Some(val(&x)?.into()),
             "--sim-toast" => a.sim_toast = Some(match val("--sim-toast")?.as_str() { "paused" => true, "running" => false, _ => return Err("--sim-toast: paused or running".into()) }),
-            "--sim-seconds" => a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?,
+            "--sim-seconds" => {
+                a.sim_seconds = val("--sim-seconds")?.parse().map_err(|_| "bad --sim-seconds")?;
+                a.sim_set = true;
+            }
             "--replay" => a.replay = Some(val("--replay")?.into()),
             "--seek" => a.seek = Some(val("--seek")?.parse().map_err(|_| "bad --seek")?),
             "--size" => {
@@ -739,6 +769,10 @@ fn parse_args() -> Result<Args, String> {
         let (f, warnings) = motorview::fog::from_text(&t.replace(',', "\n").replace('=', " "), motorview::fog::load(&a.root, a.track));
         warnings.iter().for_each(|w| eprintln!("--fog-tune: {w}"));
         a.remaster.fog_tune = Some(f);
+    }
+    // the ortho views show the car settled on its wheels (frame 0 has them hanging)
+    if a.ortho_views.is_some() && !a.sim_set {
+        a.sim_seconds = ORTHO_SETTLE;
     }
     // the command search is drawn over the toolbar
     if a.command.is_some() && a.menu.is_none() {
@@ -1143,6 +1177,11 @@ enum Act {
     Car,
     MenuBar,
     Transport,
+    /// the top bar's speaker button: the viewer's race sound / the track's music on or off (#495)
+    Sound,
+    Music,
+    /// the speaker button's engine sound: Classic <-> Enhanced
+    Engine,
     /// View > Show > Solid: opaque panels, no scene frost (#395)
     SolidUi,
     /// ghost view window open / closed, next camera, camera `PoseCam::MODES[i]`, clear the ghost
@@ -1165,6 +1204,8 @@ enum Act {
     ReloadCars,
     /// REMASTER (#292): the followed car's generated body to `Exports/carNN.obj`
     ExportBody,
+    /// REMASTER (#540): the followed car as a model-file blueprint to `Exports/carNN.glb`
+    ExportBlueprint,
     /// the followed car drawn with the other model, original <-> generated
     SwapMesh,
     /// Cine editor (#152): a static camera / a path key at the free camera, the preview's next mode, a shot of the
@@ -1251,6 +1292,9 @@ impl Bind {
             Act::Car => "car",
             Act::MenuBar => "toolbar",
             Act::Transport => "transport bar",
+            Act::Sound => "race sound",
+            Act::Music => "track music",
+            Act::Engine => "engine sound",
             Act::SolidUi => "solid panels",
             Act::GhostWindow => "ghost view window",
             Act::GhostCam => "ghost view: next camera",
@@ -1274,6 +1318,7 @@ impl Bind {
             Act::WorldToggle => "world editor",
             Act::ReloadCars => "reload car recipes",
             Act::ExportBody => "export car body (.obj)",
+            Act::ExportBlueprint => "export car blueprint (.glb)",
             Act::SwapMesh => "swap mesh (original / generated)",
             Act::WorldNew => "new world piece",
             Act::World(c) => match c {
@@ -1616,6 +1661,9 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         }
         if a.dump {
             println!("{}", debug::car_panel(ss, ss.focus).join("\n"));
+            // DEBUG (#531): how far each tyre of the focus car, as drawn in the shot's mode, is above (+) or in (-) the road
+            let gaps = ss.tyre_gaps(&s, ss.focus, a.view().generated_cars());
+            println!("tyre gap cm  {}", ["FL", "FR", "BR", "BL"].iter().zip(gaps).map(|(n, g)| g.map_or(format!("{n}   -"), |g| format!("{n} {:+.1}", g * 100.0))).collect::<Vec<_>>().join("  "));
             println!("{}", debug::racers_panel(ss).join("\n"));
             // where the marks are (game coordinates, view z negated): aim --eye/--at here
             let marks = ss.skid_marks(true);
@@ -1826,7 +1874,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
                         eprintln!("--ribbon-flyout: no group {name} on the {} tab", tab.name());
                     }
                 }
-                let mut m = Ribbon { st: &mut st, tune: &mut tune, shown: tview.mode, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, solid_ui: a.solid_ui, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
+                let mut m = Ribbon { st: &mut st, tune: &mut tune, shown: tview.mode, view: &mut tview, dbg: &mut dbg, sess: sess.as_mut(), free: false, drive_free: a.drive_free, overlay: a.overlay, cross: true, solid_ui: a.solid_ui, wireframe: &mut shot_wire, mirror: false, track, car, mesh_swap: a.swap_mesh, sound: false, music: false, no_sound_device: false, engine: a.sound_prefs.engine_sound, world: a.world_edit.then_some(&mut world), ghost: ghost.as_mut(), ghost_win: a.ghost_shot.as_ref().map(|_| a.ghost_cam), ghost_cam: a.ghost_cam, ghost_follow: a.ghost_follow, scrub: &mut 0, seek: &mut None, cine: cine.as_mut(), acts: Vec::new() };
                 bar_h = m.bar(ui) * ui.ctx().pixels_per_point();
                 if shot_cmd.as_ref().is_some_and(command::CommandBox::wants_harvest) {
                     shot_bar_rows = m.harvest(ui);
@@ -1919,7 +1967,7 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
                 let fill = (a.confirm_unsaved || (a.world_edit && world.unsaved())).then(|| format!("track {track}'s fill"));
                 let (kind, fill) = match a.confirm_switch {
                     Some(true) => (AskKind::Track(track % 8 + 1), None),
-                    Some(false) => (AskKind::Car(car % 10 + 1), None),
+                    Some(false) => (AskKind::Car(ribbon::next_car(car)), None),
                     None => (AskKind::Exit, fill),
                 };
                 let ask = make_ask(kind, fill, None, if a.confirm_changes || a.confirm_switch.is_some() { &shot_changes } else { &[] });
@@ -2026,6 +2074,11 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         png::write(out, w * 2, h * 2, &sheet).map_err(|e| e.to_string())?;
         println!("wrote {}", out.display());
     }
+    // --ortho-views (#513): the focus car alone, orthographic from six sides
+    if let Some(dir) = &a.ortho_views {
+        let ss = sess.as_ref().ok_or("--ortho-views needs a race with the car on the grid")?;
+        ortho_views(a, &gpu, ss, &base, dbg.passes, dir)?;
+    }
     // --ghost-shot: the scene from the ghost car, or from `--ghost-follow SLOT` (its own view state,
     // as in the window)
     if let (Some(out), Some(ss)) = (&a.ghost_shot, &sess) {
@@ -2043,6 +2096,91 @@ fn shot(a: &Args, path: Option<&Path>) -> Result<(), String> {
         png::write(out, a.size.0, a.size.1, &gpx).map_err(|e| e.to_string())?;
         println!("wrote {}", out.display());
     }
+    Ok(())
+}
+
+/// `--ortho-views` (#513): seconds the race runs before the views without `--sim-seconds` (the car settled on its wheels).
+const ORTHO_SETTLE: f32 = 3.0;
+/// `--ortho-views`: metres from the car's body origin to the camera (well outside any car, inside every far plane).
+const ORTHO_BACK: f32 = 20.0;
+/// `--ortho-views` backdrop without `--backdrop`: the grey of the remodeling reference shots.
+const ORTHO_BACKDROP: [u8; 3] = [70, 76, 86];
+/// `--ortho-views`: per view its file suffix, the direction the camera looks from and its up, in the car's axes
+/// (x right, y up, z forward).
+const ORTHO_SIDES: [(&str, Vec3, Vec3); 6] = [
+    ("front", Vec3::Z, Vec3::Y),
+    ("rear", Vec3::NEG_Z, Vec3::Y),
+    ("left", Vec3::NEG_X, Vec3::Y),
+    ("right", Vec3::X, Vec3::Y),
+    ("top", Vec3::Y, Vec3::Z),
+    ("bottom", Vec3::NEG_Y, Vec3::Z),
+];
+
+/// The orthographic camera of one `ORTHO_SIDES` entry for a car body matrix `body` (car mesh space, x right, y up,
+/// -z forward, to view space), `half` metres from the centre to the frame's edge, centred on the body origin.
+fn ortho_camera(body: glam::Mat4, from: Vec3, up: Vec3, half: f32) -> Camera {
+    // the car's axes in view space: mesh -z is its forward
+    let axis = |v: Vec3| body.transform_vector3(v * Vec3::new(1.0, 1.0, -1.0)).normalize_or(Vec3::Y);
+    let (side, up) = (axis(from), axis(up));
+    let flip = Vec3::new(1.0, 1.0, -1.0);
+    let eye = body.w_axis.truncate() + side * ORTHO_BACK;
+    let fwd = -side;
+    // `from_rot` takes game axes (columns right, up, forward; it negates z back)
+    let rot = glam::Mat3::from_cols(fwd.cross(up) * flip, up * flip, fwd * flip);
+    Camera { ortho: half, ..Camera::from_rot(eye * flip, rot, 1.0, 1.0) }
+}
+
+/// `--ortho-views DIR` (#513): the focus car alone on a flat backdrop in the studio light (`Frame::studio`), seen
+/// orthographically from front, rear, left, right, top and bottom: `carNN_<side>.png`, all one square frame of
+/// `--ortho-frame` metres at `--ortho-scale` pixels per metre centred on the body origin, plus `carNN_ortho.txt`
+/// with the numbers to place them as Blender reference images.
+fn ortho_views(a: &Args, gpu: &Gpu, ss: &Session, base: &View, hide: Passes, dir: &Path) -> Result<(), String> {
+    let car_id = ss.race.racers.get(ss.focus).map_or(a.car, |r| r.car_id);
+    // the car only: the user's --hide still picks bodies / wheels
+    let passes = Passes { world: false, sky: false, props: false, sprites: false, skids: false, shadows: false, blades: false, shafts: false, halos: false, ..hide };
+    let mut view = passes.view(base).for_ortho();
+    view.debug.backdrop = Some(a.backdrop.unwrap_or(ORTHO_BACKDROP));
+    let body = ss.models_hiding(None).into_iter().find(|&(m, _)| m == ss.focus * scene::CAR_MESHES).map(|(_, m)| m).ok_or("--ortho-views: the focus car is not drawn")?;
+    let px = (a.ortho_frame * a.ortho_scale).round().max(16.0) as u32;
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    for (i, &(name, from, up)) in ORTHO_SIDES.iter().enumerate() {
+        if !a.ortho_sides.is_empty() && !a.ortho_sides.iter().any(|s| s == name) {
+            continue;
+        }
+        let cam = ortho_camera(body, from, up, a.ortho_frame * 0.5);
+        let mut parts = passes.parts(Some(ss), &cam, &view);
+        parts.cars.retain(|&(m, _)| m / scene::CAR_MESHES == ss.focus);
+        (parts.hidden, parts.ghost, parts.trail, parts.light_walls) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut f = parts.frame();
+        (f.studio, f.wire) = (true, a.wireframe);
+        // each view its own view state (fresh TAA history), as --car-sheet
+        gpu.select_view(6 + i);
+        let img = gpu.capture(px, px, &cam, &view, &f);
+        let out = dir.join(format!("car{car_id:02}_{name}.png"));
+        png::write(&out, px, px, &img).map_err(|e| e.to_string())?;
+        println!("wrote {}", out.display());
+    }
+    gpu.select_view(0);
+    let note = format!(
+        "car {car_id:02} orthographic views (motorview --ortho-views, #513), {mode} graphics\n\
+         image: {px} x {px} px = {frame} x {frame} m, {scale} px per metre\n\
+         centre of every image: the car body's origin as drawn in the race (Remaster: with the recipe's ride-height drop,\n\
+         which --export-body leaves out, so that body sits higher by the drop)\n\
+         \n\
+         front   seen from ahead, the car's right on the image's left    rear    seen from behind\n\
+         left    the car's left side, nose to the image's left            right   the car's right side, nose to the right\n\
+         top     from above, nose up the image                            bottom  from below, nose up (the car's left on the right)\n\
+         \n\
+         Blender (model nose towards -Y, as --export-blueprint): Add > Image > Reference in each view, Size {frame} m,\n\
+         centred on the origin: Front (numpad 1) front, Back (ctrl 1) rear, Right (numpad 3) left,\n\
+         Left (ctrl 3) right, Top (numpad 7) top turned 180 degrees, Bottom (ctrl 7) bottom\n",
+        mode = if view.mode == RenderMode::Remaster { "Remaster" } else { "Classic" },
+        frame = a.ortho_frame,
+        scale = a.ortho_scale,
+    );
+    let txt = dir.join(format!("car{car_id:02}_ortho.txt"));
+    std::fs::write(&txt, note).map_err(|e| format!("{}: {e}", txt.display()))?;
+    println!("wrote {}", txt.display());
     Ok(())
 }
 
@@ -2184,12 +2322,22 @@ struct App {
     /// REMASTER the body recipe file of every car on the grid and when it last changed (#183)
     body_watch: Vec<(PathBuf, Option<std::time::SystemTime>)>,
     body_checked: Instant,
-    /// the water bodies as last uploaded (`set_water`)
-    last_water: Vec<motorview::procgen::water::Body>,
+    /// the water bodies as last uploaded in full (`set_water`; None: unknown, after a scene load); `water_preview`: the
+    /// GPU shows a drag's surface-only preview since (`set_water_surface`)
+    last_water: Option<Vec<motorview::procgen::water::Body>>,
+    water_preview: bool,
+    /// what the grass was last built from (`grass::input_key`; None: unknown, after a scene load)
+    last_grass: Option<(Vec<motorview::procgen::grass::Body>, Vec<u8>)>,
+    /// the World Editor re-meshed light during a drag (no grass, water surface only): the full re-mesh is still due
+    remesh_full: bool,
     /// CustomCarColours per car slot (Properties > Car > Paint), until the line-up changes
     paints: HashMap<usize, [[u8; 3]; 3]>,
     /// the followed car drawn with the other model, original <-> generated (Ctrl+Shift+G)
     mesh_swap: bool,
+    /// the speaker button's sound and music (#495)
+    vsound: motorview::view_sound::ViewSound,
+    /// the wall-clock seconds the sim ran forward at normal pace this frame, for `vsound` (None: paused, scrubbing, no race)
+    snd_play: Option<f32>,
     /// a paint edit waits for the end of the frame (`repaint` needs the GPU back)
     repaint_due: bool,
     /// REMASTER local light: `Gpu::local_status` of the last frame (the F11 page; the GPU is
@@ -2281,6 +2429,8 @@ impl App {
                 (p, m)
             })
             .collect();
+        // the GPU holds the scene's own water and grass now
+        (self.last_water, self.last_grass) = (None, None);
         if self.world.open {
             self.world.begin(&self.args.root, track);
             self.world.scene_changed();
@@ -2536,17 +2686,29 @@ impl App {
     }
 
     /// REMASTER (#292): the followed car's generated body, with the recipes as loaded now, to
-    /// `Exports/carNN.obj` in the settings folder (the same file each time: Blender re-imports it).
+    /// `Exports/carNN.obj` in the settings folder (the same file each time: Blender re-imports it),
+    /// its `carNN.mtl` and textures beside it (#540).
     fn export_body(&mut self) {
+        self.export_car("obj", "body", motorview::procgen::bodyobj::export);
+    }
+
+    /// REMASTER (#540): the followed car as a model-file blueprint (`procgen::blueprint`, as
+    /// `--export-blueprint`) to `Exports/carNN.glb`.
+    fn export_blueprint(&mut self) {
+        self.export_car("glb", "blueprint", motorview::procgen::blueprint::export);
+    }
+
+    /// the followed car through `export` to `Exports/carNN.<ext>`, the summary as a note
+    fn export_car(&mut self, ext: &str, what: &str, export: fn(&Path, u32, u32, &Path) -> Result<String, String>) {
         let Some(dir) = ghost::export_dir() else { return self.note("no settings folder to export into") };
         let car = self.sess.as_ref().and_then(|ss| self.cars.get(ss.focus).copied()).unwrap_or(self.car);
-        let path = dir.join(format!("car{car:02}.obj"));
-        match motorview::procgen::bodyobj::export(&self.args.root, self.track, car, &path) {
+        let path = dir.join(format!("car{car:02}.{ext}"));
+        match export(&self.args.root, self.track, car, &path) {
             Ok(m) => {
                 println!("{m}");
                 self.note(m);
             }
-            Err(e) => self.note(format!("body not exported: {e}")),
+            Err(e) => self.note(format!("{what} not exported: {e}")),
         }
     }
 
@@ -2668,6 +2830,7 @@ impl App {
         }
         self.dbg.catalog = Some(Catalog::new(&s, self.sess.as_ref()));
         (self.scene, self.preview) = (Some(s), None);
+        (self.last_water, self.last_grass) = (None, None);
         if self.world.open {
             self.world.scene_changed();
             if let Some(s) = &self.scene {
@@ -2727,15 +2890,21 @@ impl App {
             self.world.refresh_capture(s);
         }
         // meshing walks every world vertex: while dragging, at most ~7 times a second
-        let ready = (self.world.drag.is_none() && !self.world.piece_dragging() && !self.world.painting()) || self.last_mesh.elapsed().as_millis() > 150;
-        if self.world.dirty_mesh && ready {
+        let ready = !self.world.dragging() || self.last_mesh.elapsed().as_millis() > 150;
+        // the light re-mesh of a drag leaves the grass and the water's bed for the release
+        if (self.world.dirty_mesh && ready) || (self.remesh_full && !self.world.dragging()) {
             self.fill_remesh();
         }
     }
 
-    /// Rebuild what the fill draws (pieces, clouds, picking, water, grass) from the editor's file.
+    /// Rebuild what the fill draws (pieces, clouds, picking, water, grass) from the editor's file. While the mouse holds a
+    /// drag it is light [design choice]: the pieces, picking and the water's surface (flat, `water::preview`); the grass
+    /// (~0.5 s on a whole track, more under a big grass plane) and the full water follow on release, each only when what it is
+    /// built from changed.
     fn fill_remesh(&mut self) {
         let (Some(g), Some(s)) = (self.gpu.as_mut(), &self.scene) else { return };
+        let light = self.world.dragging();
+        let t0 = Instant::now(); // TIMING temporary
         let fill = motorview::procgen::fill::mesh_pieces(&self.world.file, s);
         // pieces hidden by an eye or a layer are not drawn, picked or grown over with grass (#477); the skirt centre and
         // the hill crests stay from the whole file: the gizmos of the pieces that show need them
@@ -2749,12 +2918,32 @@ impl App {
         }
         self.world.skirt_base = fill.skirt.map(|(c, min_y)| (c * world_edit::FLIP, min_y));
         self.world.hill_crest = fill.hills;
-        if self.last_water != self.world.file.water {
-            g.set_water(s, &motorview::procgen::water::build(&self.world.file.water, s));
-            self.last_water = self.world.file.water.clone();
+        let t_fill = t0.elapsed();
+        let water = &self.world.file.water;
+        let water_changed = self.last_water.as_ref() != Some(water);
+        if light {
+            if water_changed {
+                g.set_water_surface(&motorview::procgen::water::preview(water, s));
+                self.water_preview = true;
+            }
+        } else if water_changed || self.water_preview {
+            g.set_water(s, &motorview::procgen::water::build(water, s));
+            (self.last_water, self.water_preview) = (Some(water.clone()), false);
         }
-        // the grass follows the fill's ground pieces too, so every fill edit re-meshes it
-        g.set_grass(&motorview::procgen::grass::build(&motorview::procgen::grass::track_bodies(&self.world.file, &s.world_textures), s, &verts));
+        let t_water = t0.elapsed() - t_fill;
+        // the grass grows on the fill's ground pieces too
+        let mut grass = false;
+        if !light {
+            let bodies = motorview::procgen::grass::track_bodies(&self.world.file, &s.world_textures);
+            let key = motorview::procgen::grass::input_key(&bodies, s, &verts);
+            if self.last_grass.as_ref() != Some(&key) {
+                g.set_grass(&motorview::procgen::grass::build(&bodies, s, &verts));
+                (self.last_grass, grass) = (Some(key), true);
+            }
+        }
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!("TIMING remesh {} {:.0} ms: fill {:.0}, water {:.0}, grass {:.0}{}", if light { "light" } else { "full" }, ms(t0.elapsed()), ms(t_fill), ms(t_water), ms(t0.elapsed() - t_fill - t_water), if grass { " (rebuilt)" } else { "" });
+        self.remesh_full = light;
         self.world.dirty_mesh = false;
         self.last_mesh = Instant::now();
     }
@@ -3144,7 +3333,23 @@ impl App {
         Input { throttle, brake, steer: self.steer_keys.update(left, right, dt), ..Default::default() }
     }
 
+    /// One frame: the sim and cameras (`update_frame`), then the viewer's sound (#495).
     fn update(&mut self, dt: f32) {
+        self.snd_play = None;
+        self.update_frame(dt);
+        self.sound_tick();
+    }
+
+    /// The speaker button's Sound and Music, heard from the camera on screen. Hushed while the Cine editor is open (it has
+    /// its own sound) or there is no race.
+    fn sound_tick(&mut self) {
+        let Some(sess) = self.sess.as_ref().filter(|_| !self.cine.active()) else { return self.vsound.hush() };
+        let in_car = !self.free && sess.cam == CamMode::InCar;
+        let f = motorview::view_sound::Frame { sess, cam: self.cam, in_car, track: self.track, car: self.car, mode: self.view.mode, play: self.snd_play };
+        self.vsound.update(&f);
+    }
+
+    fn update_frame(&mut self, dt: f32) {
         self.body_poll();
         self.fill_update();
         self.sky_update();
@@ -3165,6 +3370,7 @@ impl App {
             0 if self.key(&[KeyCode::Slash]) => 1,
             h => h,
         };
+        let wall_dt = dt;
         let scale = self.dbg.time_scale();
         let mut sim_dt = self.dbg.sim_dt(dt);
         let mut reps = 1;
@@ -3207,6 +3413,7 @@ impl App {
                 for _ in 0..reps {
                     sess.step_as(dt, input, hand);
                 }
+                self.snd_play = (reps == 1).then_some(wall_dt);
             }
         } else if self.sess.is_some() {
             let input = self.key_input(true, sim_dt.unwrap_or(0.0));
@@ -3218,6 +3425,7 @@ impl App {
                 for _ in 0..reps {
                     sess.step(dt, input);
                 }
+                self.snd_play = (reps == 1).then_some(wall_dt);
             }
             self.cam = chase(sess);
             if self.title_at.elapsed().as_millis() > 150 {
@@ -3625,6 +3833,10 @@ impl App {
                 track: self.track,
                 car: self.car,
                 mesh_swap: self.mesh_swap,
+                sound: self.vsound.switches.sound,
+                music: self.vsound.switches.music,
+                no_sound_device: self.vsound.no_device(),
+                engine: self.vsound.engine(),
                 world: Some(&mut self.world),
                 ghost: self.ghost.as_mut(),
                 ghost_win: self.ghost_win.as_ref().map(|g| g.cam.mode),
@@ -3955,6 +4167,7 @@ impl App {
             Act::Screenshot => self.screenshot = true,
             Act::ReloadCars => self.reload_cars(true),
             Act::ExportBody => self.export_body(),
+            Act::ExportBlueprint => self.export_blueprint(),
             Act::CineAddCam | Act::CineAddKey | Act::CinePreview | Act::CineSave | Act::CineCut | Act::CineUndo | Act::CineRedo | Act::CineGizmo(_) if !self.cine.active() => self.note("Cine: open or start a sequence first (toolbar Cine tab)"),
             Act::CineAddCam => self.cine.reqs.push(Req::AddStatic),
             Act::CineAddKey => self.cine.reqs.push(Req::AddKey),
@@ -4039,7 +4252,7 @@ impl App {
             Act::Darker => self.view.brightness = (self.view.brightness - 0.1).max(0.1),
             Act::Brighter => self.view.brightness += 0.1,
             Act::NextCar | Act::Car => {
-                let car = if act == Act::NextCar { self.car % 10 + 1 } else { i as u32 + 1 };
+                let car = if act == Act::NextCar { ribbon::next_car(self.car) } else { ribbon::car_at(i) };
                 if !self.guard_switch(AskKind::Car(car)) {
                     self.switch_car(car);
                 }
@@ -4108,6 +4321,10 @@ impl App {
             Act::MenuBar => self.ribbon.minimised ^= true,
             // the transport strip above the status bar (#435)
             Act::Transport => self.ribbon.no_transport ^= true,
+            // the speaker button (#495)
+            Act::Sound => self.vsound.toggle_sound(),
+            Act::Music => self.vsound.toggle_music(),
+            Act::Engine => self.vsound.toggle_engine(),
         }
     }
 }
@@ -4394,6 +4611,7 @@ fn main() {
     if let Some(d) = &args.cars_dir {
         motorview::procgen::bodyfile::set_dir(d.clone());
     }
+    ribbon::init_cars(&args.root);
     if args.fill_auto {
         // REMASTER world fill, automatic pass (procgen/fill.rs `auto`); keeps hand-edited files unless --force
         let tracks: Vec<u32> = if args.all_tracks { (1..=8).collect() } else { vec![args.track] };
@@ -4498,7 +4716,7 @@ fn main() {
         }
         return;
     }
-    if args.shot.is_some() || args.car_sheet.is_some() {
+    if args.shot.is_some() || args.car_sheet.is_some() || args.ortho_views.is_some() {
         if let Err(e) = shot(&args, args.shot.as_deref()) {
             eprintln!("{e}");
             std::process::exit(1);
@@ -4512,6 +4730,7 @@ fn main() {
     dbg.paused = args.free;
     let swap_mesh = args.swap_mesh;
     let paused0 = dbg.paused;
+    let vsound = motorview::view_sound::ViewSound::new(&args.root, args.sound_device.clone(), args.sound_prefs.clone());
     let mut app = App {
         track: args.track,
         car: args.car,
@@ -4598,9 +4817,14 @@ fn main() {
         last_mesh: Instant::now(),
         body_watch: Vec::new(),
         body_checked: Instant::now(),
-        last_water: Vec::new(),
+        last_water: None,
+        water_preview: false,
+        last_grass: None,
+        remesh_full: false,
         paints: HashMap::new(),
         mesh_swap: swap_mesh,
+        vsound,
+        snd_play: None,
         repaint_due: false,
         local_status: "",
         cine: CineEdit::default(),
@@ -4634,6 +4858,28 @@ fn changes_anchor(ctx: &egui::Context, chip: egui::Rect, status_h: f32) -> egui:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #513: each ortho view looks at the body origin from its side, with the image axes the .txt names, for a car
+    /// standing turned and tilted.
+    #[test]
+    fn ortho_views_face_their_sides() {
+        let rot = glam::Mat3::from_rotation_y(0.7) * glam::Mat3::from_rotation_x(0.05);
+        let body = glam::Mat4::from_translation(Vec3::new(10.0, 2.0, -30.0)) * glam::Mat4::from_mat3(rot);
+        // the car's axes in view space (mesh -z is forward)
+        let (right, up, fwd) = (rot * Vec3::X, rot * Vec3::Y, rot * Vec3::NEG_Z);
+        let close = |a: Vec3, b: Vec3| a.distance(b) < 1e-3;
+        // (side, the car axis the camera looks along, the car axis to the image's right, the car axis up the image)
+        let want = [("front", -fwd, -right, up), ("rear", fwd, right, up), ("left", right, -fwd, up), ("right", -right, fwd, up), ("top", -up, right, fwd), ("bottom", up, -right, fwd)];
+        for ((name, from, upv), (wname, look, img_r, img_u)) in ORTHO_SIDES.iter().zip(want) {
+            assert_eq!(*name, wname);
+            let c = ortho_camera(body, *from, *upv, 3.0);
+            assert_eq!(c.ortho, 3.0);
+            assert!(close(c.forward(), look), "{name}: looks along {}", c.forward());
+            assert!(close(c.up(), img_u), "{name}: up {}", c.up());
+            assert!(close(c.forward().cross(c.up()), img_r), "{name}: right {}", c.forward().cross(c.up()));
+            assert!(close(c.pos + c.forward() * ORTHO_BACK, body.w_axis.truncate()), "{name}: centre");
+        }
+    }
 
     /// No two bindings may fire for the same key + modifiers in overlapping contexts.
     #[test]

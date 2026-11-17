@@ -893,6 +893,25 @@ mod tests {
         assert_eq!(league_cars(&[100, 101, 102, 200, 201, 202, 300, 301, 302, 410]), 9);
     }
 
+    /// Patch 3.0 adds four tier 4 cars (Python Menace 412, SuperBee 414, Venom 415, Dominator 416, #365). The rule is the
+    /// original's (the p3.0 list builder 0x47f434 equals 0x4613ae): at tier 4 the pick count drops the LAST car of the
+    /// Division-sorted list, so Dominator waits for the league win while the Serpent and three patch cars open with Division 1.
+    /// A league lists none of them (Division % 100 >= 10).
+    #[test]
+    fn patch_3_0_cars_follow_the_same_rule() {
+        let cars = [100, 101, 102, 200, 201, 202, 300, 301, 302, 410, 412, 414, 415, 416];
+        let f = |n: usize| -> Vec<bool> { (0..8).map(|i| i < n).collect() };
+        // (track browse, track pick, car browse, car pick)
+        let l = |x: Locks| (x.tracks, x.tracks_open, x.cars, x.cars_open);
+        assert_eq!(l(single_locks(&TRACKS, &[false; 8], &cars)), (6, 2, 13, 3));
+        assert_eq!(l(single_locks(&TRACKS, &f(4), &cars)), (6, 6, 13, 9));
+        assert_eq!(l(single_locks(&TRACKS, &f(6), &cars)), (7, 7, 13, 13));
+        assert_eq!(l(single_locks(&TRACKS, &f(7), &cars)), (7, 7, 13, 13));
+        assert_eq!(l(single_locks(&TRACKS, &[true; 8], &cars)), (8, 8, 14, 14));
+        assert_eq!(league_cars(&cars), 9);
+        assert!((410..=416).all(|c| !car_allowed(c, 1) && car_allowed(c, 0)));
+    }
+
     #[test]
     fn seasons() {
         assert_eq!(season_tracks(&TRACKS, 3), vec![0, 1]);

@@ -487,7 +487,7 @@ fn parse_race(w: &[&str], r: &mut RaceDef) -> Result<(), String> {
         }
     }
     if let Some(v) = f.get("cars") {
-        let cars: Result<Vec<u32>, _> = v.iter().map(|x| x.parse::<u32>().ok().filter(|c| (1..=10).contains(c)).ok_or(format!("Cars: `{x}` is not a car 1..10"))).collect();
+        let cars: Result<Vec<u32>, _> = v.iter().map(|x| x.parse::<u32>().ok().filter(|c| (1..=99).contains(c)).ok_or(format!("Cars: `{x}` is not a car 1..99"))).collect();
         r.cars = cars?;
         if r.cars.is_empty() || r.cars.len() > 8 {
             return Err("Cars needs 1..8 cars".into());

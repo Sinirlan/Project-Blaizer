@@ -134,13 +134,14 @@ fn project(r: &RaceState, w: f32, h: f32, p: Vec3) -> Option<[f32; 2]> {
     Some([w * 0.5 + d.dot(rt) / z * focal, h * 0.5 - d.dot(up) / z * focal])
 }
 
-pub fn draw(r: &RaceState, b: &mut Batch) {
+/// `scale` is the layout's (#542; 1.0 = stock): the arrows' length in the world.
+pub fn draw(r: &RaceState, b: &mut Batch, scale: f32) {
     // not from inside the car, nor from the goal camera or the start fly-by
     if matches!(r.sess.cam, CamMode::InCar | CamMode::Bumper | CamMode::Goal | CamMode::Tv) || r.sess.flying() {
         return;
     }
     let Some(bbox) = motorview::ui_font::face(HudFont::Arrow).glyph(GLYPH).and_then(|g| g.bbox) else { return };
-    let k = LENGTH / (bbox[2] - bbox[0]).max(1) as f32; // metres per field source px
+    let k = LENGTH * scale / (bbox[2] - bbox[0]).max(1) as f32; // metres per field source px
     let race = &r.sess.race;
     let me = &race.racers[r.sess.focus].car;
     let mv = race.view_pose(r.sess.focus);
@@ -175,7 +176,7 @@ pub fn draw(r: &RaceState, b: &mut Batch) {
         let ramp = ((RANGE - g) / (RANGE - NEAR)).clamp(0.0, 1.0);
         for s in 0..SLICES {
             let layer = s as f32 / (SLICES - 1) as f32;
-            let base = at + up * (layer * DEPTH);
+            let base = at + up * (layer * DEPTH * scale);
             let to_canvas = |x: f32, y: f32| project(r, w, h, base + o * (x * k) + l * (y * k));
             b.glass_glyph(HudFont::Arrow, GLYPH, &to_canvas, GRID, ramp, alpha, layer, view);
         }

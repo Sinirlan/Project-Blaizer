@@ -71,7 +71,8 @@ pub struct BodyStyle {
     pub smooth_deg: f32,
     /// round the wheel arches with a point every this many degrees (0: keep the original's)
     pub arch_step_deg: f32,
-    /// gap between tyre and arch (m); 0 fits the circle to the original arch instead
+    /// gap between tyre and arch (m), round the drawn (fitted, #530) tyre; 0 fits the circle to
+    /// the original arch instead
     pub arch_clearance: f32,
     /// a flat lip round the arch's outer rim (m, in the side view; 0: none): the body side
     /// stops this much further out and a narrow band, sloping in towards the tunnel by half its
@@ -189,8 +190,12 @@ const RIM_T: f32 = 5e-3;
 /// the rims' ground ends sliding along the body's bottom line to meet it. With `arch_lip` the
 /// outer rim sits on a circle that much larger and a strip of lip quads (the body's paint) runs
 /// from it to the tunnel; edges from an outer rim end to an inner one (the underside) get the
-/// lip's end point. `hubs` in car-local game space at rest, `radius` the wheel's.
-pub fn round_arches(faces: &mut Vec<Face>, hubs: &[[f32; 3]], radius: f32, st: &BodyStyle) {
+/// lip's end point. `hubs` in car-local game space at rest, `radius` the original wheel's (the
+/// tunnel search), `tyre` the drawn one's (the circle). REMASTER (#533): the generated wheels are
+/// fitted inside the original octagons, about 2.7 cm smaller in radius (#530, `scene::WheelFit`),
+/// and the car is drawn lower by that much; the arches follow the drawn tyre, so the gap stays
+/// `arch_clearance`.
+pub fn round_arches(faces: &mut Vec<Face>, hubs: &[[f32; 3]], radius: f32, tyre: f32, st: &BodyStyle) {
     let step_deg = st.arch_step_deg;
     if step_deg <= 0.0 {
         return;
@@ -275,7 +280,7 @@ pub fn round_arches(faces: &mut Vec<Face>, hubs: &[[f32; 3]], radius: f32, st: &
         let o = &rims[0];
         let top = o.iter().copied().max_by(|a, b| a.y.total_cmp(&b.y)).unwrap_or(o[0]);
         let fit = if st.arch_clearance > 0.0 {
-            Some((Vec2::new(h.z, h.y + st.drop), radius + st.arch_clearance))
+            Some((Vec2::new(h.z, h.y + st.drop), tyre + st.arch_clearance))
         } else {
             circle([o[0], top, o[o.len() - 1]].map(|p| Vec2::new(p.z, p.y)))
         };
@@ -1473,8 +1478,40 @@ pub fn body_parts(faces: &[Face], st: &BodyStyle) -> (Vec<Vertex>, Vec<usize>) {
     // can land a fraction of a millimetre apart: the fans and strips between them were slivers
     // with an edge of nothing (the Titan's scoop frames, its exhaust recess)
     merge_close(&mut out, Some(&mut src), MERGE);
+    drop_folds(&mut out, &mut src);
     let src = src.into_iter().map(|f| keep[cage.src[f].0]).collect();
     (out, src)
+}
+
+/// Drop the triangles of `tris` that come in pairs on the same three points, both (with their
+/// entries of `tags`): the pair cancels like the fan wedges of an inner mitre. A corner fan's ring
+/// can go out to a point and back to one 0.3 mm beside where it started (on another weld cell,
+/// so the wedges did not cancel); `merge_close` then made the two wedges one triangle (`put` winds
+/// both along the normals), a flap with two non-manifold edges (#533: the ASC's right front
+/// tunnel, behind its `Warp`).
+fn drop_folds(tris: &mut Vec<Vertex>, tags: &mut Vec<usize>) {
+    let mut open: HashMap<[[u32; 3]; 3], Vec<usize>> = HashMap::new();
+    let mut gone = vec![false; tags.len()];
+    for (i, t) in tris.as_chunks::<3>().0.iter().enumerate() {
+        let mut k = [0, 1, 2].map(|c| t[c].pos.map(f32::to_bits));
+        k.sort();
+        if let Some(j) = open.get_mut(&k).and_then(Vec::pop) {
+            gone[i] = true;
+            gone[j] = true;
+        } else {
+            open.entry(k).or_default().push(i);
+        }
+    }
+    if !gone.contains(&true) {
+        return;
+    }
+    let mut i = 0;
+    tags.retain(|_| {
+        i += 1;
+        !gone[i - 1]
+    });
+    let kept: Vec<Vertex> = tris.as_chunks::<3>().0.iter().zip(&gone).filter(|(_, &g)| !g).flat_map(|(t, _)| *t).collect();
+    *tris = kept;
 }
 
 /// points closer than this (m) are one (`merge_close`); the narrowest real detail, a clamped
@@ -1579,10 +1616,34 @@ mod tests {
             f.rgb = if k == 1 { [1, 1, 1] } else { [0, 0, 0] };
             faces.push(f);
         }
-        round_arches(&mut faces, &[hub.to_array()], 0.3, &st);
+        round_arches(&mut faces, &[hub.to_array()], 0.3, 0.3, &st);
         assert!(faces.len() > 4, "the tunnel was rebuilt as a strip of quads");
         assert!(faces.iter().all(|f| f.rgb == [0, 0, 0]), "no flat 1 1 1 face is left");
         assert!(near_tag([0, 0, 0], [1, 1, 1]) && !near_tag([0, 0, 0], [0, 0, 3]) && !near_tag([244, 129, 0], [0, 0, 0]));
+    }
+
+    /// #533: the arch is cut round the drawn tyre (`tyre`), not the original wheel (`radius`): a tyre
+    /// 3 cm smaller lowers the arch's top by 3 cm, the gap stays `arch_clearance`
+    #[test]
+    fn arch_follows_the_drawn_tyre() {
+        let st = crate::procgen::bodyfile::from_text("Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.0 drop=0\n").unwrap();
+        let rim = [(-0.5, 0.0), (-0.45, 0.4), (0.0, 0.62), (0.45, 0.4), (0.5, 0.0)];
+        let hub = Vec3::new(0.75, 0.3, 0.0);
+        let top = |tyre: f32| {
+            let mut faces = Vec::new();
+            for w in rim.windows(2) {
+                let at = |x: f32, (z, y): (f32, f32)| [x, y, z];
+                let pts = [at(0.95, w[0]), at(0.95, w[1]), at(0.5, w[1]), at(0.5, w[0])];
+                let c = pts.iter().map(|&p| Vec3::from(p)).sum::<Vec3>() / 4.0;
+                let mut f = face(&pts, Vec3::new(0.0, hub.y - c.y, hub.z - c.z).normalize().to_array());
+                f.rgb = [0, 0, 0];
+                faces.push(f);
+            }
+            round_arches(&mut faces, &[hub.to_array()], 0.3, tyre, &st);
+            faces.iter().flat_map(|f| f.pts.iter().map(|p| p[1])).fold(f32::MIN, f32::max)
+        };
+        assert!((top(0.3) - (hub.y + 0.3 + 0.035)).abs() < 1e-4, "{}", top(0.3));
+        assert!((top(0.27) - (hub.y + 0.27 + 0.035)).abs() < 1e-4, "{}", top(0.27));
     }
 
     /// #177: a body corner on a rim edge of the tunnel (a T-junction, 3 mm off it) moves onto
@@ -1605,7 +1666,7 @@ mod tests {
         let t = [0.953, 0.2, 0.475];
         faces.push(face(&[[0.95, 0.0, 0.5], [0.95, 0.0, 1.0], [0.95, 0.4, 1.0], [0.95, 0.4, 0.45], t], [1.0, 0.0, 0.0]));
         // a tyre bigger than the original arch: the rim moves out to the circle
-        round_arches(&mut faces, &[hub.to_array()], 0.5, &st);
+        round_arches(&mut faces, &[hub.to_array()], 0.5, 0.5, &st);
         let side = faces.iter().find(|f| f.rgb == [200; 3]).unwrap();
         let r = 0.5 + 0.035;
         for p in side.pts.iter().map(|&p| Vec3::from(p)).filter(|p| p.z < 0.9) {
@@ -1627,6 +1688,20 @@ mod tests {
         let before: Vec<[f32; 3]> = thin.iter().map(|v| v.pos).collect();
         merge_close(&mut thin, None, MERGE);
         assert_eq!(thin.iter().map(|v| v.pos).collect::<Vec<_>>(), before);
+    }
+
+    /// #533: a triangle drawn twice on the same points (either winding) goes, both copies and
+    /// their tags; the rest keeps its order
+    #[test]
+    fn drop_folds_cancels_pairs() {
+        let v = |p: [f32; 3]| Vertex { pos: p, uv: [0.0; 2], color: [1.0; 4], layer: -1.0, normal: [0.0, 0.0, 1.0], env: 0.0 };
+        let (a, b, c, d) = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0]);
+        let mut tris = vec![v(a), v(b), v(c), v(b), v(d), v(c), v(a), v(c), v(b), v(a), v(b), v(c)];
+        let mut tags = vec![10, 11, 12, 13];
+        drop_folds(&mut tris, &mut tags);
+        // the first pair cancels; the third copy stays, alone on its points
+        assert_eq!(tags, vec![11, 13]);
+        assert_eq!(tris.iter().map(|v| v.pos).collect::<Vec<_>>(), vec![b, d, c, a, b, c]);
     }
 
     /// a strip 2 cm wide and 40 cm long with its long sides cut every 4 cm: best-ear clipping

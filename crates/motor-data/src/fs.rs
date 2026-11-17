@@ -33,6 +33,24 @@ pub fn config(root: &Path, rel: &str) -> Result<crate::cfg::Config, String> {
     Ok(crate::cfg::Config::parse(&t.data))
 }
 
+/// The car numbers NN of every `Game/carNN.car` in the install, ascending (the original globs `game\*.car`, list builder 0x4613ae
+/// [O]; patch 3.0 adds car11..14, so the count is whatever the install holds).
+pub fn car_ids(root: &Path) -> Vec<u32> {
+    let Some(dir) = find_ci(root, "Game") else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut ids: Vec<u32> = rd
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            let n = name.strip_prefix("car")?.strip_suffix(".car")?;
+            (n.len() == 2 && n.bytes().all(|b| b.is_ascii_digit())).then(|| n.parse().ok()).flatten()
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Shown when no install folder was given and none is found beside the program.
 pub const NOT_FOUND: &str = "no game found here: put the program next to motor.exe, or pass the install folder as an argument";
 
@@ -67,6 +85,18 @@ mod tests {
         assert!(!has_motor_exe(&d));
         std::fs::write(d.join("MOTOR.EXE"), b"").unwrap();
         assert!(has_motor_exe(&d));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn car_ids_lists_the_car_files() {
+        let d = std::env::temp_dir().join(format!("motor_car_ids_test_{}", std::process::id()));
+        std::fs::create_dir_all(d.join("game")).unwrap();
+        assert!(car_ids(&d).is_empty());
+        for f in ["car02.car", "CAR11.CAR", "car01.car", "car1.car", "carxx.car", "car03.txt", "Track1.trk"] {
+            std::fs::write(d.join("game").join(f), b"").unwrap();
+        }
+        assert_eq!(car_ids(&d), [1, 2, 11]);
         std::fs::remove_dir_all(&d).unwrap();
     }
 

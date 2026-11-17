@@ -399,7 +399,7 @@ fn tip(b: &mut Batch, d: Glass, v: &View, ax: &Axis, card_top: f32, ms: f64, a: 
         "FINISHED".to_string()
     } else {
         let lap = v.laps.starts.iter().rposition(|&s| s <= ms).unwrap_or(0) + 1;
-        format!("LAP {lap} \u{b7} {} KM/H", speed_at(v, ms).round() as u32)
+        format!("LAP {lap} \u{b7} {} {}", v.units.speed(speed_at(v, ms)).round() as u32, v.units.speed_cap())
     };
     let s1 = d.font(HudFont::Clock, 15.0, 0.0, [1.0, 1.0, 1.0, a]);
     let s2 = d.font(HudFont::Glass, 11.0, 1.2, hex(G_DIM, a));
@@ -566,7 +566,7 @@ fn graph(b: &mut Batch, d: Glass, v: &View, ax: &Axis, rect: (f32, f32, f32, f32
     }
     if let Some((kmh, at)) = v.laps.top {
         let st = d.font(HudFont::Glass, 10.0, 1.2, [1.0, 1.0, 1.0, a]);
-        let txt = format!("TOP {kmh}");
+        let txt = format!("TOP {}", v.units.speed(kmh as f32).round() as u32);
         let tw = b.font_width(HudFont::Glass, &txt, &st) - st.tracking;
         let ty = (y_of(speed_at(v, at)) - d.d(19.0)).max(gy + d.d(15.0));
         let (cx, tri) = (ax.at(at), d.d(3.5));
@@ -731,7 +731,7 @@ mod tests {
     use crate::playback::Laps;
 
     fn view<'a>(laps: &'a Laps, trace: &'a [f32]) -> View<'a> {
-        View { t_ms: 0.0, len_ms: 200_000.0, laps, playing: true, hold: 0, rate: 1.0, tele: false, trace, show: 1.0, unfold: 0.0, ended: false, picked: 0, hover: None, tip: None, pointer: None, scrub: false }
+        View { t_ms: 0.0, len_ms: 200_000.0, laps, playing: true, hold: 0, rate: 1.0, tele: false, trace, show: 1.0, unfold: 0.0, ended: false, picked: 0, hover: None, tip: None, pointer: None, scrub: false, units: crate::front::Units::Metric }
     }
 
     fn rect(t: &[(Target, [f32; 4])], k: Target) -> [f32; 4] {

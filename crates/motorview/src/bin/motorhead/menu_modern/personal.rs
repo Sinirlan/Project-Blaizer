@@ -24,8 +24,8 @@ const CAREER: usize = 3;
 const RECORDS: usize = 4;
 
 /// The Driver tab's rows as the Classic screen numbers them (`PERSONAL_ROWS`): Name, Team, Colour,
-/// Confirmations, Intro movies. The row ids are what `Game::editing` holds.
-const DRIVER_ROWS: [usize; 5] = [0, 1, 2, 17, 18];
+/// Confirmations, Intro movies, System (Metric / Imperial, #501). The row ids are what `Game::editing` holds.
+const DRIVER_ROWS: [usize; 6] = [0, 1, 2, 17, 18, 19];
 
 /// The cards of the tabs (design px): the Driver tab's rows card and its on-track card, and the full-width body.
 const DRIVER_CARD: (f32, f32, f32, f32) = (62.0, 228.0, 560.0, 372.0);
@@ -66,6 +66,7 @@ const HELP_COLOUR: &str = "Your driver colour: your dot on the map, your name pl
 // [O] only the exit requester reads the setting (front.rs, Main's Esc): `NoExit` and `Off` both skip it
 const HELP_CONFIRM: &str = "Whether the game asks before it quits. On asks; Off and No exit do not.";
 const HELP_INTRO: &str = "Play the intro movies when the game starts.";
+const HELP_UNITS: &str = "Metric shows km/h and km, Imperial mph and miles: the speedometer, the replays, the lap analysis, the statistics and the track lengths.";
 const HELP_CUSTOM: &str = "Race in your own paint. Off: every car keeps its stock colours.";
 // [O] 08-missing-features 8.5: the third zone is on three of the shipped cars
 const HELP_PAINT: [&str; 3] = [
@@ -407,7 +408,7 @@ fn counted(n: u32, one: &str, many: &str) -> String {
 /// The eight cards in the mockup's order (the left column, then the right) from stats.cfg: dashes where there is no
 /// data yet (no lap, no top speed, no circuit), numbers for the counts [design choice]. `car_name` = a car's name by
 /// its file id.
-fn career_cards(st: &crate::stats::Stats, car_name: &dyn Fn(u32) -> String) -> [StatCard; CAREER_CARDS] {
+fn career_cards(st: &crate::stats::Stats, car_name: &dyn Fn(u32) -> String, u: Units) -> [StatCard; CAREER_CARDS] {
     let dash = || "--".to_string();
     let card = |cap, icon, value: String, unit, sub: String| StatCard { cap, icon, value, unit, sub, small: false };
     let fav = st.favourite();
@@ -416,11 +417,11 @@ fn career_cards(st: &crate::stats::Stats, car_name: &dyn Fn(u32) -> String) -> [
     [
         card("RACES FINISHED", ui_font::icon::FLAG, st.races.to_string(), "", String::new()),
         card("TIME RACING", ui_font::icon::TIMER, fmt_hms(st.total.race_s), "", format!("PLAY TIME {}", fmt_hms(st.play_s))),
-        card("DISTANCE", ui_font::icon::ROUTE, format!("{:.1}", st.total.distance_m / 1000.0), "KM", counted(st.total.overtakes, "OVERTAKE", "OVERTAKES")),
+        card("DISTANCE", ui_font::icon::ROUTE, format!("{:.1}", u.dist(st.total.distance_m)), u.dist_cap(), counted(st.total.overtakes, "OVERTAKE", "OVERTAKES")),
         StatCard { small: true, ..card("FAVOURITE", ui_font::icon::FLAG, fav.map_or_else(dash, |(n, _)| n.to_uppercase()), "", fav.map_or_else(String::new, |(_, t)| counted(t.plays, "VISIT", "VISITS"))) },
         card("FASTEST LAP", ui_font::icon::TIMER, fast.map_or_else(|| "--:--.---".to_string(), |(ms, ..)| glass_time(ms)), "", fast.map_or_else(dash, |(_, n, c)| format!("{} · {}", n.to_uppercase(), car_name(c).to_uppercase()))),
-        card("TOP SPEED", ui_font::icon::GAUGE, top.map_or_else(dash, |t| format!("{:.0}", t.kmh)), "KM/H", top.map_or_else(String::new, |t| format!("{} · {}", t.track.to_uppercase(), car_name(t.car).to_uppercase()))),
-        card("LONGEST DRIFT", ui_font::icon::ROUTE, format!("{:.0}", st.longest_drift_m), "M", format!("{:.1} KM DRIFTED IN ALL", st.total.drift_m / 1000.0)),
+        card("TOP SPEED", ui_font::icon::GAUGE, top.map_or_else(dash, |t| format!("{:.0}", u.speed(t.kmh))), u.speed_cap(), top.map_or_else(String::new, |t| format!("{} · {}", t.track.to_uppercase(), car_name(t.car).to_uppercase()))),
+        card("LONGEST DRIFT", ui_font::icon::ROUTE, format!("{:.0}", u.short(st.longest_drift_m)), u.short_cap(), format!("{:.1} {} DRIFTED IN ALL", u.dist(st.total.drift_m), u.dist_cap())),
         card("LONGEST JUMP", ui_font::icon::ROUTE, format!("{:.2}", st.longest_jump_s), "S", format!("{} · {:.0} S IN THE AIR", counted(st.total.jumps, "JUMP", "JUMPS"), st.total.air_s)),
     ]
 }
@@ -440,7 +441,7 @@ fn stat_card(i: usize) -> (f32, f32, f32) {
 /// the game's order) or the ten cars, with the share of time as a bar against the most driven row. A circuit or car with
 /// no entry yet is a faded "NOT DRIVEN YET" row [design choice: the mockup's data has every circuit]. `tracks` = the
 /// circuits' names, `cars` = (file id, name) of the cars, listed by id as the garage numbers them.
-fn records_table(st: &crate::stats::Stats, tracks: &[&str], cars: &[(u32, &str)], by_car: bool) -> (Vec<TableCol>, Vec<TableRow>) {
+fn records_table(st: &crate::stats::Stats, tracks: &[&str], cars: &[(u32, &str)], by_car: bool, u: Units) -> (Vec<TableCol>, Vec<TableRow>) {
     let head = if by_car { ["#", "CAR", "RACES", "", "BEST LAP", "ON", "DISTANCE", "TIME", "SHARE OF TIME"] } else { ["#", "CIRCUIT", "VISITS", "FINISHED", "BEST LAP", "WITH", "DISTANCE", "TIME", "SHARE OF TIME"] };
     let xs = [22.0, 62.0, 300.0, 390.0, 500.0, 640.0, 790.0, 900.0, 990.0];
     let cols = head.iter().zip(xs).map(|(&title, x)| TableCol { title, x }).collect();
@@ -450,7 +451,7 @@ fn records_table(st: &crate::stats::Stats, tracks: &[&str], cars: &[(u32, &str)]
         v
     };
     let car_name = |id: u32| cars.iter().find(|c| c.0 == id).map_or(format!("#{id}"), |c| c.1.to_uppercase());
-    let km = |m: f64| format!("{:.1} KM", m / 1000.0);
+    let km = |m: f64| format!("{:.1} {}", u.dist(m), u.dist_cap());
     let lap = |ms: Option<u32>| ms.map_or("--:--.---".to_string(), glass_time);
     let name_or_dash = |n: Option<String>| n.unwrap_or_else(|| "--".to_string());
     let fav = st.favourite().map(|f| f.0.to_lowercase());
@@ -562,6 +563,13 @@ impl Game {
                     s.intro = right;
                 }
                 18 if enter => s.intro ^= true,
+                19 if left || right => {
+                    if s.units.imperial() == right {
+                        e = Some(ev::CURSOR_END);
+                    }
+                    s.units = if right { Units::Imperial } else { Units::Metric };
+                }
+                19 if enter => s.units = s.units.flip(),
                 _ => {}
             }
         }
@@ -709,6 +717,7 @@ impl Game {
             PauseItem::Head("Menus".into()),
             row("Confirmations", HELP_CONFIRM, PauseVal::Choice(CONFIRM_NAMES.iter().map(|n| n.to_string()).collect(), s.menu_confirmation)),
             row("Intro movies", HELP_INTRO, PauseVal::Switch(s.intro)),
+            row("Units", HELP_UNITS, PauseVal::Choice(vec!["Metric".into(), "Imperial".into()], s.units.imperial() as usize)),
         ]
     }
 
@@ -784,25 +793,30 @@ impl Game {
     /// `pitch` above, in `paint`. The viewport is the sphere's square, so the car never crosses it. None until the
     /// garage scene is up.
     pub(super) fn car_preview(&self, size: (u32, u32), d: Glass, centre: (f32, f32), across: f32, (angle, pitch): (f32, f32), paint: LivePaint) -> Option<Layer> {
+        if self.loaded != Loaded::Garage {
+            return None;
+        }
         let p = self.preview_pose(size, d, centre, across, (angle, pitch), PREVIEW_ZOOM)?;
         Some(Layer::Preview { cam: p.cam, cars: p.cars, viewport: p.viewport, paint })
     }
 
     /// The camera, the car's parts and the viewport of `car_preview` at lens `zoom`, with the projection of its model
-    /// space onto the canvas (the Car screen's floor and shadow are drawn in it).
+    /// space onto the canvas (the Car screen's floor and shadow are drawn in it). The camera needs only the car's
+    /// sphere: without the garage scene (#543, the Car screen's disc while it loads) the pose has no parts, and it
+    /// stands on the last garage's spot (the origin before the first).
     pub(super) fn preview_pose(&self, size: (u32, u32), d: Glass, centre: (f32, f32), across: f32, (angle, pitch): (f32, f32), zoom: f32) -> Option<PreviewPose> {
-        if self.loaded != Loaded::Garage {
-            return None;
-        }
         let k = self.settings.car;
         let (sphere, radius) = self.cars.get(k)?.sphere;
         // parked as on the Car screen: the car's heading on the garage spot, the tyres on the road
         let (spot, dir) = self.spot;
         let ground = self.garage_wheels.get(k).map_or(0.0, |(h, r)| h[0].y - r);
         let model = Mat4::from_translation(spot - Vec3::Y * ground) * Mat4::from_mat3(Mat3::from_rotation_y((-dir.x).atan2(-dir.z)));
-        let mut cars = vec![(k * CAR_MESHES, model)];
-        if let Some((hubs, _)) = self.garage_wheels.get(k) {
-            cars.extend(hubs.iter().enumerate().map(|(w, h)| (k * CAR_MESHES + 1 + w, model * Mat4::from_translation(*h))));
+        let mut cars = Vec::new();
+        if self.loaded == Loaded::Garage {
+            cars.push((k * CAR_MESHES, model));
+            if let Some((hubs, _)) = self.garage_wheels.get(k) {
+                cars.extend(hubs.iter().enumerate().map(|(w, h)| (k * CAR_MESHES + 1 + w, model * Mat4::from_translation(*h))));
+            }
         }
         // the camera: far enough that the sphere's outline just fills the square (tan of its half angle = the
         // lens's half width)
@@ -875,7 +889,7 @@ impl Game {
         let items = self.driver_items();
         let sel = self.sel.min(DRIVER_ROWS.len() - 1);
         let (cx, cy, _, _) = DRIVER_CARD;
-        self.rows_card(b, d, DRIVER_CARD, 540.0, 272.0, &items, sel, pulse);
+        self.rows_card(b, d, DRIVER_CARD, 540.0, 276.0, &items, sel, pulse);
         // the dashed rule and the selected row's help under the rows
         let mut m = Mesh::default();
         let ry = d.y(cy + 286.0);
@@ -1273,7 +1287,7 @@ impl Game {
     fn personal_career(&self, b: &mut Batch, d: Glass) {
         let st = &self.stats;
         let name = |id: u32| self.cars.iter().find(|c| c.id == id).map_or(format!("#{id}"), |c| c.name.clone());
-        for (i, card) in career_cards(st, &name).iter().enumerate() {
+        for (i, card) in career_cards(st, &name, self.settings.units).iter().enumerate() {
             Self::glass_stat_card(b, d, stat_card(i), card);
         }
         let (c, r) = CAREER_DISC;
@@ -1374,7 +1388,7 @@ impl Game {
     /// The Records tab (`recordsHTML`): the subtabs and the table of circuits or cars from stats.cfg.
     fn personal_records(&self, b: &mut Batch, d: Glass, pulse: f32) {
         let cars = self.records_cars;
-        let (cols, rows) = records_table(&self.stats, &self.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), &self.cars.iter().map(|c| (c.id, c.name.as_str())).collect::<Vec<_>>(), cars);
+        let (cols, rows) = records_table(&self.stats, &self.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), &self.cars.iter().map(|c| (c.id, c.name.as_str())).collect::<Vec<_>>(), cars, self.settings.units);
         let (x, y, _, _) = RECORDS_PANEL;
         let table = GlassTable { rect: RECORDS_PANEL, head_y: 42.0, rows_y: 62.0, row_h: RECORD_ROW_H[cars as usize], cols: &cols, rows: &rows, sel: self.sel };
         Self::glass_table(b, d, &table, pulse);
@@ -1412,7 +1426,7 @@ mod tests {
     #[test]
     fn career_cards_from_a_real_stats_file() {
         let st = crate::stats::Stats::parse(STATS_TEXT);
-        let c = career_cards(&st, &|id| format!("Car{id}"));
+        let c = career_cards(&st, &|id| format!("Car{id}"), Units::Metric);
         let text = |i: usize| (c[i].value.as_str(), c[i].unit, c[i].sub.as_str());
         assert_eq!(text(0), ("36", "", ""));
         assert_eq!(text(1), ("3:16:18", "", "PLAY TIME 6:07:59"));
@@ -1430,7 +1444,7 @@ mod tests {
     #[test]
     fn career_cards_of_an_empty_stats_are_dashes_or_zero() {
         let st = crate::stats::Stats::default();
-        let c = career_cards(&st, &|id| format!("Car{id}"));
+        let c = career_cards(&st, &|id| format!("Car{id}"), Units::Metric);
         assert_eq!(c[0].value, "0");
         assert_eq!(c[3].value, "--");
         assert_eq!(c[4].value, "--:--.---");
@@ -1497,7 +1511,7 @@ mod tests {
         let st = crate::stats::Stats::parse(STATS_TEXT);
         let tracks = ["RedRock", "NolbyHills", "NeoCity", "Atlantika", "OkkunSpeedway", "Olympos", "RuhrStadt", "Goldbridge"];
         let cars = [(4, "Serpent"), (10, "Titan")];
-        let (cols, rows) = records_table(&st, &tracks, &cars, false);
+        let (cols, rows) = records_table(&st, &tracks, &cars, false, Units::Metric);
         assert_eq!(cols.len(), 9);
         assert_eq!(rows.len(), 8);
         // the circuits without an entry fade, the favourite carries the tag, the most driven circuit fills its bar
@@ -1519,7 +1533,7 @@ mod tests {
         let st = crate::stats::Stats::parse("Races 1\nCar 4 races 2 distance 1000 time 100 lap 24733 track OkkunSpeedway\nCar 8 races 0 distance 300 time 5\n");
         // given out of order: the table lists by id
         let cars = [(8, "Resonic"), (5, "ASC II"), (4, "Serpent")];
-        let (cols, rows) = records_table(&st, &[], &cars, true);
+        let (cols, rows) = records_table(&st, &[], &cars, true, Units::Metric);
         assert_eq!(cols[2].title, "RACES");
         assert_eq!(cols[3].title, "");
         assert!(!rows[0].none && rows[1].none && !rows[2].none);
@@ -1532,9 +1546,9 @@ mod tests {
 
     #[test]
     fn records_of_empty_stats_are_all_not_driven_yet() {
-        let (_, rows) = records_table(&crate::stats::Stats::default(), &["A", "B"], &[(1, "X")], false);
+        let (_, rows) = records_table(&crate::stats::Stats::default(), &["A", "B"], &[(1, "X")], false, Units::Metric);
         assert!(rows.len() == 2 && rows.iter().all(|r| r.none));
-        let (_, rows) = records_table(&crate::stats::Stats::default(), &[], &[(1, "X")], true);
+        let (_, rows) = records_table(&crate::stats::Stats::default(), &[], &[(1, "X")], true, Units::Metric);
         assert!(rows.len() == 1 && rows[0].none);
     }
 }

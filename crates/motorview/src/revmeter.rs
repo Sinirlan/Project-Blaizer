@@ -59,6 +59,29 @@ impl RevMeterTune {
 /// Width of the meter at 100 %, canvas px: the art it replaces (h:meter01, 127 x 40).
 pub const WIDTH: f32 = 127.0;
 
+// ---- the Glass race HUD's swoosh (REMASTER #323; `hud_glass.rs` and revshop both read these)
+
+/// The swoosh's width, design px (the original-size meter is `WIDTH`).
+pub const GLASS_WIDTH: f32 = 300.0;
+/// The fill from which the swoosh counts as at the redline (mockup `Live.rev >= .92`).
+pub const GLASS_REDLINE: f32 = 0.92;
+/// The tube's half-width against the full meter (mockup `thin: 0.62`).
+pub const GLASS_THIN: f32 = 0.62;
+/// The redline pulse: the mockup's `redPulse .22s ease-in-out infinite alternate` (a full cycle is 0.44 s)
+/// takes the lit part from opacity 1 down to .55.
+pub const GLASS_PULSE_PERIOD: f32 = 0.44;
+pub const GLASS_PULSE_DIM: f32 = 0.45;
+
+/// The tune the Glass swoosh is drawn with: the tube thinned.
+pub fn glass_tune(tune: &RevMeterTune) -> RevMeterTune {
+    RevMeterTune { thickness: (tune.thickness as f32 * GLASS_THIN).round() as u32, ..*tune }
+}
+
+/// The swoosh's redline look at `clock` seconds (the lit part pulses, the glass edge turns red).
+pub fn glass_red(clock: f32) -> crate::ui::RevRed {
+    crate::ui::RevRed { dim: GLASS_PULSE_DIM * (0.5 - 0.5 * (std::f32::consts::TAU * clock / GLASS_PULSE_PERIOD).cos()), rim: 1.0 }
+}
+
 // ---- the shader's look (ui.wgsl `rev_meter`, written into its WGSL prefix as REV_*); the
 // runtime `RevMeterTune` scales them. [O] = from the Blender material / scene, else tuned
 // by eye against RevMeter_750_preview.png (design choice).

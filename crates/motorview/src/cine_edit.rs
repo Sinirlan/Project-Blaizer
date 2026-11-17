@@ -1545,7 +1545,7 @@ fn race_section(ui: &mut Ui, ed: &mut CineEdit) {
             if glass_ui::row_counted(ui.ctx(), "cars") {
                 ui.label("cars");
                 if ui.add_enabled(free, egui::TextEdit::singleline(&mut ed.cars_text).desired_width(160.0)).on_hover_text("car numbers in grid order, slot 0 first (the last slot is `player`)").changed() {
-                    let cars: Vec<u32> = ed.cars_text.split_whitespace().filter_map(|w| w.parse().ok()).filter(|c| (1..=10).contains(c)).collect();
+                    let cars: Vec<u32> = ed.cars_text.split_whitespace().filter_map(|w| w.parse().ok()).filter(|c| (1..=99).contains(c)).collect();
                     if !cars.is_empty() && cars.len() <= 8 && cars != r.cars {
                         r.cars = cars;
                         ch = true;

@@ -28,7 +28,11 @@ Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch
 # curved zones, so the fold grows to 27 deg and `round=0.35` spreads it into a dome over the
 # bonnet and the nose, as in the cinematic render. 3.5 cm without the corners notched the
 # fenders' silhouette at the nose; 2.5 cm was a flatter dome.
-Push lo=0.2,0.69,1.58 hi=0.6,0.82,1.76 by=0,0.03,0
+# #538 (the user's motor-show picture, a blunter nose): the row also moves 5 cm forward, so the
+# nose ahead of it is steeper and the rounded fold fuller (the bonnet's front up to 1.8 cm
+# higher). 9 cm forward and 4.5 cm up notched the fender where the row ends (201); moving the
+# fenders' front corners (200 / 199) 7 cm with it twisted their crisp facets into a V-shaped dent.
+Push lo=0.2,0.69,1.58 hi=0.6,0.82,1.76 by=0,0.03,0.05
 Push lo=0.75,0.8,1.4 hi=0.9,0.9,1.5 by=0,0.015,0
 
 # Design choice (fifth pass, the user's request: a straight, smooth fender edge over the front
@@ -39,7 +43,8 @@ Push lo=0.75,0.8,1.4 hi=0.9,0.9,1.5 by=0,0.015,0
 # arch was 2-6 cm thick. F rises 3.5-4.5 cm (most over the hub) and clears the lip by 4.3-5 cm;
 # the top corners over it (T: |x| 0.866 0.860 0.843 at z 1.185 1.344 1.466) 1-2 cm, so each
 # chamfer quad stays flat (its corners' rises cancel) and the fender humps over the wheel. The
-# bonnet's edge (|x| 0.571-0.589) and the mirror base stay. With the stiff fender springs below,
+# bonnet's edge (|x| 0.571-0.589) and the mirror base stay. #533: the arches follow the drawn
+# tyre (≈ 2.7 cm smaller since #530), so the lip's circle now tops out ≈ 0.80 and F clears it by 7-8 cm. With the stiff fender springs below,
 # T at 2.5-4.5 cm and F at 3.5-5 cm made an 8 cm hump.
 Push lo=0.86,0.905,1.18 hi=0.872,0.917,1.19 by=0,0.01,0
 Push lo=0.855,0.882,1.338 hi=0.866,0.894,1.35 by=0,0.02,0
@@ -47,6 +52,20 @@ Push lo=0.837,0.857,1.46 hi=0.849,0.869,1.472 by=0,0.01,0
 Push lo=0.925,0.835,1.18 hi=0.937,0.847,1.19 by=0,0.035,0
 Push lo=0.923,0.819,1.308 hi=0.935,0.831,1.32 by=0,0.045,0
 Push lo=0.907,0.778,1.456 hi=0.919,0.79,1.468 by=0,0.035,0
+
+# Design choice (#538, the user's motor-show picture: slim LED headlamps at the ends of a level
+# black band across the nose). [O] The headlamp quad 121 (120 on the left) is 9.8 cm tall at its
+# inner end (|x| 0.254, y 0.371-0.469, z 2.026: the nose intake 122's height) and 16.4 cm at its
+# outer end (0.818, y 0.407-0.571, z 1.817). Its outer corners come down so the lamp is a level
+# band at the intake's height: the top 168 by 10.2 cm (the green nose faces 235 / 236 / 241 / 242
+# come down with it, so the fender reaches the band at the corner, as in the picture), the bottom
+# 167 by 3.6 cm, and the white side stripe's lower front corner 207 by 6.3 cm (to y 0.42), so the
+# stripe still ends on the lamp's outer edge. The quad is upright (n 0.35 0 0.94), so it stays
+# flat. Mesh check non-manifold 6 -> 3: the left headlight's top edge no longer crosses the weld
+# cells (zone step note below).
+Push lo=0.81,0.56,1.81 hi=0.83,0.58,1.82 by=0,-0.102,0
+Push lo=0.81,0.475,1.81 hi=0.83,0.49,1.82 by=0,-0.063,0
+Push lo=0.81,0.40,1.81 hi=0.83,0.415,1.82 by=0,-0.036,0
 
 # [O] the mirror glass is the grey 146 146 146 quad on the back of each housing (118 / 119,
 # |x| 0.888-1.090, y 0.896-0.983, z 0.510-0.558)
@@ -58,10 +77,14 @@ Glass rgb=75,92,107 frame=0.02 inset=0.015 tint=0.6
 
 # [O] headlights: one Ogflight quad a side, tag 127 127 104 (120 / 121, |x| 0.254-0.818,
 # y 0.371-0.571, z 1.816-2.026, n 0.35 0 0.94: a wide lens across the nose's corner); halo 0/1
-# runs it from (0.818 0.489 1.816) to (0.254 0.42 2.026), rgb ff f8 99. Design choice: a
-# reflector bowl with three bulbs and a daytime bar along its bottom edge.
-Lamp from=127,127,104 frame=0.008 inset=0.03 tint=0.45 kind=reflector count=3 rows=1 pitch=0 bulb=0.014 led_inset=0.03
-Led pts=0,0;0.95,0 repeat=1 step=0,0 style=bar width=0.025 margin=0 clip=0 halo=1
+# runs it from (0.818 0.489 1.816) to (0.254 0.42 2.026), rgb ff f8 99. Design choice (#538, the
+# motor-show picture; was a reflector bowl with three bulbs and a daytime bar): the lens, a level
+# band after the pushes above, is a bare dark housing (`kind=projectors count=0`: the projector
+# kind's floor colour, no pods) with two rows of LED dots over its outer 55 %; the inner part
+# stays dark, so the band runs on into the nose intake's honeycomb. The lens is 0.58 m wide (the
+# LED frame's unit): dots 2.1 cm across and 2.9 cm apart, the rows 3 and 6 cm over its bottom.
+Lamp from=127,127,104 frame=0.008 inset=0.03 tint=0.45 kind=projectors count=0 radius=0.03 rows=1 span=1 floor=12,12,14 led_inset=0.03
+Led pts=0.42,0.022;0.95,0.022 repeat=2 step=0,0.051 style=dots dot=0.018 pitch=0.05 margin=0 clip=0 halo=1
 # [O] tail lights: one Ogblight quad a side, tag 127 0 0 (10 / 11, |x| 0.233-0.722, y 0.664-0.800,
 # z -2.055..-2.026, n 0 0.21 -0.98); halo 2/3 runs from (0.716 0.753 -2.034) to (0.296 0.732
 # -2.04), rgb ff 11 11. The lens is a trapezoid: its top edge level (y 0.800), its bottom edge
@@ -83,14 +106,36 @@ Vent from=0,0,0 lo=0.77,0.48,-0.76 hi=0.97,0.92,-0.5 rgb=3,3,5 frame=0.01 inset=
 # - the bonnet vents 169 / 170 and 223 / 224 (|x| 0.319-0.571, y 0.707-0.898, z 0.999-1.744):
 #   louvres
 Vent from=0,0,0 lo=0.3,0.7,0.98 hi=0.58,0.9,1.75 rgb=3,3,6 frame=0.008 inset=0.025 tint=0.5 kind=slats pitch=0.025 width=0.008 blades=0 spine=0.01 tilt=0
-# - the orange lower nose under each headlight 161 / 214 (|x| 0.254-0.818, y 0.229-0.407,
-#   z 1.817-2.026, n 0.35 0 0.94: angled back across the nose corner). Design choice after the
-#   cinematic render of the Kobra X3 (#179, second pass), which has a pair of intakes there: a
-#   panel 4.5 cm in from the face's edges, recessed with a honeycomb and one upright blade, so
-#   it reads as two slots. Slats run along game x and poked out of this angled face at its
-#   outer end.
-Panel from=192,78,0 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 frame=0.045 rgb=4,4,1
-Vent from=4,4,1 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 rgb=3,3,7 frame=0.006 inset=0.035 tint=0.5 kind=hex radius=0.012 wall=0.003 blades=1
+# - the orange lower nose: design choice (#538, the motor-show picture: a bumper proud of the black
+#   band with two small intakes a side; was the second pass's one honeycomb panel with a blade).
+#   [O] 214 (161 on the left) runs under the lamp (|x| 0.254-0.818, y 0.229 to the lamp's bottom
+#   edge, z 1.817-2.026, n 0.35 0 0.94) and 215 between them (|x| < 0.254, y 0.230-0.371).
+#   The slices (before the pushes) cut them into rows: y 0.36 (the strip over it, the bumper's
+#   ledge, stays one face a side, so the lamp's bottom edge gets no cut points and stays straight
+#   when its outer corner comes down: a cut point on it stayed put and bent the edge), 0.325 and
+#   0.265 (the intakes' row); then into upright strips 3-6 cm wide: the refine leaves every cage
+#   face one polygon with one shading normal, so the round nose's warp (below) bent two big pieces
+#   that met in a shading step. The intakes' row strips in |x| 0.32-0.47 and 0.53-0.70 are
+#   painted flat black (like the first black cage face, the spine's front 6) and recessed as
+#   plain intakes, about 16 x 6 cm.
+Slice lo=0,0.235,1.8 hi=0.81,0.37,2.03 axis=y at=0.36
+Slice lo=0.26,0.235,1.8 hi=0.81,0.359,2.03 axis=y at=0.325
+Slice lo=0.26,0.235,1.8 hi=0.81,0.359,2.03 axis=y at=0.265
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.085
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.17
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.285
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.32
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.37
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.42
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.47
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.53
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.585
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.64
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.7
+Slice lo=0,0.235,1.8 hi=0.81,0.359,2.03 axis=x at=0.76
+Paint from=192,78,0 lo=0.33,0.27,1.8 hi=0.46,0.32,2.05 like=0,0,0
+Paint from=192,78,0 lo=0.54,0.27,1.8 hi=0.69,0.32,2.05 like=0,0,0
+Vent from=0,0,0 lo=0.3,0.26,1.8 hi=0.72,0.33,2.05 rgb=3,3,7 frame=0.006 inset=0.035 tint=0.5 kind=plain
 
 # [O] The front fenders are a box of crisp facets (top 151 / 180, a 45 deg chamfer 146 / 185 and the
 # side 147 / 186, folds 40-54 deg) that fan out at the nose corner into 148 / 150 / 181 / 187
@@ -101,11 +146,11 @@ Vent from=4,4,1 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 rgb=3,3,7 frame=0.006 inset=0.0
 # rear quarters (#179, second pass). Design choice: two curved zones over the paint, the white
 # stripes and the orange (each face keeps its colour), every fold up to 60 deg rounded:
 # - front: the fenders' top, chamfer and nose corner (|x| 0.55-0.915, z 0.6-1.9, y to 0.96
-#   since the fifth pass, below; the vertical sides over the arch, |x| 0.93, stay out: rounded into the arch
-#   lips they made 8 non-manifold edges there) and the bonnet and nose over the stripe (|x| <
+#   since the fifth pass, below; the vertical sides over the arch, |x| 0.93, stayed out until #539,
+#   below: rounded into the arch lips they made 8 non-manifold edges then) and the bonnet and nose over the stripe (|x| <
 #   0.6, z 1.15-2.05). The nose's side faces (212 / 213 / 216 on the right) stay out too: cut by the zone, the
-#   lower nose's edge to them got cut points a hair off the line, which the panel above threw
-#   out of the face as spikes.
+#   lower nose's edge to them got cut points a hair off the line, which the lower nose's panel
+#   (second pass, gone since #538) threw out of the face as spikes.
 # - rear: the rear fenders, the deck beside the spine and the tail (|x| 0.3-1.0, z < -0.75;
 #   the spine, |x| 0.24, stays a ridge).
 # The bonnet vents' black faces 169 / 223 are in the zone too (third pass, the user's request:
@@ -125,12 +170,31 @@ Vent from=4,4,1 lo=0.3,0.2,1.8 hi=0.83,0.42,2.05 rgb=3,3,7 frame=0.006 inset=0.0
 # Fifth pass (the user's request): the fenders' top 180 / 234 (centroid y 0.900) had stayed out
 # of the 0.895 box, a flat facet pinned with the chamfer between two creases, so the boxes reach
 # y 0.96 (only 180 / 234 join; the mirror faces stay out by z), and `round` is per box: 0.35 on
-# the bonnet and the nose corner, 0.12 on the fenders' boxes. With 0.35 the fenders became one
+# the bonnet and the nose corner, 0.12 on the fenders' boxes (a ramp since #539, below). With 0.35 the fenders became one
 # plane from the top to the side fold and sagged 5-8 cm under the cage over the arch; as their
 # own zone at 0.1 they met the bonnet in a crease along the vents. One plate keeps that seam
 # smooth; the points on both take the stiff springs, so the bonnet beside the vents' tips sits
 # up to 9 cm higher than the soft plate left it, near the cage there.
-Smooth from=75,91,34;255,255,255;192,78,0;0,0,0 lo=0,0.45,1.3;0.55,0.8,0.6;0.85,0.55,0.6;0.7,0.7,1.6 hi=0.6,0.92,2.05;0.915,0.96,1.9;0.915,0.96,1.9;0.8,0.8,1.9 max_deg=60 step=0.025 loose=0 round=0.35;0.12;0.12;0.35
+# #539 (the user's request: the fender's edge crisp at the headlamp, fading out towards the
+# mirror). The fifth pass's flat 0.12 rounded the top fold, but the lower one (chamfer to side,
+# 199-196-197-145, 48-57 deg after the pushes) stayed a hard crease from the arch to the mirror:
+# the side strips over and behind the arch (197 / 199 / 240, centroid |x| 0.916-0.937) were in no
+# box. The nose corner by the lamp (241 / 242) was the softest part, the reverse of the request.
+# Now a fifth box takes the strips (|x| 0.915-0.95, y 0.66+; since the fifth pass and #533 they
+# are 7-8 cm tall over the lip, and no slivers came back: non-manifold stays 3), and the fenders'
+# three boxes take a `round` ramp along z, 0.045 from the lamp (z 1.75) to 0.12 behind the arch
+# (z 0.8 back), linear between. Behind the arch only the top band of the side panel 237 joins
+# (the `Slice` below): with all of 237 in, the soft plate dished it into a hollow at the door
+# seam (the fourth pass's "pillow"); with none, the fold rounded only down to 240's bottom edge
+# and left a crease low on the side. Measured on `--export-body` sections behind the arch, the
+# most the shoulder turns within 3 cm went from 64-69 to 19-21 deg; the shoulder sits 2-2.5 cm
+# lower along its diagonal there, and the nose corner at the lamp is 3-4.7 cm fuller. A ramp to
+# 0.25-0.3 dissolved it hardly more but pulled the shoulder in 10-15 cm and dented it at the
+# mirror base (its corners 145 / 146 are pinned: the mirror and the door faces stay out).
+# 237 cut at y 0.64, before the pushes. The box stays clear of the scoop's front wall and the
+# door (z under 0.55): a box reaching them (z 0.2) opened a 2 cm gap at the mirror base.
+Slice lo=0.93,0.6,0.55 hi=0.96,0.7,1.1 axis=y at=0.64
+Smooth from=75,91,34;255,255,255;192,78,0;0,0,0 lo=0,0.45,1.3;0.55,0.8,0.6;0.85,0.55,0.6;0.7,0.7,1.6;0.915,0.66,0.6 hi=0.6,0.92,2.05;0.915,0.96,1.9;0.915,0.96,1.9;0.8,0.8,1.9;0.95,0.96,1.5 max_deg=60 step=0.025 loose=0 round=0.35;0.12@0.8:0.045@1.75;0.12@0.8:0.045@1.75;0.35;0.12@0.8:0.045@1.75
 Smooth from=75,91,34;255,255,255;192,78,0 lo=0.3,0.4,-2.1 hi=1.0,1.01,-0.75 max_deg=60 step=0.025 loose=0 round=0.1
 
 # Every edge cut and every face remeshed at 4 cm, like the other base bodies.
@@ -149,5 +213,25 @@ Refine step=0.04 seams=1
 # dent. Mesh check unchanged (non-manifold 6). Rounding the side panels round the arch in the
 # curved zone was tried and dropped: the panel behind the arch (237) sagged into a pillow, and
 # the strips over the arch's top (197 / 199) made 3-7 non-manifold slivers against the arch lip
-# at every zone step from 0.022 to 0.026.
-Warp by=0.05,0,0 x=0.7,0;0.85,1 y=0.45,0;0.65,1;0.85,0 z=1.3,0;1.62,1;1.80,0
+# at every zone step from 0.022 to 0.026 (both solved in #539, above).
+# #539 (the user's request): the orange and white below it (212 / 213 / 216, the same plane as
+# 242) move out too; they sat 4-5 cm in under the green flank. The bulge is full from y 0.33 up to
+# 0.65 (it was none at the white stripe's bottom, y 0.45) and none at the bottom edge (y 0.25):
+# moving that crease too left 44 sub-millimetre seams in its bevel (the bevel is built on the
+# warped cage). The 8 cm roll-under it leaves is in the car's shadow.
+Warp by=0.05,0,0 x=0.7,0;0.85,1 y=0.25,0;0.33,1;0.65,1;0.85,0 z=1.3,0;1.62,1;1.80,0
+
+# Design choice (#538, the motor-show picture): the nose round in plan. [O] The front (the band
+# and the bumper) is a V in plan: level at z 2.026 for |x| < 0.254 (the intake 122 and 215), then
+# straight back at 20 deg to the lamp's outer corner (0.818, z 1.817). The warp moves it in z
+# onto z = 2.026 - 0.382 |x|^3 (through that corner, 37.5 deg there): the table is that curve
+# minus the V every 3 cm with a node on the V's corner (0.254: a warp weight is C1, so only a
+# node there takes the corner out), up to 4.6 cm forward at |x| 0.55-0.6 and 0.6 cm back at
+# 0.254. Full up to y 0.62 (the band, the bumper and the nose top's lower half), none over y 0.76
+# or behind z 1.66 (the arch's front); the lamp insides, the vents and the halos follow.
+Warp by=0,0,0.05 x=0,0.000;0.1,-0.008;0.15,-0.026;0.2,-0.061;0.23,-0.093;0.254,-0.125;0.284,0.047;0.314,0.208;0.344,0.356;0.374,0.490;0.404,0.608;0.434,0.710;0.464,0.793;0.494,0.858;0.524,0.902;0.554,0.925;0.584,0.925;0.614,0.900;0.644,0.851;0.674,0.774;0.704,0.670;0.734,0.537;0.764,0.374;0.79,0.207;0.794,0.179;0.805,0.100;0.818,0.000 y=0.62,1;0.76,0 z=1.66,0;1.8,1
+# Design choice (#538): the bumper stands 3 cm proud of the band, as in the picture. Everything
+# under the y 0.36 cut moves forward and nothing from the band's bottom edge (y 0.371) up, so
+# the strip between is a ledge 3 cm deep; full to |x| 0.6 and none at the lamp's outer corner
+# (0.818), where the bumper runs flush into the nose's side.
+Warp by=0,0,0.03 x=0.6,1;0.818,0 y=0.36,1;0.371,0 z=1.66,0;1.8,1

@@ -28,7 +28,7 @@ motor_tune::tunable! {
     /// range: 0.5..60
     /// unit: s
     FLIP_RESET_AFTER: f32 = 2.0;
-    /// The AI stuck reset (after `RESET_AFTER` of backing up) waits while the car's centreline point is within this
+    /// The AI stuck reset (after `RESET_AFTER` of backing up) waits while the car is within this
     /// distance of the camera: the original squares it, 22500 = 150² (0x40d9d3, 0x4cf4b3) [O], #369. Ours measures to
     /// the human's car [I]. 0 resets after 8 s wherever the car is.
     /// range: 0..1000
@@ -121,14 +121,15 @@ pub struct Racer {
     /// the game AI; for the human player it only tracks position (traffic data for others)
     pub ai: GameAi,
     pub human: bool,
-    /// unscaled gear tops / acc force, for the rubber band
+    /// unscaled gear tops / acc force, for the rubber band and the start spread (`scale_power`)
     base_gear_top: Vec<f32>,
     base_acc: f32,
     pub telemetry: Telemetry,
     /// this frame's brake input (0..1), for the brake lights
     pub brake: f32,
     /// a car posed from outside (Ghost mode's recorded cars, `demo::drive_remote`): no physics step,
-    /// no collisions, no respawn, in the original the "remote" flag (`car+0xc`, 03-physics `c[0x8c]`) [D].
+    /// no collisions, no respawn, in the original a remote network car (driver type `car+0x1c` = 1, copied to `c[0x8c]`;
+    /// the world step skips its body, 0x481040) [O].
     /// Its lap progress still runs.
     pub remote: bool,
 }
@@ -200,6 +201,11 @@ pub struct Race {
     pub clock_ms: f64,
     /// dev/test hook (headless `--autopilot`): the human's car is driven by the AI
     pub autopilot: bool,
+    /// `AIGoalWheel` of the .trk (TrackDef+0x143c): the steering of a finished AI car (`finished_input`), 0 if missing
+    pub goal_wheel: f32,
+    /// The AI start spread of the first 7 s after GO (`start_spread`, #481); on in every race. Off only as a dev hook
+    /// (`aicompare --no-start-spread`, the before / after check).
+    pub start_spread: bool,
     grid: Grid,
     /// active AI parameter vector (0x74e890)
     pub ai_vector: [f32; 11],
@@ -405,6 +411,7 @@ impl Race {
         };
         let laps = laps.unwrap_or_else(|| trk.get("Laps").and_then(|e| e.i64(0)).unwrap_or(3) as u32);
         let ai_vector = ai_vector(&trk, row);
+        let goal_wheel = trk.get("AIGoalWheel").and_then(|e| e.f32(0)).unwrap_or(0.0);
         let profiles = if drivers.is_none() { load_drivers(root) } else { Vec::new() };
         let mut racers = Vec::new();
         for (slot, &id) in cars.iter().enumerate() {
@@ -447,7 +454,7 @@ impl Race {
             cfg::parse_lwmo(&t.data).ok()
         };
         let start_camera = crate::startcam::StartCamera::new(start_spline("StartSpline1"), start_spline("StartSpline2"));
-        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, solid_remote: false, susp: (1.0, 1.0), tick_s: None, tick_hz: None, acc: 0.0, prev: Vec::new(), ticks_last_frame: 0, last_dt: 0.0, view_lead: 0.0 };
+        let mut race = Race { world, line, ai_line, racers, laps, rules: Rules::Normal, countdown: COUNTDOWN, clock_ms: 0.0, autopilot: false, start_spread: true, goal_wheel, grid, ai_vector, props, goal_camera, tv_camera, start_camera, car_scale: (1.0, 1.0), name_cheat: None, solid_remote: false, susp: (1.0, 1.0), tick_s: None, tick_hz: None, acc: 0.0, prev: Vec::new(), ticks_last_frame: 0, last_dt: 0.0, view_lead: 0.0 };
         race.restart();
         Ok(race)
     }
@@ -464,11 +471,11 @@ impl Race {
     /// Everyone back to the grid, clock reset.
     pub fn restart(&mut self) {
         for slot in 0..self.racers.len() {
-            let (p, dir) = self.grid.slot(&self.line, slot);
-            let ride = self.racers[slot].car.p.ride_height();
-            let y = self.world.ground(p.x, p.z, p.y + 20.0).unwrap_or(p.y);
-            let r = &mut self.racers[slot];
-            r.car.place(Vec3::new(p.x, y - ride, p.z), dir);
+            let (p, dir) = self.grid_spawn(slot);
+            self.racers[slot].car.place(p, dir);
+        }
+        self.first_frame();
+        for r in self.racers.iter_mut() {
             r.progress = Progress::new(&self.line, self.laps, r.car.pos);
             r.ai.reset(&r.car);
         }
@@ -477,6 +484,32 @@ impl Race {
         self.props.reset();
         (self.acc, self.ticks_last_frame, self.last_dt, self.view_lead) = (0.0, 0, 0.0, 0.0);
         self.prev.clear();
+    }
+
+    /// Where `restart` places slot `slot`'s body and its forward direction: the model origin at the grid slot's
+    /// centreline height, the car drops onto its springs from there (#531).
+    pub fn grid_spawn(&self, slot: usize) -> (Vec3, Vec3) {
+        let (p, dir) = self.grid.slot(&self.line, slot);
+        (Vec3::new(p.x, p.y - self.racers[slot].car.p.ride_height(), p.z), dir)
+    }
+
+    /// CLASSIC (#532): the race's first frame. The frame-time clamp (0x45a210) makes it the full 1 s (every trace starts
+    /// with `dt` 1 [O]), so the first `sim_step` runs the substeps of a 1 s frame (10 of 0.04 s: 0.4 s of the grid drop) before
+    /// the first picture. Only the cars step, in their grid hold with no input: the countdown does not count the frame
+    /// (GO is 12.0 s after the trace's first row [O]), and the race clock, the props' clock and the AI are untouched
+    /// [I: the original's props run the frame too; they stand still on the grid]. Remote cars are the network's.
+    /// `restart` runs it; public for the `gridrest` probe, which places the field itself.
+    pub fn first_frame(&mut self) {
+        let hold = Input { hold: true, ..Default::default() };
+        for r in self.racers.iter_mut().filter(|r| !r.remote) {
+            r.car.begin_frame();
+        }
+        for h in car::substeps(1.0) {
+            for r in self.racers.iter_mut().filter(|r| !r.remote) {
+                r.telemetry = r.car.substep(h, hold, &self.world);
+            }
+            self.world_step(h);
+        }
     }
 
     pub fn started(&self) -> bool {
@@ -654,7 +687,13 @@ impl Race {
         // drives the world: props, physics substeps, the AI, the car's frame end and the respawn timers [I: the
         // original's timers sit in sim_step's callers; ours count how long a car is in a state of the sim].
         let sim_dt = if racing { dt * crate::cheats::time_scale(self.name_cheat) } else { dt };
-        self.rubber_band();
+        // CLASSIC 0x45ac13..0x45acdc / 0x45c238: for 7 s after GO the start spread scales the AI cars, after that (and
+        // before GO, when the green-light time 0x704e30 is still 0) the rubber band does
+        if racing && self.clock_ms < START_SPREAD_MS && self.start_spread {
+            self.spread_start();
+        } else {
+            self.rubber_band();
+        }
         // inputs first: the frame's base input per car. The AI cars' inputs are replaced by the
         // AI step before every physics substep below.
         let mut inputs = Vec::with_capacity(self.racers.len());
@@ -667,7 +706,7 @@ impl Race {
                 None => r.human && !self.autopilot,
             };
             // Before GO the car step runs in its grid-hold mode (0x47cdf4 mode 1: no tyre forces,
-            // horizontal speed removed). After the flag we brake, only while rolling forward
+            // horizontal speed removed). A Knockout car that is out brakes, only while rolling forward
             // because the automatic gearbox engages reverse when the brake is held at a
             // standstill [design choice]. A manual gearbox can still be shifted in both.
             let shift = hand.map_or(r.human, |h| h == slot) && r.car.manual;
@@ -682,7 +721,11 @@ impl Race {
             // before the start too, only the brake waits for the flag (0x45a699). The car step
             // runs in its grid hold (clutch in, no tyre forces), so the engine free-revs on the
             // pedal and the car stays put; the revs it built give the wheelspin launch at GO.
-            let input = if racing && !done && driven {
+            let input = if racing && r.progress.finished_ms.is_some() {
+                // CLASSIC 0x45a6af..: the input reader has no finished test, so a finished driver keeps the steering,
+                // handbrake and gear keys; throttle and brake are the finished-car override's (`finished_input`) [O]
+                if driven { Input { steer: player.steer, handbrake: player.handbrake, shift_up: hold.shift_up, shift_down: hold.shift_down, ..Default::default() } } else { Input::default() }
+            } else if racing && !done && driven {
                 player
             } else if !racing && driven {
                 Input { throttle: player.throttle, steer: player.steer, ..hold }
@@ -725,7 +768,8 @@ impl Race {
                 order.sort_by(|&a, &b| keys[b].0.cmp(&keys[a].0).then(keys[b].1.total_cmp(&keys[a].1)));
                 for &slot in &order {
                     let r = &mut self.racers[slot];
-                    if r.progress.done() {
+                    // a finished car stays in the AI step and the traffic: 0x407800 has no finished test [O]
+                    if r.progress.eliminated_ms.is_some() {
                         continue;
                     }
                     others.clear();
@@ -740,9 +784,14 @@ impl Race {
                             inputs[slot] = ai_input;
                         }
                     }
-                    if r.progress.eliminated_ms.is_none() {
-                        traffic[slot] = Some(r.ai.traffic());
-                    }
+                    traffic[slot] = Some(r.ai.traffic());
+                }
+                for (slot, r) in self.racers.iter().enumerate().filter(|(_, r)| r.progress.finished_ms.is_some() && !r.remote) {
+                    let driven = match hand {
+                        Some(h) => h == slot,
+                        None => r.human && !self.autopilot,
+                    };
+                    inputs[slot] = finished_input(inputs[slot], &r.car, !driven, self.goal_wheel);
                 }
             }
             self.props.begin_substep(h, self.world.gravity);
@@ -769,10 +818,11 @@ impl Race {
             (r.airborne_s, r.flip_s) = if r.remote { (0.0, 0.0) } else { reset_timers(r.airborne_s, r.flip_s, r.car.wheel_contact, r.car.flip_contact, sim_dt) };
             if !r.human && racing && !done && hand != Some(slot) {
                 r.stuck = stuck_timer(r.stuck, r.car.vel.z.abs() > 15.0, r.ai.reversing(), sim_dt);
-                // APPROX [I]: the original measures from the car's centreline point (P+0x324) to the rendered camera
-                // (0x45b06c passes 0x704e50); the human's car stands in, so a replay, a rewind or a ghost run does not
-                // depend on the view. No human (motorrace): no camera, reset after 8 s.
-                let dist = eye.map(|e| self.line.at(r.progress.s).0.distance(e));
+                // CLASSIC 0x40d99b: the distance from the car's own position (`[P+0x324]` = rb+0x6c, the body matrix,
+                // +0x24..0x2c) to the rendered camera (0x45b06c passes 0x704e50). APPROX [I]: the human's car stands in for
+                // the camera, so a replay, a rewind or a ghost run does not depend on the view. No human (motorrace): no
+                // camera, reset after 8 s.
+                let dist = eye.map(|e| r.car.pos.distance(e));
                 if stuck_due(r.stuck, dist) {
                     r.airborne_s = RESET_AFTER.get() + 1.0; // reuse the reset path below
                 }
@@ -785,8 +835,7 @@ impl Race {
             self.eliminate();
         }
         for slot in 0..self.racers.len() {
-            let r = &self.racers[slot];
-            if reset_due(r.airborne_s, r.flip_s) && r.progress.eliminated_ms.is_none() {
+            if reset_now(&self.racers[slot], racing) {
                 self.respawn(slot);
             }
         }
@@ -947,37 +996,25 @@ impl Race {
         true
     }
 
-    /// Put a racer back on the racing line a little ahead of where it is.
+    /// Put a racer back on the track (every reset: the wheel / flip / stuck timers, a fall, the R key, a replay's
+    /// respawn): on the centreline at the point nearest its model origin, looking along the line with its slope,
+    /// at rest. The model origin goes on the line, which runs 1-2.5 m over the road, so the car drops onto it.
+    /// The state wipe 0x40da34 is `Car::place_along` and the timers here.
+    // CLASSIC 0x425910: 0x456ab0 -> 0x4567d4 projects the position on the spline [0x74b87c] from the nearest key of
+    // all (0x45604c without a hint) and writes the spline point back (0x456939), 0x456af4 the tangent there (param
+    // ± 0.5), 0x42c334 the look-at, rb v and ω = 0 [O]. APPROX [D]: ours takes the nearest point of the sampled
+    // spline (`Centreline::nearest`), the original the key-chord projection mapped onto the spline: the point differs
+    // where the line curves between keys, by well under a metre along the line.
     pub fn respawn(&mut self, slot: usize) {
         let r = &mut self.racers[slot];
-        let flat = Vec3::new(r.car.pos.x, 0.0, r.car.pos.z);
-        let nodes = &self.ai_line.nodes;
-        let Some(i) = (0..nodes.len()).min_by(|&a, &b| {
-            Vec3::new(nodes[a].x, 0.0, nodes[a].z).distance_squared(flat).total_cmp(&Vec3::new(nodes[b].x, 0.0, nodes[b].z).distance_squared(flat))
-        }) else {
-            return;
-        };
-        let nd = &nodes[(i + 5) % nodes.len()];
-        let ride = r.car.p.ride_height();
-        // the height comes from the centreline at the node (projected from the car's progress),
-        // not from the car: a car that fell under the track would otherwise find no ground and
-        // respawn in the void
-        let y_ref = self.line.at(r.progress.s).0.y;
-        let (_, s_node) = self.line.project(Vec3::new(nd.x, y_ref, nd.z), r.progress.sample());
-        let y_line = self.line.at(s_node).0.y;
-        // design choice: of the road-like faces in the column, take the one nearest where the
-        // road should be. The centreline runs 1-2.5 m above the road on every track
-        // (lineheight example); the first face from above can be the top of a collision box
-        // over the road (NeoCity near (-439, -93): a face at +4 m, between walls).
-        let y = road_near(&self.world, nd.x, nd.z, y_line + 5.0, y_line - LINE_ABOVE_ROAD.get())
-            .or_else(|| self.world.ground(nd.x, nd.z, y_line + 50.0))
-            .unwrap_or(y_line);
-        r.car.place(Vec3::new(nd.x, y - ride, nd.z), Vec3::from(nd.dir));
+        let (p, dir) = self.line.at(self.line.nearest(r.car.model_pos()));
+        r.car.place_along(p, dir);
+        let up = r.car.rot.y_axis;
+        r.car.pos = p - up * r.car.p.ride_height();
         (r.airborne_s, r.flip_s) = (0.0, 0.0); // 0x40da34
         r.stuck = None;
         r.ai.reset(&r.car);
-        r.ai.ease_in();
-        r.progress.teleported(&self.line, Vec3::new(nd.x, y, nd.z), self.clock_ms as u32);
+        r.progress.teleported(&self.line, p, self.clock_ms as u32);
         // a teleport, not motion: no interpolation from where the car was
         self.sync_view_pose(slot);
     }
@@ -991,31 +1028,8 @@ impl Race {
     }
 }
 
-motor_tune::tunable! {
-    /// How far the centreline typically runs above the road surface (median over the tracks) [O].
-    /// range: 0..6
-    /// unit: m
-    /// applies: restart
-    LINE_ABOVE_ROAD: f32 = 2.0;
-}
-
-/// Of the faces flat enough to drive on in the column at (x, z) below `y_top` (30 m deep), the
-/// height of the one nearest `y_want`.
-fn road_near(world: &World, x: f32, z: f32, y_top: f32, y_want: f32) -> Option<f32> {
-    let mut top = y_top;
-    let mut best: Option<f32> = None;
-    for _ in 0..32 {
-        let Some(h) = world.raycast(Vec3::new(x, top, z), Vec3::new(x, y_top - 30.0, z)) else { break };
-        if h.normal.y >= crate::car::WHEEL_MIN_NY.get() && best.is_none_or(|b| (h.point.y - y_want).abs() < (b - y_want).abs()) {
-            best = Some(h.point.y);
-        }
-        top = h.point.y - 0.01;
-    }
-    best
-}
-
 impl Race {
-    /// Rubber band (0x40d450 normalises, 0x40d574 applies): AI gear tops and acc force scale by
+    /// Rubber band (0x40d450 normalises, 0x40d574 applies): AI forward gear tops and acc force scale by
     /// 1 + clamp(diff, −2, 2) · AI[10] · 0.01 [O]. Cars are rated by progress in ai.dat nodes
     /// ((laps counted − 1 + finished) · N + node, 1-based; a car whose lap counter has just
     /// turned but which has not reached the lap's first checkpoint and is past 70 % of the
@@ -1063,26 +1077,88 @@ impl Race {
             if r.human {
                 continue;
             }
-            let scale = 1.0 + (rank(p) - reference).clamp(-2.0, 2.0) * k;
-            for (g, b) in r.car.p.gear_top.iter_mut().zip(&r.base_gear_top) {
-                *g = b * scale;
+            r.scale_power(1.0 + (rank(p) - reference).clamp(-2.0, 2.0) * k);
+        }
+    }
+}
+
+/// CLASSIC 0x481744..0x4817a5 (the sim step, every substep, after the AI step): a finished car's pedals are throttle
+/// 0.05 while its model origin's z (`[car+0x1a31]+0x30`, as 0x425910 reads it) is <= 0, else a 0.1 brake; an AI car
+/// (`car+0x1c` == 2; ours: every car the caller does not drive) also steers `AIGoalWheel` with the handbrake and the gear
+/// keys (`ctrl+4`) off. [U] why the world z: the finish lines are not at z = 0 (NeoCity -429, NolbyHills +386), so some
+/// tracks' finished cars creep on and the others brake to a stop. [O, #484] traces: RuhrStadt (z < 0) 194 -> 7 km/h in
+/// 5 s, then circles at 1-8 km/h; Goldbridge (z > 0) 253 -> 45 km/h in 5 s, standing by 15 s.
+fn finished_input(base: Input, car: &Car, ai: bool, goal_wheel: f32) -> Input {
+    let creep = car.model_pos().z <= 0.0;
+    let mut i = Input { throttle: if creep { 0.05 } else { 0.0 }, brake: if creep { 0.0 } else { 0.1 }, ..base };
+    if ai {
+        (i.steer, i.handbrake, i.shift_up, i.shift_down) = (goal_wheel, false, false, false);
+    }
+    i
+}
+
+/// Whether a car is reset this frame: a car object below `FALL_RESET_Y` at once, at any time; the timers of 0x40d854
+/// only while the race clock runs (0x704e30 != 0) and the car has not finished (car+0x1a99). Knockout's eliminated cars
+/// (ours) stay where they are.
+// CLASSIC 0x45b01e..0x45b084 / 0x45c332 (per car, every frame) [O]
+fn reset_now(r: &Racer, racing: bool) -> bool {
+    let fell = !r.remote && r.car.model_pos().y < FALL_RESET_Y;
+    let timed = racing && r.progress.finished_ms.is_none() && reset_due(r.airborne_s, r.flip_s);
+    (fell || timed) && r.progress.eliminated_ms.is_none()
+}
+
+/// A car whose model origin is below this is reset at once (`fcomp [0x4d4f56]` at 0x45b02f) [O].
+const FALL_RESET_Y: f32 = -100.0;
+
+/// How long after GO the start spread runs: `[0x704e30] + 7000` (`add eax,0x1b58` at 0x45ac1f) [O].
+const START_SPREAD_MS: f64 = 7000.0;
+
+impl Race {
+    /// The AI start spread (#481): for the first 7 s after GO every car but the human's runs at
+    /// `f = 1 + clamp((rank − 1)·2/(n − 1) − 1, ±2) · arg`, `arg = t/7000·0.25 − 0.25` (t = ms since GO): the leading
+    /// AI car ×1.25 at GO, the last ×0.75, both easing to ×1 at 7 s (`scale_power`). `n` counts every car (the human too,
+    /// 0x4276c4), the rank is the race position (car+0x1a7d, `standings`). It does not look at CatchUp. With one car
+    /// `2/(n − 1)` is infinite and `0·inf` NaN, which the clamp's compares turn into −2 [O]. The original runs it in
+    /// GameType 0, 1 and 5 (Single, League, demo); ours has AI cars in those and in Knockout (a Single race) only.
+    // CLASSIC 0x45ac13..0x45acdc (gate, arg: 0x4d4f0e 1/7000, 0x4d4f16 0.25, 0x4d4f1e −0.25), 0x40d6f0 (2/(n−1),
+    // 0x4cf463 −1, 0x4cf46b 2), 0x40d718 (scale: 0x4cf473 −1, clamp 0x4cf47b / 0x4cf483 ±2)
+    fn spread_start(&mut self) {
+        let n = self.racers.len();
+        let step = 2.0 / (n as f32 - 1.0);
+        let arg = self.clock_ms as f32 * (1.0 / 7000.0) * 0.25 - 0.25;
+        for (place, slot) in self.standings().into_iter().enumerate() {
+            let r = &mut self.racers[slot];
+            if r.human {
+                continue;
             }
-            r.car.p.acc_force = r.base_acc * scale;
+            let x = place as f32 * step - 1.0;
+            let x = if x.is_nan() { -2.0 } else { x.clamp(-2.0, 2.0) };
+            r.scale_power(1.0 + x * arg);
         }
     }
 }
 
 impl Racer {
+    /// The AI power scale of the rubber band (0x40d574) and the start spread (0x40d718): the forward gear tops and the
+    /// acc force at `f` times their unscaled values. Reverse (`gear_top[0]`, P[1]) is never scaled: both loops write
+    /// `P[k+1] = f·P[k+0x1b]` for k = 1..Gears from the copy 0x40cffd made, and `P[0xd] = f·P[0x22]` [O].
+    fn scale_power(&mut self, f: f32) {
+        for (i, (g, b)) in self.car.p.gear_top.iter_mut().zip(&self.base_gear_top).enumerate() {
+            *g = if i == 0 { *b } else { b * f };
+        }
+        self.car.p.acc_force = self.base_acc * f;
+    }
+
     /// Debug tuning (motorview F11): `car.p` was edited from `before`; take its gear tops and
-    /// acc force as the new unscaled values, dividing out the rubber band's current scale, so
+    /// acc force as the new unscaled values, dividing out the AI power scale (`scale_power`) of the moment, so
     /// the next rubber-band pass keeps the edit.
     pub fn rebase(&mut self, before: &CarParams) {
         let scale = if self.base_acc != 0.0 && before.acc_force != 0.0 { before.acc_force / self.base_acc } else { 1.0 };
         self.base_acc = self.car.p.acc_force / scale;
-        self.base_gear_top = self.car.p.gear_top.iter().map(|g| g / scale).collect();
+        self.base_gear_top = self.car.p.gear_top.iter().enumerate().map(|(i, g)| if i == 0 { *g } else { g / scale }).collect();
     }
 
-    /// Debug tuning (motorview, #434): the parameters without the rubber band's scale (`base_acc`, `base_gear_top`),
+    /// Debug tuning (motorview, #434): the parameters without the AI power scale (`base_acc`, `base_gear_top`),
     /// what a tuning edit compares with the car file.
     pub fn tuned(&self) -> CarParams {
         let mut p = self.car.p.clone();
@@ -1091,14 +1167,14 @@ impl Racer {
         p
     }
 
-    /// Debug tuning: put unscaled parameters (`tuned`) in place, the rubber band's current scale kept on top.
+    /// Debug tuning: put unscaled parameters (`tuned`) in place, the current AI power scale kept on top.
     pub fn set_tuned(&mut self, p: &CarParams) {
         let scale = if self.base_acc != 0.0 { self.car.p.acc_force / self.base_acc } else { 1.0 };
         self.base_acc = p.acc_force;
         self.base_gear_top.clone_from(&p.gear_top);
         self.car.p = p.clone();
         self.car.p.acc_force = p.acc_force * scale;
-        for g in &mut self.car.p.gear_top {
+        for g in self.car.p.gear_top.iter_mut().skip(1) {
             *g *= scale;
         }
     }
@@ -1262,7 +1338,9 @@ mod rewind_tests {
         let drop = |cheat: Option<crate::cheats::NameCheat>| {
             let mut race = Race::load(&root, 1, &[1], None, Some(3)).unwrap();
             race.set_name_cheat(cheat);
-            race.racers[0].car.pos.y += 20.0;
+            // from rest 20 m over the grid spot (the load's first frame has dropped the car already, #532)
+            let (p, fwd) = race.grid_spawn(0);
+            race.racers[0].car.place(p + Vec3::Y * 20.0, fwd);
             let y0 = race.racers[0].car.pos.y;
             for _ in 0..30 {
                 race.step(1.0 / 60.0, Input::default());
@@ -1487,7 +1565,9 @@ mod countdown_tests {
             revved.step(dt, full);
             idle.step(dt, Input::default());
         }
-        let (min, moved) = (revved.racers[i].car.p.min_rpm, (revved.racers[i].car.pos - start).length());
+        // along the ground: the car drops onto its springs from the grid's line height first (#531)
+        let flat = |d: Vec3| Vec3::new(d.x, 0.0, d.z).length();
+        let (min, moved) = (revved.racers[i].car.p.min_rpm, flat(revved.racers[i].car.pos - start));
         assert!(revved.racers[i].car.rpm > min + 3000.0, "rpm {}", revved.racers[i].car.rpm);
         assert!(moved < 0.2, "the car rolled {moved} m on the grid");
         assert!(idle.racers[j].car.rpm <= min + 1.0, "idle rpm {}", idle.racers[j].car.rpm);
@@ -1496,7 +1576,7 @@ mod countdown_tests {
             spun |= revved.racers[i].car.wheelspin;
         }
         assert!(spun, "no wheelspin launch");
-        assert!((revved.racers[i].car.pos - start).length() > 1.0, "the car did not launch");
+        assert!(flat(revved.racers[i].car.pos - start) > 1.0, "the car did not launch");
     }
 }
 
@@ -1757,5 +1837,146 @@ mod stuck_reset_tests {
         assert!(!stuck_due(Some(9.0), Some(150.0)));
         assert!(stuck_due(Some(9.0), Some(150.5)));
         assert!(stuck_due(Some(8.1), None));
+    }
+}
+
+/// The #480 Phase 3 ports: start spread (#481), reset placement and rules (#482), radius and reverse (#483), finished
+/// cars (#484).
+#[cfg(test)]
+mod coverage_gap_tests {
+    use super::*;
+
+    fn race(player: Option<usize>) -> Option<Race> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        root.exists().then(|| Race::load(&root, 1, &[1, 4, 7], player, Some(3)).unwrap())
+    }
+
+    fn at_go(player: Option<usize>) -> Option<Race> {
+        let mut race = race(player)?;
+        while !race.started() {
+            race.step(1.0 / 60.0, Input::default());
+        }
+        Some(race)
+    }
+
+    /// #483: the contact radius is the larger flat distance of hull corners FL and BR (0x47cce8).
+    #[test]
+    fn contact_radius_from_the_hull_corners() {
+        let Some(race) = race(None) else { return };
+        // car01: FL (-0.974, 2.027), BR (0.974, -2.057)
+        let r = race.racers[0].car.p.radius();
+        assert!((r - 2.2761).abs() < 1e-3, "{r}");
+    }
+
+    /// #481 / #483: right after GO the leading AI car runs at x1.25 and the last at x0.75 (forward gears and acc force,
+    /// never reverse), easing to x1 at 7 s. Without catch-up nothing rescales after that, so the last factor stays.
+    #[test]
+    fn start_spread_by_race_position() {
+        let Some(mut race) = at_go(None) else { return };
+        race.ai_vector[10] = 0.0;
+        race.step(1.0 / 60.0, Input::default());
+        let order = race.standings();
+        let ratio = |r: &Racer| r.car.p.acc_force / r.base_acc;
+        let arg = 0.25 - race.clock_ms as f32 / 7000.0 * 0.25;
+        let want = [1.0 + arg, 1.0, 1.0 - arg];
+        for (place, &slot) in order.iter().enumerate() {
+            let r = &race.racers[slot];
+            assert!((ratio(r) - want[place]).abs() < 1e-4, "place {place}: {} want {}", ratio(r), want[place]);
+            assert_eq!(r.car.p.gear_top[0], r.base_gear_top[0], "reverse is never scaled");
+            assert!((r.car.p.gear_top[1] / r.base_gear_top[1] - ratio(r)).abs() < 1e-4);
+        }
+        while race.clock_ms < 7100.0 {
+            race.step(1.0 / 60.0, Input::default());
+        }
+        for r in &race.racers {
+            assert!((ratio(r) - 1.0).abs() < 1e-3, "{}", ratio(r));
+        }
+        // the dev hook leaves the cars alone
+        let mut off = self::race(None).unwrap();
+        off.ai_vector[10] = 0.0;
+        off.start_spread = false;
+        while !off.started() {
+            off.step(1.0 / 60.0, Input::default());
+        }
+        off.step(1.0 / 60.0, Input::default());
+        assert!(off.racers.iter().all(|r| r.car.p.acc_force == r.base_acc));
+    }
+
+    /// #483: the AI power scale (rubber band and start spread) leaves reverse alone; the tuning paths keep it unscaled.
+    #[test]
+    fn power_scale_keeps_reverse() {
+        let Some(mut race) = race(None) else { return };
+        let r = &mut race.racers[1];
+        r.scale_power(1.2);
+        assert_eq!(r.car.p.gear_top[0], r.base_gear_top[0]);
+        assert!((r.car.p.gear_top[1] - r.base_gear_top[1] * 1.2).abs() < 1e-3);
+        let before = r.car.p.clone();
+        r.car.p.gear_top[0] += 1.0;
+        r.rebase(&before);
+        assert_eq!(r.base_gear_top[0], before.gear_top[0] + 1.0, "an edited reverse is taken as is");
+        let tuned = r.tuned();
+        r.set_tuned(&tuned);
+        assert_eq!(r.car.p.gear_top[0], tuned.gear_top[0]);
+    }
+
+    /// #482: a reset puts the model origin on the nearest centreline point, looking along the line with its slope,
+    /// at rest, the bump phase at 0.
+    #[test]
+    fn respawn_on_the_nearest_centreline_point() {
+        let Some(mut race) = at_go(Some(0)) else { return };
+        let (p, dir) = race.line.at(900.0);
+        let side = Vec3::new(dir.z, 0.0, -dir.x).normalize() * 6.0;
+        let r = &mut race.racers[0];
+        r.car.place(p + side, -dir);
+        r.car.set_bump_phase(3.0);
+        r.car.vel = Vec3::new(1.0, 2.0, 30.0);
+        race.respawn(0);
+        let car = &race.racers[0].car;
+        assert!(car.model_pos().distance(p) < 0.1, "{} from {p}", car.model_pos());
+        assert!(car.rot.z_axis.dot(dir) > 0.999, "along the line, pitched with it: {} vs {dir}", car.rot.z_axis);
+        assert!(car.rot.x_axis.y.abs() < 1e-6, "not rolled");
+        assert_eq!((car.vel, car.ang, car.bump_phase()), (Vec3::ZERO, Vec3::ZERO, 0.0));
+    }
+
+    /// #482: a fall below -100 resets at once, even before GO.
+    #[test]
+    fn a_fall_resets_at_once() {
+        let Some(mut race) = race(Some(0)) else { return };
+        let p = race.racers[1].car.pos;
+        race.racers[1].car.place(Vec3::new(p.x, -150.0, p.z), Vec3::Z);
+        race.step(1.0 / 60.0, Input::default());
+        let m = race.racers[1].car.model_pos();
+        assert!(m.y > -100.0 && race.line.at(race.line.nearest(m)).0.distance(m) < 0.01, "{m}");
+    }
+
+    /// #482: the timers reset a car only while racing and not after it finished; a fall always does.
+    #[test]
+    fn reset_rules() {
+        let Some(mut race) = at_go(Some(0)) else { return };
+        let r = &mut race.racers[1];
+        r.airborne_s = RESET_AFTER.get() + 1.0;
+        assert!(reset_now(r, true));
+        assert!(!reset_now(r, false), "not before GO");
+        r.progress.finished_ms = Some(1000);
+        assert!(!reset_now(r, true), "not a finished car");
+        r.car.pos.y = -120.0;
+        assert!(reset_now(r, true), "a fall always");
+        r.progress.eliminated_ms = Some(1000);
+        assert!(!reset_now(r, true), "not a knocked-out car");
+    }
+
+    /// #484: a finished car's pedals by the sign of its z; an AI car steers the track's AIGoalWheel.
+    #[test]
+    fn finished_car_override() {
+        let Some(mut race) = race(Some(0)) else { return };
+        assert_eq!(race.goal_wheel, 0.05, "RedRock");
+        let base = Input { throttle: 1.0, brake: 0.0, steer: -0.7, handbrake: true, shift_up: true, ..Input::default() };
+        let car = &mut race.racers[1].car;
+        car.place(Vec3::new(0.0, 10.0, -5.0), Vec3::Z);
+        let i = finished_input(base, car, true, 0.4);
+        assert_eq!((i.throttle, i.brake, i.steer, i.handbrake, i.shift_up), (0.05, 0.0, 0.4, false, false));
+        car.place(Vec3::new(0.0, 10.0, 5.0), Vec3::Z);
+        let i = finished_input(base, car, false, 0.4);
+        assert_eq!((i.throttle, i.brake, i.steer, i.handbrake, i.shift_up), (0.0, 0.1, -0.7, true, true), "the driver keeps steering");
     }
 }

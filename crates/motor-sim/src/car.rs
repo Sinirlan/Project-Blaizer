@@ -43,8 +43,8 @@ motor_tune::tunable! {
     /// range: 0..90
     /// unit: deg
     AIR_LEVEL_FROM: f32 = 30.0;
-    /// Design choice: surfaces steeper than this (world normal y; 31 degrees) are walls: the respawn
-    /// ground search skips them and a hull hit on one sets `Car::on_wall`. Walls on several
+    /// Design choice: surfaces steeper than this (world normal y; 31 degrees) are walls: a hull hit on one
+    /// sets `Car::on_wall`. Walls on several
     /// tracks stand on 30-55 degree chamfers (world ny 0.6-0.85: Goldbridge concrete, Okkun steel);
     /// road surfaces have ny >= 0.89 (slopescan example). The wheel rays and the hull response take
     /// any face, like the original's.
@@ -69,11 +69,11 @@ impl Default for DesignChoices {
     }
 }
 motor_tune::tunable! {
-    /// Steering force reaches full strength above this speed (P[0xc] = 4.0) [O].
+    /// Steering force reaches full strength above this speed (P[0xc] = 4.0, 0x40d29c) [O].
     /// range: 0.5..20
     /// unit: m/s
     FULL_STEER_SPEED: f32 = 4.0;
-    /// Suspension damper constant in normal mode (0x75689c = 65000) [O]. A car takes it when it is built.
+    /// Suspension damper constant in normal mode (0x75689c = 65000, set at 0x40d40d) [O]. A car takes it when it is built.
     /// range: 5000..200000
     /// applies: restart
     pub SUSP_DAMP: f32 = 65000.0;
@@ -83,20 +83,20 @@ motor_tune::tunable! {
     /// range: 0.002..0.05
     /// unit: s
     SUSP_DAMP_REF_H3: f32 = 1.0 / 90.0;
-    /// Pitch on acceleration/braking (0x47cdf4): L = (K0 - KV vz) * dvz/dt, clamped to ±`PITCH_MAX` [O].
+    /// Pitch on acceleration/braking (0x47cdf4): L = (K0 - KV vz) * dvz/dt, clamped to ±`PITCH_MAX` (0x47d4a6, 0x4d7dee) [O].
     /// range: 0..2000
     PITCH_K0: f32 = 500.0;
-    /// The speed term of the pitch moment (see `PITCH_K0`) [O].
+    /// The speed term of the pitch moment (see `PITCH_K0`; 0x47d4a0, 0x4d7e06) [O].
     /// range: 0..10
     PITCH_KV: f32 = 3.0;
-    /// The largest pitch moment on acceleration/braking [O].
+    /// The largest pitch moment on acceleration/braking (0x47d4b5, 0x4d7ee6 / -0x4d7eee) [O].
     /// range: 0..30000
     /// unit: N m
     PITCH_MAX: f32 = 8000.0;
-    /// Body roll in corners per wheel: torque_z -= sqrt|vz| * vx * k [O].
+    /// Body roll in corners per wheel: torque_z -= sqrt|vz| * vx * k (0x47e187, 0x4d7db6) [O].
     /// range: 0..300
     ROLL_K: f32 = 80.0;
-    /// The same roll factor while the car slides [O].
+    /// The same roll factor while the car slides (0x47d5ad, 0x4d7e0e) [O].
     /// range: 0..300
     ROLL_K_SLIDING: f32 = 10.0;
     /// Bumpy surfaces: per-wheel pitch and roll torques are clamped to this (0x4d7ea6) [O].
@@ -106,6 +106,10 @@ motor_tune::tunable! {
     /// Bump phase wraps at 256*pi (0x4d7ed6) [O].
     /// range: 100..2000
     pub BUMP_WRAP: f32 = 804.247_7;
+    /// The roll and pitch rates keep this share per second on the ground (0x3851b717 stored at 0x47d800, read for ωx and ωz at
+    /// 0x47dc8b, #488) [O].
+    /// range: 0..0.01
+    PITCH_ROLL_DAMP: f32 = 0.00005;
     /// Downforce: F_y = DOWNFORCE * m * v_forward (0x40ec14, 0x4cf5bb) [O].
     /// range: -0.3..0.3
     DOWNFORCE: f32 = -0.05;
@@ -115,16 +119,17 @@ motor_tune::tunable! {
     /// unit: N
     CREEP_DRIVE: f32 = 500.0;
     /// The engine torque estimate the wheelspin flag compares with the surface limit, first gear:
-    /// Q = rpm * 0.001 * taper * SPIN_T1 (+ |steer| * `SPIN_STEER_Q`) (0x4ade38, 0x4cf4bb) [O].
+    /// Q = rpm * 0.001 * taper * SPIN_T1 (+ |steer| * `SPIN_STEER_Q`): the per-gear table 0x4ade38 [reverse 0, 400, 350,
+    /// 330] that 0x40db88 copies, first gear at 0x4ade3c [O].
     /// range: 0..1000
     SPIN_T1: f32 = 400.0;
-    /// The wheelspin torque estimate in second gear (see `SPIN_T1`) [O].
+    /// The wheelspin torque estimate in second gear (see `SPIN_T1`; 0x4ade40) [O].
     /// range: 0..1000
     SPIN_T2: f32 = 350.0;
-    /// The wheelspin torque estimate in third gear (see `SPIN_T1`) [O].
+    /// The wheelspin torque estimate in third gear (see `SPIN_T1`; 0x4ade44) [O].
     /// range: 0..1000
     SPIN_T3: f32 = 330.0;
-    /// The steering term of the wheelspin torque estimate in first gear (see `SPIN_T1`) [O].
+    /// The steering term of the wheelspin torque estimate in first gear (see `SPIN_T1`; 0x40dc34, 0x4cf4bb) [O].
     /// range: 0..2000
     SPIN_STEER_Q: f32 = 500.0;
     /// cap on the torque bracket of the wheelspin law, see `Car::curve` [APPROX]
@@ -162,31 +167,31 @@ motor_tune::tunable! {
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_SLIDE_SPEED_MAX: f32 = 1.3;
-    /// grip[0], the slide-speed scale, at GripLevel 0 (see `GRIP_SLIDE_SPEED_MAX`) [O].
+    /// grip[0], the slide-speed scale, at GripLevel 0 (see `GRIP_SLIDE_SPEED_MAX`; 0x4ade28) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_SLIDE_SPEED_MIN: f32 = 0.75;
-    /// grip[1], the slide-yaw scale, at GripLevel 10 (see `GRIP_SLIDE_SPEED_MAX`) [O].
+    /// grip[1], the slide-yaw scale, at GripLevel 10 (see `GRIP_SLIDE_SPEED_MAX`; 0x4ade1c) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_SLIDE_YAW_MAX: f32 = 1.3;
-    /// grip[1], the slide-yaw scale, at GripLevel 0 [O].
+    /// grip[1], the slide-yaw scale, at GripLevel 0 (0x4ade2c) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_SLIDE_YAW_MIN: f32 = 0.75;
-    /// grip[2], the lateral friction scale, at GripLevel 10 [O].
+    /// grip[2], the lateral friction scale, at GripLevel 10 (0x4ade20) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_LATERAL_MAX: f32 = 0.75;
-    /// grip[2], the lateral friction scale, at GripLevel 0 [O].
+    /// grip[2], the lateral friction scale, at GripLevel 0 (0x4ade30) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_LATERAL_MIN: f32 = 1.3;
-    /// grip[3], the yaw friction scale, at GripLevel 10 [O].
+    /// grip[3], the yaw friction scale, at GripLevel 10 (0x4ade24) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_YAW_MAX: f32 = 0.95;
-    /// grip[3], the yaw friction scale, at GripLevel 0 [O].
+    /// grip[3], the yaw friction scale, at GripLevel 0 (0x4ade34) [O].
     /// range: 0.3..2.5
     /// applies: restart
     GRIP_YAW_MIN: f32 = 1.1;
@@ -359,9 +364,13 @@ impl CarParams {
         MODEL_OFFSET.get() * self.scale
     }
 
-    /// Bounding radius for the contact early-out (`body::CAR_RADIUS`, times `scale`).
+    /// Bounding radius for the sphere early-out of the contacts (rb+0x2c, read only at 0x4804ec): the larger of the
+    /// flat distances of hull corners 0 and 2 (PhyCorner FL / BR) from the origin, 2.16 m (car08) to 2.38 m (car04).
+    /// The corners carry the gulliver scale already.
+    // CLASSIC 0x47cce8 (car setup, 0x40d3e2) [O]
     pub fn radius(&self) -> f32 {
-        crate::body::CAR_RADIUS.get() * self.scale
+        let flat = |c: Vec3| (c.x * c.x + c.z * c.z).sqrt();
+        flat(self.corners[0]).max(flat(self.corners[2]))
     }
 
     /// The body's inertia: `inertia_base()`, times `scale * feel` for a scaled car.
@@ -727,7 +736,30 @@ impl Car {
         let fwd = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::Z);
         // left-handed axes: right = up x forward
         let right = Vec3::Y.cross(fwd);
-        self.rot = Mat3::from_cols(right, Vec3::Y, fwd);
+        self.pose_at_rest(pos, Mat3::from_cols(right, Vec3::Y, fwd));
+    }
+
+    /// Put the car at `pos` (body origin) looking along `forward` with its slope, at rest: the look-at of the reset
+    /// placement (forward = `forward` normalised, right horizontal, up = forward x right, so pitched but not rolled).
+    // CLASSIC 0x42c334 (from 0x425910) [O]
+    pub fn place_along(&mut self, pos: Vec3, forward: Vec3) {
+        let fwd = forward.try_normalize().unwrap_or(Vec3::Z);
+        let Some(right) = Vec3::Y.cross(fwd).try_normalize() else {
+            // straight up or down: the look-at keeps the old matrix (0x42b674 fails); stand it flat instead [I]
+            return self.place(pos, self.rot.z_axis);
+        };
+        self.pose_at_rest(pos, Mat3::from_cols(right, fwd.cross(right), fwd));
+    }
+
+    /// The model origin (the original's object matrix position, what 0x47b3e8..0x47b3f0 return): `ride_height`
+    /// above the body origin along body up (0x481014 / 0x481361).
+    pub fn model_pos(&self) -> Vec3 {
+        self.pos + self.rot.y_axis * self.p.ride_height()
+    }
+
+    /// `place` / `place_along` past the orientation: the state wipe 0x40da34.
+    fn pose_at_rest(&mut self, pos: Vec3, rot: Mat3) {
+        self.rot = rot;
         self.pos = pos;
         self.vel = Vec3::ZERO;
         self.ang = Vec3::ZERO;
@@ -743,6 +775,7 @@ impl Car {
         (self.wheel_spin, self.tyre_effect) = ([0.0; 2], [None; 2]);
         self.chassis_mat = None;
         self.flip_contact = false; // 0x40da6c
+        self.bump_phase = 0.0; // rb+0x18 (0x40da34)
         self.hull_hits.clear();
         self.records.iter_mut().for_each(|r| *r = None);
     }
@@ -948,6 +981,7 @@ impl Car {
         // (the brake going forward, the throttle in reverse); it cuts the opposite pedal after the
         // traction flag has read it (0x40dd51 / 0x40e20d)
         let locked = if self.gear == 0 { thr } else { brk } > 0.9;
+        self.brake_locked = locked; // P[0x28]: 1 at 0x40dd47 / 0x40e203, else 0 (0x40e153 / 0x40e290)
         let (thr, brk) = match (locked, self.gear) {
             (true, 0) => (thr, 0.0),
             (true, _) => (0.0, brk),
@@ -995,6 +1029,7 @@ impl Car {
         let brk = inp.brake.clamp(0.0, 1.0);
         let (spin, q, g) = self.traction(inp.throttle.clamp(0.0, 1.0), inp.steer);
         // a full brake locks the wheels and cuts the throttle (0x40e62c)
+        self.brake_locked = brk > 0.9; // P[0x28], 0x40e62c / 0x40e90a
         let thr = if brk > 0.9 { 0.0 } else { inp.throttle.clamp(0.0, 1.0) };
         let vz = self.vel.z;
         let top = self.p.gear_top[self.gear];
@@ -1080,8 +1115,9 @@ impl Car {
         if inp.handbrake && applied_brake < 0.5 * p.brake_force {
             applied_brake += 0.5 * p.brake_force;
         }
-        // locked wheels P[0x28]: brake pedal at 0.9 or more
-        let locked = applied_brake >= 0.9 * p.brake_force;
+        // locked wheels P[0x28]: written by the engine alone (0x40dd47 / 0x40e203 / 0x40e62c); the car step only reads it, so the
+        // handbrake's extra brake does not lock the wheels (#488) [O]
+        let locked = self.brake_locked;
         // Gravity and downforce go into the wheels' extra-force slots (0x40ed94..0x40eef4), body
         // frame from the pose at the start of the substep: a quarter of the weight at every hub,
         // the world-vertical downforce split 0.3/0.3/0.2/0.2 FL/FR/BR/BL. Applied at the hubs
@@ -1334,8 +1370,7 @@ impl Car {
         let (zs, zn) = (cap(avg(|m| m.z_spin) * zk * a), cap(avg(|m| m.z_nospin) * zk * a));
         let (rs, rn) = (cap(avg(|m| m.rot_spin) * g[3]), cap(avg(|m| m.rot_nospin) * g[3]));
         let yaw_term = self.ang.y.abs() * (self.vel.z * self.vel.z + self.vel.x * self.vel.x);
-        let locked = applied_brake >= 0.9 * bf;
-        self.brake_locked = locked;
+        let locked = self.brake_locked; // set by the engine (see `substep`)
         let lateral = self.vel.x.abs() - sl;
         // the handbrake (P[0x2b], set at 0x40ec8f) always slides (§3.5); reverse never does
         self.sliding = self.gear != 0 && (handbrake || lateral > 0.0 || yaw_term > rl || self.wheelspin || locked);
@@ -1365,9 +1400,12 @@ impl Car {
         let (x, z, r) = (x.max(0.0), z.max(0.0), r.max(0.0));
         self.vel.x *= x.powf(h);
         self.vel.z *= z.powf(h);
-        self.ang.x *= 5e-5f32.powf(h);
+        // CLASSIC 0x47dc89..0x47dcd4 / 0x47eb86..0x47ebae: ωx *and ωz* take the 0x3851b717 constant (5e-5, stored at
+        // 0x47d800), only ωy takes the surface's yaw base (x87 stack traced by hand, #488) [O]
+        let pitch_roll = PITCH_ROLL_DAMP.get().powf(h);
+        self.ang.x *= pitch_roll;
         self.ang.y *= r.powf(h);
-        self.ang.z *= r.powf(h);
+        self.ang.z *= pitch_roll;
     }
 
     /// Hull test points in body space: 4 corners at CoM height and the three roof points when

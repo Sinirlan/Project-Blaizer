@@ -159,6 +159,24 @@ impl Centreline {
     }
 }
 
+impl Centreline {
+    /// Arc length of the point of the line nearest `p` (3D, over the whole lap): the nearest sample, refined on the
+    /// segments before and after it (`project` refines only forward, so it can stop at a sample).
+    pub fn nearest(&self, p: Vec3) -> f32 {
+        let n = self.pts.len();
+        let (i, _) = self.project(p, None);
+        let on = |a: usize| {
+            let (pa, pb) = (self.pts[a], self.pts[(a + 1) % n]);
+            let seg = pb - pa;
+            let t = ((p - pa).dot(seg) / seg.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            (pa + seg * t, self.s[a] + t * seg.length())
+        };
+        let (q0, s0) = on((i + n - 1) % n);
+        let (q1, s1) = on(i);
+        if q0.distance_squared(p) < q1.distance_squared(p) { s0 } else { s1 }
+    }
+}
+
 /// The centreline of `trk` (a parsed `Game/TrackN.trk`): its `SplineName` motion file.
 pub fn load_centreline(root: &Path, trk: &cfg::Config) -> Result<Centreline, String> {
     let name = trk.get("SplineName").and_then(|e| e.values.first().cloned()).ok_or("track file: no SplineName")?;

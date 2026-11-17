@@ -13,6 +13,40 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
+/// Linear resampling over a queue of stereo frames (the music stream's, shared): the frame at the read position is
+/// interpolated between the first two queued frames.
+#[derive(Default)]
+struct Resampler {
+    pub buf: VecDeque<[f32; 2]>,
+    frac: f64,
+}
+
+impl Resampler {
+    /// the frame at the read position; None with fewer than two frames queued
+    #[inline]
+    pub fn frame(&self) -> Option<(f32, f32)> {
+        if self.buf.len() < 2 {
+            return None;
+        }
+        let (a, b) = (self.buf[0], self.buf[1]);
+        let t = self.frac as f32;
+        Some((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+    }
+
+    /// moves the read position on by `step` source frames; the count of frames left behind
+    #[inline]
+    pub fn advance(&mut self, step: f64) -> u64 {
+        self.frac += step;
+        let mut n = 0;
+        while self.frac >= 1.0 && !self.buf.is_empty() {
+            self.frac -= 1.0;
+            self.buf.pop_front();
+            n += 1;
+        }
+        n
+    }
+}
+
 /// Decoded audio: interleaved stereo at `rate`.
 struct Chunk {
     rate: u32,
@@ -21,10 +55,11 @@ struct Chunk {
 
 pub struct MusicStream {
     rx: Receiver<Chunk>,
-    buf: VecDeque<[f32; 2]>,
+    q: Resampler,
     rate: u32,
-    frac: f64,
     finished: bool,
+    /// fed by a decoder thread of its own (`open`), which `mix` may wait for; a `pcm` stream's feeder is the caller
+    decoder: bool,
     /// source sample frames consumed by the mixer (what has actually been played, no underrun silence)
     played: Arc<AtomicU64>,
     pub volume: f32,
@@ -62,27 +97,30 @@ impl MusicStream {
             .name("music".into())
             .spawn(move || decode_loop(&path, looping, &tx))
             .expect("spawn music thread");
-        MusicStream { rx, buf: VecDeque::new(), rate: 44100, frac: 0.0, finished: false, played: Arc::default(), volume }
+        MusicStream { rx, q: Resampler::default(), rate: 44100, finished: false, decoder: true, played: Arc::default(), volume }
     }
 
     /// A stream fed by the caller with interleaved stereo `i16` at `rate` (no decoder thread).
     pub fn pcm(rate: u32, volume: f32) -> (MusicStream, PcmFeed) {
         let (tx, rx) = channel();
         let played = Arc::new(AtomicU64::new(0));
-        let m = MusicStream { rx, buf: VecDeque::new(), rate, frac: 0.0, finished: false, played: played.clone(), volume };
+        let m = MusicStream { rx, q: Resampler::default(), rate, finished: false, decoder: false, played: played.clone(), volume };
         (m, PcmFeed { tx, rate, played })
     }
 
     pub fn is_finished(&self) -> bool {
-        self.finished && self.buf.len() < 2
+        self.finished && self.q.buf.len() < 2
     }
 
-    fn fill(&mut self) {
-        while self.buf.len() < 2 && !self.finished {
-            match self.rx.try_recv() {
+    /// Queue decoded chunks until two frames are ready. `wait` (offline mixing, #490): block for the decoder thread
+    /// rather than return with the queue short, which would play silence for as long as the decoder is late.
+    fn fill(&mut self, wait: bool) {
+        while self.q.buf.len() < 2 && !self.finished {
+            let got = if wait && self.decoder { self.rx.recv().map_err(|_| TryRecvError::Disconnected) } else { self.rx.try_recv() };
+            match got {
                 Ok(c) => {
                     self.rate = c.rate;
-                    self.buf.extend(c.data.as_chunks::<2>().0.iter().map(|f| [f[0], f[1]]));
+                    self.q.buf.extend(c.data.as_chunks::<2>().0.iter().map(|f| [f[0], f[1]]));
                 }
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => self.finished = true,
@@ -90,29 +128,24 @@ impl MusicStream {
         }
     }
 
-    /// Add into interleaved `out` at `out_rate`.
-    pub fn mix(&mut self, out: &mut [f32], channels: usize, out_rate: u32, master: f32) {
+    /// Add into interleaved `out` at `out_rate`. `wait`: see `fill`.
+    pub fn mix(&mut self, out: &mut [f32], channels: usize, out_rate: u32, master: f32, wait: bool) {
         let step = self.rate as f64 / out_rate as f64;
         let g = self.volume * master;
         for frame in out.chunks_mut(channels.max(1)) {
-            self.fill();
-            if self.buf.len() < 2 {
+            self.fill(wait);
+            let Some((l, r)) = self.q.frame() else {
                 continue; // decoder behind, or the end: silence
-            }
-            let (a, b) = (self.buf[0], self.buf[1]);
-            let t = self.frac as f32;
-            let (l, r) = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+            };
             if channels == 1 {
                 frame[0] += (l + r) * 0.5 * g;
             } else {
                 frame[0] += l * g;
                 frame[1] += r * g;
             }
-            self.frac += step;
-            while self.frac >= 1.0 && !self.buf.is_empty() {
-                self.frac -= 1.0;
-                self.buf.pop_front();
-                self.played.fetch_add(1, Ordering::Relaxed);
+            let n = self.q.advance(step);
+            if n > 0 {
+                self.played.fetch_add(n, Ordering::Relaxed);
             }
         }
     }
@@ -197,15 +230,35 @@ mod tests {
         let (mut m, feed) = MusicStream::pcm(1000, 1.0);
         feed.push(&[16384, -16384, 0, 0, 8192, 8192, 0, 0]); // 4 stereo frames
         let mut out = [0.0f32; 6]; // 3 frames at the stream's rate
-        m.mix(&mut out, 2, 1000, 1.0);
+        m.mix(&mut out, 2, 1000, 1.0, false);
         assert_eq!(feed.played(), 3);
         assert!((out[0] - 0.5).abs() < 1e-6 && (out[1] + 0.5).abs() < 1e-6);
         // underrun: only the last frame is left and it is never consumed, so nothing more counts
         let mut out = [0.0f32; 4];
-        m.mix(&mut out, 2, 1000, 1.0);
+        m.mix(&mut out, 2, 1000, 1.0, false);
         assert_eq!(feed.played(), 3);
         drop(feed);
-        m.mix(&mut out, 2, 1000, 1.0);
+        m.mix(&mut out, 2, 1000, 1.0, false);
         assert!(m.is_finished());
+    }
+
+    /// #490: an offline mix waits for the decoder thread, so the first frames are the file's, not silence, every time.
+    #[test]
+    fn offline_mix_waits_for_the_decoder() {
+        let dir = std::env::temp_dir().join(format!("motor_music_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.wav");
+        let pcm: Vec<i16> = (0..2 * 4000).map(|i| ((i % 200) as i16 - 100) * 100).collect();
+        std::fs::write(&path, crate::wav::encode_pcm16(44100, 2, &pcm)).unwrap();
+        let render = || {
+            let mut m = MusicStream::open(&path, false, 1.0);
+            let mut out = vec![0.0f32; 2 * 1000];
+            m.mix(&mut out, 2, 44100, 1.0, true);
+            out
+        };
+        let (a, b) = (render(), render());
+        assert_eq!(a, b);
+        assert!(a.iter().any(|&s| s != 0.0), "the decoder's first frames were played");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

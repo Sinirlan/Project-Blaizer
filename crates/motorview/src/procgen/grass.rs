@@ -251,6 +251,21 @@ pub fn track_bodies(fill: &super::fill::FillFile, world_textures: &[String]) -> 
     }
 }
 
+/// What `build` reads besides the world, which stays: the bodies and the fill triangles they grow on (as bytes). The World
+/// Editor rebuilds the grass (~0.5 s on a whole track) only when this changed, not on every fill edit.
+pub fn input_key(bodies: &[Body], s: &Scene, fill: &[Vertex]) -> (Vec<Body>, Vec<u8>) {
+    let bodies = &bodies[..bodies.len().min(MAX_BODIES)];
+    let mut layers: Vec<f32> = Vec::new();
+    for b in bodies {
+        let ids: Vec<u32> = b.textures.iter().flat_map(|name| s.world_textures.iter().enumerate().filter(|(_, n)| stem(n) == stem(name)).map(|(i, _)| i as u32)).collect();
+        layers.extend(s.world_tri_texture.iter().enumerate().filter(|(_, t)| ids.contains(t)).filter_map(|(ti, _)| s.tris.get(ti * 3).map(|v| v.layer)).filter(|&l| l >= 0.0));
+    }
+    layers.sort_by(f32::total_cmp);
+    layers.dedup();
+    let tris = fill.as_chunks::<3>().0.iter().filter(|v| layers.contains(&v[0].layer) && v[0].normal[1] > UP_MIN);
+    (bodies.to_vec(), tris.flat_map(|t| bytemuck::cast_slice::<Vertex, u8>(t).iter().copied()).collect())
+}
+
 /// What `build` makes of the bodies.
 #[derive(Default)]
 pub struct Mesh {

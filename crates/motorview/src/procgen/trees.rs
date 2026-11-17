@@ -208,6 +208,17 @@ fn pack() -> Option<&'static Pack> {
     .as_ref()
 }
 
+/// #543 parse the pack on a thread of its own, once per process: a scene load starts it first thing, so the
+/// parse (about 1.7 s, one thread) runs beside the car bodies and `pack_layers` finds it done or waits for it.
+pub fn warm() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            pack();
+        });
+    });
+}
+
 fn parse(bytes: &[u8]) -> Result<Pack, String> {
     let (doc, buffers, images) = gltf::import_slice(bytes).map_err(|e| e.to_string())?;
     let mut models = HashMap::new();

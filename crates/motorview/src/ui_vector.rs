@@ -512,6 +512,38 @@ impl Mesh {
         }
     }
 
+    /// Cut the mesh's triangles to the canvas below row `y` (`pos[1] >= y`), the colours interpolated
+    /// along the cut edges; the glow sources are left as they are. (The Car screen's reveal, #543: the
+    /// floor drawn again over the car below the scan line.)
+    pub fn keep_below(&mut self, y: f32) {
+        let (verts, idx) = (std::mem::take(&mut self.verts), std::mem::take(&mut self.idx));
+        let mix = |a: V, b: V, s: f32| V {
+            pos: [a.pos[0] + (b.pos[0] - a.pos[0]) * s, y],
+            color: std::array::from_fn(|i| a.color[i] + (b.color[i] - a.color[i]) * s),
+        };
+        for t in idx.as_chunks::<3>().0 {
+            let tri = t.map(|k| verts[k as usize]);
+            let mut poly: Vec<V> = Vec::with_capacity(4);
+            for i in 0..3 {
+                let (a, b) = (tri[i], tri[(i + 1) % 3]);
+                let (ina, inb) = (a.pos[1] >= y, b.pos[1] >= y);
+                if ina {
+                    poly.push(a);
+                }
+                if ina != inb {
+                    poly.push(mix(a, b, (y - a.pos[1]) / (b.pos[1] - a.pos[1])));
+                }
+            }
+            if poly.len() >= 3 {
+                let base = self.verts.len() as u32;
+                self.verts.extend_from_slice(&poly);
+                for k in 1..poly.len() as u32 - 1 {
+                    self.idx.extend([base, base + k, base + k + 1]);
+                }
+            }
+        }
+    }
+
     /// A disc as a polar lattice (`rings` x `segs`), each vertex coloured by `shade` (canvas
     /// point): any gradient, kept inside the disc.
     pub fn shade_disc(&mut self, c: P, r: f32, rings: usize, segs: usize, shade: &dyn Fn(P) -> Rgba) {

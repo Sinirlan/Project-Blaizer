@@ -304,14 +304,27 @@ pub fn paint(ctx: &egui::Context, size: (u32, u32), cam: &Camera, fov_x: f32, t:
 /// lines (shading view, wire counts, the note) follow in mono. At `pos`, moved under the toolbar's open flyout when
 /// that would cover it. True when its copy button (top right) was clicked.
 fn card(ctx: &egui::Context, t: &Telem, extra: &[Line], mut pos: Pos2) -> bool {
+    // The card grows to hold its longest text value (texture names) whole; it stays CARD_W wide at minimum and
+    // never past the screen's right edge (the label's truncate is then the fallback).
+    let painter = ctx.layer_painter(egui::LayerId::background());
+    let text_w = t
+        .rows
+        .iter()
+        .filter_map(|r| match &r.val {
+            Val::Text(s) => Some(62.0 + painter.layout_no_wrap(s.clone(), FontId::proportional(13.0), theme::TEXT).size().x + 2.0),
+            _ => None,
+        })
+        .fold(0.0f32, f32::max);
+    let inner_w = (CARD_W - 28.0).max(text_w).min((ctx.content_rect().right() - pos.x - 28.0 - 8.0).max(CARD_W - 28.0));
+    let card_w = inner_w + 28.0;
     let fly = crate::ribbon::fly_rect();
-    if fly != Rect::NOTHING && fly.left() < pos.x + CARD_W && fly.right() > pos.x {
+    if fly != Rect::NOTHING && fly.left() < pos.x + card_w && fly.right() > pos.x {
         pos.y = pos.y.max(fly.bottom() + 12.0);
     }
     let mut copy = false;
     egui::Area::new(Id::unique("motorview-telemetry")).order(Order::Middle).interactable(true).fixed_pos(pos).show(ctx, |ui| {
         let fr = glass_ui::glass_frame(ctx).inner_margin(egui::Margin { left: 14, right: 14, top: 10, bottom: 10 }).show(ui, |ui| {
-            ui.set_width(CARD_W - 28.0);
+            ui.set_width(inner_w);
             ui.spacing_mut().item_spacing = Vec2::ZERO;
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(t.fps.map_or("-".into(), |f| format!("{f:.0}"))).font(theme::glass_font(30.0)).color(theme::WHITE));

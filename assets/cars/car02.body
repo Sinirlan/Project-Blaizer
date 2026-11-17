@@ -44,16 +44,69 @@ Led pts=0,0.03;0.95,0.03 repeat=3 step=0,0.08 style=bar width=0.03 margin=0 clip
 # Design choice: the mouth an empty recess, like the ASC's bonnet channel.
 Vent from=0,0,0 lo=0,0.6,1.6 hi=0.3,0.72,1.8 rgb=3,3,5 frame=0.008 inset=0.03 tint=0.5 kind=plain
 
-# [O] The fenders are fans of flat facets: the front fender crown 192 (15 53 123, n -0.63 0.71
-# 0.33) with 193 behind it, the side 187/188 below (n.x -0.98) and the small piece 166 at the
-# arch's front, the cowl 191 above; the rear haunch (23 91 174) rolls over from the deck 185
-# (n.y 0.97) through 180 (0.71) and 163 (0.52) to the sides 162/182 and the tail corner 184, each
-# fold 20-30 deg. Design choice (like the ASC's and the Resonic's): each curved into one panel a
-# side, 2.5 cm triangles, every point held to the original facets (`round`) so the bulge stays;
-# the folds to the bonnet, the glass line, the door side and the lamps stay creases.
-Smooth from=15,53,123 lo=0.8,0.55,0.85 hi=1.0,0.95,1.7 max_deg=50 step=0.025 loose=0 round=0.1
-Smooth from=23,91,174 lo=0.65,0.6,-1.7 hi=1.0,1.0,-0.8 max_deg=50 step=0.025 loose=0 round=0.1
+# Second pass (#537, the user's request of 2026-11-16: smooth out the blocky, hard-edged body, a
+# concept render of a rounded blue coupé as the inspiration). [O] The first pass faired only the
+# front fenders and the rear haunches; the rest stayed flat facets with the 1.5 cm bevel: 258 of
+# the cage's 414 edges fold over 20 deg, among them the nose's leading edge 152/214 (58.5 deg, from
+# the centre (0 0.51 1.983) to the headlamp's inner corner), the tail panel to the bumper 205/212
+# (42.7), the rear corners 198/217 (49.7) and the fender crowns 220/225, 221/226, 202/211 (41-48).
+# Design choice (like the Serpent's and the ASC's third passes): one zone over all paint (the
+# three colours) and both lamp lenses, `max_deg` 65 so every paint fold rounds, `round` 0.2. The
+# lenses are in the zone because the headlamp's corners end five of the nose's folds (152/214,
+# 151/160, 155/160, 195/200, 195/227) and the tail lamp's five of the haunch's and the tail's
+# (198/212, 198/217, 197/213, 197/217, 213/218): out of the zone they are pinned points and the
+# plate pinches round them. Left out, so they keep their outlines: the mirrors 7-18 (Colour3 too;
+# their centroids, |x| 0.83-1.02, y 0.94-1.0, z 0.66-0.68, fall in no box), the glass, the black
+# arch tunnels, the underside, the bonnet scoop, the side intake, the spoiler and the Grill1 panel.
+# - The silver blade 137/138 (n 0.88 -0.41 -0.24, the sloped step from the door 202 to the
+#   recessed side 206 ahead of the intake) is out too, carved by the boxes' gap at z -0.22..-0.2
+#   (its centroid is at z -0.212). [O] All four of its corners lie on faces out of the zone (the
+#   black ledge 50/51 under it, the intake's top 52), so rounding its folds to the door (28.6 deg)
+#   and to 206 (25.6) left a dimple at each end, with `round` 0.2 and still at 0.06. Out of the
+#   zone it is a crisp flat panel the door and 206 round into, as the concept's silver blade.
+# - The shoulder (the chamfer 211/226 between the door/fender side and the top 222/224) and the
+#   window sill 222 with the A-pillar's foot 71 get their own boxes, first so they win, with
+#   `round` 0.06 at the mirrors rising to 0.2 by z 0 and z 1.1 (a ramp along z). [O] The shoulder's
+#   upper fold (211/222 28.1 deg, 224/226 36.7) runs through the mirror base's corner (0.856 0.915
+#   0.678), a pinned point (the mirror's faces are out), and at 0.2 it dented the shoulder under
+#   the mirror; the plate also pulled the whole fold 4-5 cm in (plan cut at y 0.8) and the door
+#   below it went concave by up to 4 cm. [D] With the ramp the shoulder line keeps its place in
+#   plan beside the mirror (z 0.4-0.85, plan cut at y 0.8) and eases into the 0.2 rounding either
+#   side (4.5 cm in at z -0.2, as before); the door below it crowns out up to 2.2 cm (z 0.5, y 0.6).
+# - [D] `round` 0.3 everywhere pulled the nose's centre in further and broke its reflections up;
+#   rounding never adds volume, so the crown the concept shows (wings over a lower bonnet, a fuller
+#   nose) is left for `Warp`s / `Push`es (#537 phase 2).
+Smooth from=15,53,123;23,91,174;155,159,164;125,127,104;127,49,19 lo=0.68,0.84,0.04;0.68,0.93,0;0,0,0.75;0,0,-2.1;0,0,-0.2;0,0,0.6 hi=0.92,0.93,1;0.92,1.05,0.55;1.1,1.3,2.1;1.1,1.3,-0.22;1.1,1.3,0.6;1.1,0.93,0.75 max_deg=65;65;65;65;65;65 step=0.025 loose=0 round=0.2@0:0.06@0.5:0.06@0.85:0.2@1.1;0.2@0:0.06@0.5:0.06@0.85:0.2@1.1;0.2;0.2;0.2;0.2
+# [O] The glass is flat facets too: the windscreen's centre 36 folds 23.5 deg to its sides 37/31,
+# the rear window 42/43 11.8, the side windows 40/41 2.6. Design choice (#537, as the Serpent's and
+# the ASC's canopies): one zone, faired before the glass is recessed, with a longer `round` than
+# the paint's so the windscreen reads as one even curve.
+Smooth from=75,92,107 lo=0,0.85,-1.2 hi=0.8,1.3,1.2 max_deg=30 step=0.025 loose=0 round=0.3
 
 # Every edge cut and every face remeshed at 4 cm, like the Titan, the ASC and the Resonic (#213,
 # #172, #173): the bevel strips' rows and the long fans over the big panels are slivers otherwise.
 Refine step=0.04
+
+# Second pass, the user's follow-up (#537, 2026-11-16: the front lip's bottom edge, seen from above,
+# round instead of angled). [O] The lip's bottom edge is the zone's outline (the underside, black
+# like the tunnels, scoop and intake, is out of it), so it keeps the cage's plan polygon: the
+# centre (0 0.226 1.987), P1 (0.606 1.912), P2 (0.813 1.762) and the arch's front corner P3
+# (0.849 1.599), turning 29 and 42 deg at P1 and P2 (and 14 at the centre). [D] Plan sections of
+# the exported body: the turn within 2.5 cm at P2 is 43 deg at the bottom, 26 at y 0.25, 14 at
+# y 0.27 and 7 from y 0.31 up, where the zone has rounded the corner to about 0.4 m.
+# Design choice: two `Warp`s after the refine map the bottom edge onto one arc of radius 0.40 m
+# tangent to the front segment and to the side P2-P3 (from x 0.504 on the front to 1.5 cm short
+# of P3, cutting P1 in 1.4 cm and P2 3.4 cm), and round the centre's V with R 1.5 m (the nose's
+# bottom 1.1 cm back). The first moves z as a table over x (the front corner), the second x as a
+# table over z (the side corner, where a z move would only slide the points along the side); both
+# meet at the arc's touch point on P1-P2 (0.690 1.851). The tables are the arc minus the polygon,
+# every 2 cm with nodes on the corners (a warp's weight is smooth, so it cancels a corner only
+# where a node sits on it). Both fade over the lip's bottom 8 cm (1, 0.8, 0.5, 0.25, 0.08, 0 at
+# y 0.226-0.31, the corner's measured fade); nothing behind z 1.614 moves, so the arch (its front
+# wall at z 1.599) stays.
+# [D] Only the lip and the underside's front edge move (up to 3.0 cm); bottom edge's worst turn
+# within 2.5 cm 43 -> 7 deg; 1-2.5 cm above it 13-15 deg remain, 4 deg concave, inside the 1.5 cm
+# bevel (the lip's corner folds slant back as they rise; slower or faster fades, per corner too,
+# were worse). Designed with a scratch script (arc, tables) from these numbers.
+Warp by=0,0,-0.0139 x=0,0.8219;0.005,0.778;0.01,0.7354;0.015,0.6939;0.02,0.6537;0.04,0.5047;0.06,0.3748;0.08,0.2641;0.1,0.1727;0.12,0.1006;0.14,0.0478;0.16,0.0144;0.18,0.0004;0.1842,0;0.5043,0;0.52,0.0229;0.54,0.1189;0.56,0.292;0.58,0.545;0.6,0.8819;0.606,1;0.62,0.7034;0.64,0.3611;0.66,0.122;0.68,0;0.6998,0 y=0.226,1;0.235,0.8;0.25,0.5;0.27,0.25;0.29,0.08;0.31,0 z=1.7,0;1.8,1
+Warp by=-0.0337,0,0 x=0.55,0;0.66,1 y=0.226,1;0.235,0.8;0.25,0.5;0.27,0.25;0.29,0.08;0.31,0 z=1.5939,0;1.6139,0;1.6339,0.0161;1.6539,0.0654;1.6739,0.1494;1.6939,0.2702;1.7139,0.4304;1.7339,0.6335;1.7539,0.8839;1.762,1;1.7739,0.7784;1.7939,0.4554;1.8139,0.2042;1.8339,0.0407;1.8515,0

@@ -2,6 +2,42 @@
 
 What changed in each release, newest first. Game data is never part of a release.
 
+## v0.9.3 - 2026-11-17
+
+### Gameplay
+
+- The race start runs the original's one-second first frame, so the grid drop is not drawn, and cars spawn at the centreline height and settle onto their springs (no 7 cm hover).
+- AI: after a reset the throttle follows the original's (checked against 65 resets). Opponents start spread out, are put back on track at the right place, each car has its own contact size, and finished cars behave as in the original.
+- Physics: roll damping, the push that lifts a resting car, and the locked-wheels state are closer to the original.
+
+### Graphics (Remaster)
+
+- Tyres on generated wheels have baked tread and sidewall maps, and the tread is groove-shaded for skid marks. Remaster wheels sit inside the classic octagons and the car is drawn lower by the gap.
+- Huge ocean areas now draw.
+- Headlamps are brighter by day (glow only, no light on the road); night is unchanged.
+- Pack textures can be laid level in world space, so they line up across faces.
+- Car bodies: the Kobra X3 front gets a level LED band, two intakes a side, a round nose and a fender that is crisp at the lamp and rounds off by the mirror. The Adder Mk2 gets one smooth skin, a curved windscreen and a round lower lip edge. The ASC gets a flush rear bumper, a scoop crease that fades to the rear arch and a convex front. The Python V12 and ASC wheel arches follow the fitted tyres and have no doubled-back outlines.
+- Loading is faster: the garage is built from the intro, the tree pack and car bodies load side by side, textures resize in parallel and the studio pipelines are warmed at start-up.
+
+### Audio
+
+- Enhanced engine sound (Remaster): each car has its own character (pitch, tone, level) guided by its power, with body and air layers built from the samples; the Titan is a high-revving V12. An Engine sound row is in the Remaster menus. It replaces the earlier simulated (Baked / Live) engine sound, which is removed.
+- Tyre, hit and bump sounds follow the patch 3.0 rules and are built in.
+
+### Menus and HUD
+
+- New HUD layout editor: move, scale and hide HUD pieces with the mouse, keys or pad (snapping, corner handle, wheel) in a frozen race. The HUD tab shows a thumbnail of your layout.
+- Units setting: Metric or Imperial (mph label, all speed and distance readouts).
+- The Remaster Car screen never waits: the garage is ready at once, the floor is scanned and the car revealed from the top, with the classic photo fade.
+- Patch 3.0 front-end screens are back at the 1998 positions (Graphics, Sound, Controls, Multi, Ghost).
+
+### Tools
+
+- Texture Workshop (motortex) is rebuilt in the Glass look, with a Remaster tab: all textures, an On object stage (props and track pieces, in its own window), presets, Copy / Paste look, hand-drawn markings, world mapping, road maps forged from a photo material, and Shot on track.
+- Rim Workshop: Glass layout with a car preview stage (On car / Rim only).
+- World Editor: smoother gizmo drags and re-meshing.
+- Orthographic car views (front, rear, sides, top, bottom) for remodelling blueprints, a telemetry card (F3) that widens to fit long texture names, and audio recording that can be repeated.
+
 ## v0.9.2 - 2026-11-10
 
 ### Gameplay

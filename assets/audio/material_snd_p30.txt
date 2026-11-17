@@ -1,0 +1,101 @@
+// Patch 3.0's tyre and hit sounds (#503): the Snd* lines of its Data/Material.mat, built into the game (the file is never shipped).
+// The game plays these whatever the install's Material.mat says, by the patch 3.0 rules (07-audio "Patch 3.0 car sound update").
+//   SndX sample loop priority volume pitch cut_head cut_tail      (the last two are frames cut from the sample's ends)
+// A material not listed here keeps the install's lines.
+
+
+MaterialName tyrewall
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse crash2.wav 1 3 0.6 0.9 0 3371
+SndHardImpulse Majcrash.wav 0 3 1.0 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName concrete
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse crash2.wav 1 3 0.6 0.9 0 3371
+SndHardImpulse majcrash.wav 0 3 1.0 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName asphalt
+SndContact asfalt2.wav 1 2 0.13 0.75 0 0
+SndWeakImpulse landa.wav 1 3 3.0 0.72 0 3371
+SndHardImpulse landa.wav 0 3 3.3 0.7 0 3371
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin spin.wav 1 3 3.0 1.0 36102 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName grass
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse landa.wav 1 3 2.9 1.1 0 3371
+SndHardImpulse landa.wav 0 3 3.1 1.0 0 3371
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch gslide.wav 1 3 3.0 0.8 2149 3371
+
+MaterialName gravel
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse landa.wav 1 3 3.0 0.8 0 3371
+SndHardImpulse landa.wav 0 3 3.2 0.7 0 3371
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName steel
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse crash2.wav 1 3 0.6 1.0 0 3371
+SndHardImpulse majcrash.wav 0 3 1.0 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch Metspark2.wav 1 3 1.0 1.0 3842 9111
+
+MaterialName graveltrap
+SndContact rullgru.wav 1 3 0.28 0.4 0 0
+SndWeakImpulse landa.wav 1 3 3.0 0.7 0 3371
+SndHardImpulse landa.wav 0 3 3.2 0.6 0 3371
+SndSlide gslide.wav 1 2 3.0 0.75 0 0
+SndSpin gslide.wav 1 2 3.0 0.8 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName rock
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse crash2.wav 1 3 0.6 1.0 0 3371
+SndHardImpulse majcrash.wav 0 3 1.0 0.7 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 2149 3371
+
+MaterialName sidewalk
+SndContact asfalt2.wav 1 2 0.28 0.75 0 0
+SndWeakImpulse landa.wav 1 3 3.0 0.8 0 3371
+SndHardImpulse landa.wav 0 3 3.2 0.7 0 3371
+SndSpin spin.wav 1 3 3.0 1.0 36102 0
+SndSlide sladdar.wav 1 3 1.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName kerbing
+SndContact curbing.wav 1 3 0.7 1.0 0 0
+SndWeakImpulse landa.wav 1 3 3.0 1.1 0 3371
+SndHardImpulse landa.wav 0 3 3.2 1.0 0 3371
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371
+
+MaterialName invisible
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse landa.wav 1 3 2.9 1.1 0 3371
+SndHardImpulse landa.wav 0 3 3.1 1.0 0 3371
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch gslide.wav 1 3 3.0 0.8 2149 3371
+
+MaterialName tree
+SndContact rullgru.wav 1 3 0.28 0.7 0 0
+SndWeakImpulse woodb.wav 1 3 2.0 0.7 0 3371
+SndHardImpulse majcrash.wav 0 3 1.5 1.0 0 0
+SndSlide gslide.wav 1 3 3.0 1.0 0 0
+SndSpin gslide.wav 1 3 3.0 1.0 0 0
+SndScratch wallskr2.wav 1 3 1.0 1.0 2149 3371

@@ -11,7 +11,7 @@
 use crate::front::{fmt_time, Game, RaceState};
 use crate::front::menu_modern::{glass_time, Glass};
 use crate::hud_glass::{self, Cluster, Msg, PlateStyle, Pos, RowGap, SplitRow, Splits, Stack};
-use crate::hud_layout::{Extents, HudSettings, MapMode, Placement};
+use crate::hud_layout::{Extents, HudElem, HudLayout, HudRects, HudSettings, MapMode, Placement, Put, Rect, ELEM_SCALE};
 use glam::Vec3;
 use motor_sim::race::Gap;
 use motorview::minimap::map_point;
@@ -29,9 +29,11 @@ const COUNT_Y: f32 = 149.0;
 const POP_FROM: f32 = 1.3;
 const POP_TIME: f32 = 0.15;
 
-fn countdown(b: &mut Batch, race: &motor_sim::session::Race, cx: f32, scale: f32) {
-    // (image, seconds since it appeared, alpha)
-    let (n, since, alpha) = if !race.started() {
+fn countdown(b: &mut Batch, race: &motor_sim::session::Race, cx: f32, scale: f32, sample: bool) {
+    // (image, seconds since it appeared, alpha); the layout editor's sample is the "3", popped in
+    let (n, since, alpha) = if sample {
+        (3, POP_TIME, 1.0)
+    } else if !race.started() {
         // no lamp during the start fly-by (the digits' 2 s windows, 0x45e3c7..0x45e64f)
         let Some((n, since)) = race.count_digit() else { return };
         (n, since, 1.0)
@@ -131,12 +133,10 @@ fn extents(h: &HudSettings, map: (f32, f32), split_rows: usize) -> Extents {
     Extents { left, right, map: if h.map { map } else { (0.0, 0.0) }, splits: hud_glass::splits_size(split_rows), top: 8.0, bottom: 10.0 }
 }
 
-/// REMASTER: where the HUD Settings put the corner elements on this batch's canvas.
-fn placement(g: &Game, r: &RaceState, b: &Batch) -> Placement {
-    let h = &g.settings.hud.shown(g.settings.info_detail);
-    // the Race line map disc (#323 phase 3) needs the lap's profile
+/// REMASTER: the map disc's size (0 without the lap's profile, #323 phase 3) and the splits block's rows.
+/// The splits block is sized for the most rows the settings can show, so the HUD does not resize as one appears.
+fn sizes(g: &Game, r: &RaceState) -> ((f32, f32), usize) {
     let map = if g.tracks[r.track].profile.is_some() { hud_glass::map_size() } else { (0.0, 0.0) };
-    // the splits block is sized for the most rows the settings can show, so the HUD does not resize as one appears
     let s = &g.settings;
     let rows = if live_enabled(g, r) {
         if s.checkpoint_info == 1 { LIVE_ROWS } else { r.sess.race.racers.len() }
@@ -145,7 +145,238 @@ fn placement(g: &Game, r: &RaceState, b: &Batch) -> Placement {
     } else {
         0
     };
-    h.place(b.canvas.w, &extents(h, map, rows))
+    (map, rows)
+}
+
+/// REMASTER: where the HUD Settings put the corner elements on a `w` x 480 canvas.
+fn placement_w(g: &Game, r: &RaceState, w: f32) -> Placement {
+    let h = &g.settings.hud.shown(g.settings.info_detail);
+    let (map, rows) = sizes(g, r);
+    h.place(w, &extents(h, map, rows))
+}
+
+/// What the HUD shows a piece in (#542): the race, the race paused (the centre pieces and plates hidden), or the
+/// layout editor (every piece placed, the ones that come and go with a fixed sample, the hidden ones not drawn).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudMode {
+    Race,
+    Paused,
+    Edit,
+}
+
+/// REMASTER (#542): the stock layout's transform of a piece (anchor, scale, offset: the arguments of `place`), from the
+/// auto-fit `pl` on a `w` wide canvas. The centre pieces are drawn in place (the countdown scales itself by `pl.scale`
+/// about its centre), plates and arrows too (the arrows go with the cluster, `draw_rects`).
+fn stock_put(e: HudElem, pl: Placement, w: f32) -> ((f32, f32), f32, (f32, f32)) {
+    match e {
+        HudElem::Cluster => (hud_glass::CLUSTER_ANCHOR, pl.scale, (pl.dx, pl.dy)),
+        HudElem::Stack => ((w - RIGHT_MARGIN, 8.0), pl.scale, (-pl.dx, pl.dy)),
+        HudElem::Map => ((w - hud_glass::MAP_INSET.0, 480.0 - hud_glass::MAP_INSET.1), pl.scale, (-pl.dx, -pl.dy)),
+        HudElem::Splits => (hud_glass::SPLITS_ANCHOR, pl.scale, (pl.dx, -pl.dy)),
+        _ => ((0.0, 0.0), 1.0, (0.0, 0.0)),
+    }
+}
+
+/// `stock_put` as it acts on the piece's `home` box: the countdown is scaled about its centre by its own drawing, the
+/// arrows go with the cluster's scale.
+fn stock_eff(e: HudElem, pl: Placement, w: f32, home: Rect) -> ((f32, f32), f32, (f32, f32)) {
+    match e {
+        HudElem::Countdown => ((home[0] + home[2] * 0.5, home[1] + home[3] * 0.5), pl.scale, (0.0, 0.0)),
+        HudElem::Proximity => ((0.0, 0.0), pl.scale, (0.0, 0.0)),
+        _ => stock_put(e, pl, w),
+    }
+}
+
+/// `home` moved by a transform (anchor, scale, offset).
+fn moved(home: Rect, (a, k, o): ((f32, f32), f32, (f32, f32))) -> Rect {
+    [a.0 + (home[0] - a.0) * k + o.0, a.1 + (home[1] - a.1) * k + o.1, home[2] * k, home[3] * k]
+}
+
+/// REMASTER (#542): the player's layout that draws what the stock auto-fit `pl` draws on a `w` wide canvas at HUD Scale
+/// `hud_scale`, so the layout editor's first change moves nothing else. The anchors are the stock ones; the scales are
+/// whole percent, so a piece the fit shrank can differ by a fraction of a pixel.
+fn freeze_with(pl: Placement, w: f32, map: (f32, f32), rows: usize, hud_scale: u32) -> HudLayout {
+    let mut out = HudLayout::stock();
+    let hs = hud_scale as f32 / 100.0;
+    for e in HudElem::ALL {
+        let h = home(e, w, map, rows);
+        let (a, k, o) = stock_eff(e, pl, w, h);
+        let l = &mut out.elems[e as usize];
+        l.scale = ((k / hs * 100.0).round() as u32).clamp(ELEM_SCALE.0, ELEM_SCALE.1);
+        if e.movable() {
+            let (hp, sp) = (l.anchor.point(h), l.anchor.point([0.0, 0.0, w, 480.0]));
+            l.off = ((a.0 + (hp.0 - a.0) * k + o.0 - sp.0).round() as i32, (a.1 + (hp.1 - a.1) * k + o.1 - sp.1).round() as i32);
+        }
+    }
+    out.custom = true;
+    out
+}
+
+/// REMASTER (#542): the stock layout of this race on a `w` wide canvas as the player's own (`freeze_with`).
+pub fn freeze(g: &Game, r: &RaceState, w: f32) -> HudLayout {
+    let (map, rows) = sizes(g, r);
+    freeze_with(placement_w(g, r, w), w, map, rows, g.settings.hud.scale)
+}
+
+/// REMASTER (#542): a piece's box at 100 % where the stock layout draws it in this race (`home`).
+pub fn home_of(g: &Game, r: &RaceState, w: f32, e: HudElem) -> Rect {
+    let (map, rows) = sizes(g, r);
+    home(e, w, map, rows)
+}
+
+/// REMASTER (#542): whether the Race line HUD can show the piece with these settings; the layout editor draws the others
+/// as an empty box marked hidden.
+pub fn elem_shown(g: &Game, r: &RaceState, e: HudElem) -> bool {
+    let s = &g.settings;
+    let h = s.hud.shown(s.info_detail);
+    match e {
+        HudElem::Cluster => h.cluster,
+        HudElem::Stack => h.clocks.iter().any(|x| *x) || h.lap || h.pos,
+        HudElem::Map => h.map && g.tracks[r.track].profile.is_some(),
+        HudElem::Splits => h.splits && sizes(g, r).1 > 0,
+        HudElem::Countdown => h.countdown,
+        HudElem::Messages => h.messages,
+        // WRONG WAY shows with InfoDetail All (and Custom)
+        HudElem::WrongWay => h.wrong_way && s.info_detail >= 2,
+        HudElem::ModeTags => h.mode_tags,
+        HudElem::Proximity => h.proximity,
+        HudElem::Plates => h.plates && s.name_plates > 0,
+    }
+}
+
+/// A vertex this opaque or more counts in a piece's box (`Lay::take`).
+const SEEN_ALPHA: f32 = 0.12;
+
+/// REMASTER layout editor (#542, design choice): where the sample name plate stands (the card's bottom centre, canvas
+/// px from the centre column and the top), its distance (m) and the box marked when plates are hidden.
+const SAMPLE_PLATE: (f32, f32, f32) = (190.0, 250.0, 15.0);
+const SAMPLE_PLATE_BOX: (f32, f32) = (110.0, 28.0);
+/// The proximity arrows' box in the editor (they lie round your car): centred, from this y, this size.
+const PROX_BOX: (f32, f32, f32) = (238.0, 260.0, 82.0);
+
+/// REMASTER (#542): a piece's box where the stock layout draws it, at 100 % (canvas px; what the player's layout
+/// scales and moves about its anchor point). The sizes are the ones the stock fit uses; the centre pieces' are nominal.
+fn home(e: HudElem, w: f32, map: (f32, f32), rows: usize) -> Rect {
+    let d = Glass::hud(w, 1.0);
+    match e {
+        HudElem::Cluster => {
+            let (cw, ch) = hud_glass::cluster_size();
+            [hud_glass::CLUSTER_ANCHOR.0, hud_glass::CLUSTER_ANCHOR.1, cw, ch]
+        }
+        HudElem::Stack => {
+            // all rows, so the box does not change as a row is switched off
+            let (sw, sh) = hud_glass::stack_size(3, true, true);
+            [w - RIGHT_MARGIN - sw, 8.0, sw, sh]
+        }
+        HudElem::Map => [w - hud_glass::MAP_INSET.0 - map.0, 480.0 - hud_glass::MAP_INSET.1 - map.1, map.0, map.1],
+        HudElem::Splits => {
+            let (sw, sh) = hud_glass::splits_size(rows);
+            [hud_glass::SPLITS_ANCHOR.0, hud_glass::SPLITS_ANCHOR.1 - sh, sw, sh]
+        }
+        HudElem::Countdown => [w * 0.5 - COUNT_PX * 0.5, COUNT_Y - COUNT_PX * 0.5, COUNT_PX, COUNT_PX],
+        HudElem::Messages => hud_glass::messages_home(d),
+        HudElem::WrongWay => hud_glass::wrong_way_home(d),
+        HudElem::ModeTags => hud_glass::mode_tags_home(d),
+        // they follow cars in the world: only scaled, never moved
+        HudElem::Proximity | HudElem::Plates => [0.0, 0.0, w, 480.0],
+    }
+}
+
+/// REMASTER (#542): where a piece's box lies on a `w` wide canvas, without drawing it: its home moved by the player's
+/// layout (when custom) or by the stock fit `pl`. The pieces that follow the cars (the arrows, the name plates) have a
+/// nominal box of the editor's (`PROX_BOX`, `SAMPLE_PLATE_BOX`), scaled by the layout's factor.
+fn box_for(h: &HudSettings, e: HudElem, w: f32, map: (f32, f32), rows: usize, pl: Placement) -> Rect {
+    if !e.movable() {
+        let k = if h.layout.custom { h.layout.get(e).factor(h.scale) } else { 1.0 };
+        let (c, size) = if e == HudElem::Proximity {
+            let (y, bw, bh) = PROX_BOX;
+            ((w * 0.5, y + bh * 0.5), (bw, bh))
+        } else {
+            let (dx, y, _) = SAMPLE_PLATE;
+            ((w * 0.5 + dx, y - SAMPLE_PLATE_BOX.1 * 0.5), SAMPLE_PLATE_BOX)
+        };
+        return [c.0 - size.0 * k * 0.5, c.1 - size.1 * k * 0.5, size.0 * k, size.1 * k];
+    }
+    let hm = home(e, w, map, rows);
+    if h.layout.custom { h.layout.get(e).placed(hm, w, h.scale) } else { moved(hm, stock_eff(e, pl, w, hm)) }
+}
+
+/// REMASTER (#542 phase 3): every piece's box on a `w` wide canvas as the settings place it, for the HUD tab's
+/// thumbnail. A splits block with no rows still gets the three-row box, so the thumbnail can show it dashed. The
+/// Classic HUD has no layout: its pieces sit where the stock fit puts them.
+pub fn layout_boxes(g: &Game, r: &RaceState, w: f32) -> [Rect; 10] {
+    let (map, rows) = sizes(g, r);
+    let mut h = g.settings.hud;
+    h.layout.custom &= g.settings.view.modern_hud();
+    let pl = placement_w(g, r, w);
+    HudElem::ALL.map(|e| box_for(&h, e, w, map, if rows == 0 { 3 } else { rows }, pl))
+}
+
+/// REMASTER (#542): puts each piece on the canvas, by the stock auto-fit or by the player's layout, and records the
+/// box each one took for the layout editor.
+struct Lay<'a> {
+    h: &'a HudSettings,
+    w: f32,
+    map: (f32, f32),
+    rows: usize,
+    rects: HudRects,
+}
+
+impl Lay<'_> {
+    /// Is the player's layout in force (it never touches Classic)?
+    fn custom(&self) -> bool {
+        self.h.layout.custom
+    }
+
+    /// How a piece is drawn: scaled by the layout's factor (the HUD Scale included), used for the pieces that
+    /// scale only and for the countdown's size.
+    fn factor(&self, e: HudElem) -> f32 {
+        self.h.layout.get(e).factor(self.h.scale)
+    }
+
+    /// The transform of a movable piece in the player's layout.
+    fn put_of(&self, e: HudElem) -> Put {
+        self.h.layout.get(e).put(home(e, self.w, self.map, self.rows), self.w, self.h.scale)
+    }
+
+    /// Place what was drawn from `start`: the player's layout when it is custom, else `stock` (anchor, scale,
+    /// offset: the corner elements' fit, the others untouched). Then take the box of what is there.
+    fn put(&mut self, b: &mut Batch, e: HudElem, start: usize, stock: ((f32, f32), f32, (f32, f32))) {
+        self.put_from(b, e, start, start, stock);
+    }
+
+    /// `put`, the box taken from the vertices since `from` (the stock cluster carries the proximity arrows along).
+    fn put_from(&mut self, b: &mut Batch, e: HudElem, start: usize, from: usize, stock: ((f32, f32), f32, (f32, f32))) {
+        let (anchor, k, off) = if self.custom() && e.movable() {
+            let p = self.put_of(e);
+            (p.anchor, p.k, p.off)
+        } else {
+            stock
+        };
+        place(b, start, anchor, k, off);
+        self.take(b, e, from);
+    }
+
+    /// The layout editor (#542): a piece that drew nothing gets the box it would be placed in (`box_for`).
+    fn ghost(&mut self, e: HudElem, pl: Placement) {
+        if self.rects.rects[e as usize].is_none() {
+            self.rects.rects[e as usize] = Some(box_for(self.h, e, self.w, self.map, self.rows, pl));
+        }
+    }
+
+    /// The layout editor (#542): the box of a piece that follows the cars (`box_for`).
+    fn nominal(&mut self, e: HudElem, pl: Placement) {
+        self.rects.rects[e as usize] = Some(box_for(self.h, e, self.w, self.map, self.rows, pl));
+    }
+
+    /// Record the box of the vertices drawn since `start` (none when nothing was drawn). The soft washes and glows fade
+    /// out to their rims, so the vertices that are all but transparent do not count: the box is what shows.
+    fn take(&mut self, b: &Batch, e: HudElem, start: usize) {
+        let mut it = b.verts[start..].iter().filter(|v| v.color[3] >= SEEN_ALPHA).map(|v| v.pos);
+        let Some(first) = it.next() else { return };
+        let (lo, hi) = it.fold((first, first), |(lo, hi), p| ([lo[0].min(p[0]), lo[1].min(p[1])], [hi[0].max(p[0]), hi[1].max(p[1])]));
+        self.rects.rects[e as usize] = Some([lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]]);
+    }
 }
 
 /// REMASTER live gaps (#302): the slots of the block at "Checkpoint splits: Nearby" (the car ahead, you, the car behind;
@@ -160,10 +391,16 @@ fn live_enabled(g: &Game, r: &RaceState) -> bool {
 
 /// REMASTER: the scale the corner elements get (the asked one, or less where it won't fit).
 pub fn effective_scale(g: &Game, r: &RaceState, b: &Batch) -> f32 {
-    placement(g, r, b).scale
+    placement_w(g, r, b.canvas.w).scale
 }
 
 pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
+    draw_rects(g, r, b, if paused { HudMode::Paused } else { HudMode::Race }, px);
+}
+
+/// `draw`, and the box each Race line piece took (Remaster; empty for Classic), for the layout editor (#542).
+pub fn draw_rects(g: &Game, r: &RaceState, b: &mut Batch, mode: HudMode, px: f32) -> HudRects {
+    let paused = mode == HudMode::Paused;
     let race = &r.sess.race;
     let me = &race.racers[r.sess.focus];
     let w = b.canvas.w;
@@ -182,44 +419,75 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
     let map_size = b.size(&map_key);
     let map_on = map_size.0 > 0.0 && h.map;
     let pl = if modern {
-        placement(g, r, b)
+        placement_w(g, r, w)
     } else {
         Placement { scale: 1.0, dx: 0.0, dy: 0.0 }
     };
+    let (map, rows) = if modern { sizes(g, r) } else { ((0.0, 0.0), 0) };
+    let mut lay = Lay { h, w, map, rows, rects: HudRects::default() };
 
     // REMASTER: the glass name plates go first, so every HUD group and message lies over them (#323 phase 5)
-    if modern && !paused && s.name_plates > 0 {
+    let edit = mode == HudMode::Edit;
+    if modern && !paused && s.name_plates > 0 && h.plates {
+        let plates_start = b.verts.len();
         let standings = race.standings();
-        let list = plate_points(r, w, b.canvas.h, r.sess.wobble())
-            .into_iter()
-            .map(|(i, x, y, z)| {
-                let rc = &race.racers[i];
-                hud_glass::Plate { x, y, z, place: standings.iter().position(|&k| k == i).map_or(0, |k| k as u32 + 1), colour: rc.driver.colour, name: rc.driver.nick.clone() }
-            })
-            .collect();
+        let list = if edit {
+            // the layout editor: one sample plate, the car behind you (or yourself, alone)
+            let k = standings.iter().position(|&i| i == r.sess.focus).unwrap_or(0);
+            let i = standings.get(k + 1).or(standings.get(k.wrapping_sub(1))).copied().unwrap_or(r.sess.focus);
+            let rc = &race.racers[i];
+            let (dx, y, z) = SAMPLE_PLATE;
+            vec![hud_glass::Plate { x: w * 0.5 + dx, y, z, place: standings.iter().position(|&x| x == i).map_or(0, |x| x as u32 + 1), colour: rc.driver.colour, name: rc.driver.nick.clone() }]
+        } else {
+            plate_points(r, w, b.canvas.h, r.sess.wobble())
+                .into_iter()
+                .map(|(i, x, y, z)| {
+                    let rc = &race.racers[i];
+                    hud_glass::Plate { x, y, z, place: standings.iter().position(|&k| k == i).map_or(0, |k| k as u32 + 1), colour: rc.driver.colour, name: rc.driver.nick.clone() }
+                })
+                .collect()
+        };
         hud_glass::plates(b, Glass::hud(w, px), match (s.name_plates, s.hud.plate_frame) {
             (2, true) => PlateStyle::Glass,
             (2, false) => PlateStyle::Bare,
             _ => PlateStyle::Flat,
-        }, list);
+        }, if lay.custom() { lay.factor(HudElem::Plates) } else { 1.0 }, list);
+        lay.take(b, HudElem::Plates, plates_start);
+    }
+    if edit && lay.rects.get(HudElem::Plates).is_none() {
+        lay.nominal(HudElem::Plates, pl);
     }
 
     // ---- left: speed, gear, rev arc
+    // the stock layout moves the arrows with the cluster (their old behaviour, kept byte for byte); the player's layout
+    // scales them on their own
     let start = b.verts.len();
     if modern && h.proximity {
-        crate::proximity::draw(r, b);
+        crate::proximity::draw(r, b, if lay.custom() { lay.factor(HudElem::Proximity) } else { 1.0 });
+        if lay.custom() && !edit {
+            lay.take(b, HudElem::Proximity, start);
+        }
     }
+    if edit {
+        // the arrows come and go round your car: the editor marks the area they use
+        lay.nominal(HudElem::Proximity, pl);
+    }
+    let cluster_start = b.verts.len();
+    let start = if lay.custom() { cluster_start } else { start };
     if cluster_on {
-        let kmh = format!("{}", t.kmh.abs().round() as u32);
+        let u = s.units;
+        let speed = u.speed(t.kmh.abs()).round() as u32;
+        let kmh = format!("{speed}");
         let gear = if t.gear == 0 { "R".to_string() } else { t.gear.to_string() };
         let frac = ((t.rpm - me.car.p.min_rpm) / (me.car.p.max_rpm - me.car.p.min_rpm)).clamp(0.0, 1.0);
         if modern {
             // REMASTER: the Race line cluster (#323)
-            let c = Cluster { kmh: t.kmh.abs().round() as u32, gear: &gear, frac, clock: g.clock };
+            let c = Cluster { kmh: speed, unit: u.speed_cap(), gear: &gear, frac, clock: g.clock };
             hud_glass::cluster(b, Glass::hud(w, px), &c, &s.view.remaster.rev_meter);
         } else {
             let sw = b.hud_number(&kmh, LEFT, 8.0, true);
-            b.image("h:tkmh00", LEFT + sw + 4.0, 31.0);
+            // CLASSIC 0x421cfe (3.0): TKMH01 "MPH" instead of TKMH00 with the Imperial flag; the composed one when the install has no 3.0 file (ui.rs)
+            b.image(if u.imperial() { "h:tkmh01" } else { "h:tkmh00" }, LEFT + sw + 4.0, 31.0);
             b.image("h:tgear00", LEFT - 2.0, 52.0);
             b.hud_number(&gear, LEFT + 40.0, 52.0, false);
             b.image("h:meter01", LEFT + 6.0, 72.0);
@@ -227,7 +495,7 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
         }
     }
     if modern {
-        place(b, start, hud_glass::CLUSTER_ANCHOR, pl.scale, (pl.dx, pl.dy));
+        lay.put_from(b, HudElem::Cluster, start, cluster_start, stock_put(HudElem::Cluster, pl, w));
     }
 
     // ---- right: times, lap, position (labels as in the original: TOTAL TIME,
@@ -258,7 +526,7 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
             final_lap: p.finished_ms.is_none() && p.lap >= p.laps,
         };
         hud_glass::stack(b, Glass::hud(w, px), &st);
-        place(b, start, (right, 8.0), pl.scale, (-pl.dx, pl.dy));
+        lay.put(b, HudElem::Stack, start, stock_put(HudElem::Stack, pl, w));
     } else {
         let rows: [(bool, &[&str], String); 5] = [
             (row_on[0], &["h:total", "h:time"], fmt_time(total)),
@@ -284,7 +552,11 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
     if !paused {
         if modern {
             // REMASTER: our countdown art, scaled with the HUD
-            countdown(b, race, cx, pl.scale);
+            if h.countdown {
+                let start = b.verts.len();
+                countdown(b, race, cx, if lay.custom() { 1.0 } else { pl.scale }, edit);
+                lay.put(b, HudElem::Countdown, start, stock_put(HudElem::Countdown, pl, w));
+            }
         } else if !race.started() {
             if let Some((n, _)) = race.count_digit() {
                 b.image(&format!("h:count0{}", 3 - n), cx - 39.0, 110.0);
@@ -294,10 +566,13 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
             b.image("h:count03", cx - 39.0, 110.0);
         }
         // wrong way: All only, blinking every 200 ms (0x44a2a4)
-        if all && p.wrong_way && p.finished_ms.is_none() && ((g.clock * 5.0) as u32).is_multiple_of(2) {
+        let blinks = all && p.wrong_way && p.finished_ms.is_none() && ((g.clock * 5.0) as u32).is_multiple_of(2);
+        if (blinks || edit && all) && (!modern || h.wrong_way) {
             if modern {
                 // REMASTER: red Glass text with a warning triangle (#323 phase 4)
+                let start = b.verts.len();
                 hud_glass::wrong_way(b, Glass::hud(w, px));
+                lay.put(b, HudElem::WrongWay, start, stock_put(HudElem::WrongWay, pl, w));
             } else {
                 let (ww, _) = b.size("h:tww00");
                 b.image("h:tww00", cx - ww * 0.5, 160.0);
@@ -314,11 +589,15 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
         // while recording, and the console messages. APPROX: the original's positions [U]
         if modern {
             // REMASTER (#345): the REC / GHOST / DEMO tags top centre (the notice joins the centre messages below)
-            let modes: Vec<hud_glass::Mode> = [(r.recording_demo(), hud_glass::Mode::Rec), (r.ghost_playing() && r.watch.is_none(), hud_glass::Mode::Ghost), (r.watch.is_some(), hud_glass::Mode::Demo)]
+            let modes: Vec<hud_glass::Mode> = [(r.recording_demo() || edit, hud_glass::Mode::Rec), (r.ghost_playing() && r.watch.is_none() && !edit, hud_glass::Mode::Ghost), (r.watch.is_some() && !edit, hud_glass::Mode::Demo)]
                 .into_iter()
                 .filter_map(|(on, m)| on.then_some(m))
                 .collect();
-            hud_glass::mode_tags(b, Glass::hud(w, px), g.clock, &modes);
+            if h.mode_tags {
+                let start = b.verts.len();
+                hud_glass::mode_tags(b, Glass::hud(w, px), g.clock, &modes);
+                lay.put(b, HudElem::ModeTags, start, stock_put(HudElem::ModeTags, pl, w));
+            }
         } else {
             // CLASSIC
             let mut ix = 8.0;
@@ -409,24 +688,33 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
         if live_on && splits.is_none() {
             splits = Some(live_block(r, pos, s.checkpoint_info == 2));
         }
+        if edit {
+            // the layout editor: a sample of each, whatever the race is doing
+            msgs = vec![Msg::Lap { best: true, ms: 83_120, pb: false, delta: Some(-540) }];
+            splits = (lay.rows > 0).then(|| sample_splits(r, lay.rows));
+        }
         if modern {
-            hud_glass::messages(b, Glass::hud(w, px), &msgs);
+            if h.messages {
+                let start = b.verts.len();
+                hud_glass::messages(b, Glass::hud(w, px), &msgs);
+                lay.put(b, HudElem::Messages, start, stock_put(HudElem::Messages, pl, w));
+            }
             // REMASTER (#346): the playback controls of demo play, low in the centre column
-            if let (true, Some(pb)) = (r.watch.is_some(), r.pb.as_ref()) {
+            if let (true, false, Some(pb)) = (r.watch.is_some(), edit, r.pb.as_ref()) {
                 let cam = crate::playback::cam_label(r.sess.cam);
                 let hints = if pb.shown() { g.playback_hints(pb.ended) } else { Vec::new() };
-                crate::hud_transport::transport(b, Glass::hud(w, px), &pb.view(motor_sim::demo::race_ms(race)), cam, &hints, g.clock);
+                crate::hud_transport::transport(b, Glass::hud(w, px), &pb.view(motor_sim::demo::race_ms(race), s.units), cam, &hints, g.clock);
             }
-            if let Some(sp) = splits {
+            if let (true, Some(sp)) = (h.splits, splits) {
                 let start = b.verts.len();
                 hud_glass::splits(b, Glass::hud(w, px), &sp);
-                place(b, start, hud_glass::SPLITS_ANCHOR, pl.scale, (pl.dx, -pl.dy));
+                lay.put(b, HudElem::Splits, start, stock_put(HudElem::Splits, pl, w));
             }
         }
     }
 
     // ---- CHEAT-free map easter eggs (#366, 0x41353a): the RuhrStadt club message, the Atlantika roof scroller
-    if !paused {
+    if mode == HudMode::Race {
         egg_overlay(g, r, b);
     }
 
@@ -462,7 +750,7 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
                 hud_glass::MapFrame::Circuit
             };
             hud_glass::map(b, Glass::hud(w, px), tr.map_info, prof, frame, &dots);
-            place(b, start, (w - hud_glass::MAP_INSET.0, 480.0 - hud_glass::MAP_INSET.1), pl.scale, (-pl.dx, -pl.dy));
+            lay.put(b, HudElem::Map, start, stock_put(HudElem::Map, pl, w));
         }
     } else if map_on {
         let (mw, mh) = map_size;
@@ -507,11 +795,33 @@ pub fn draw(g: &Game, r: &RaceState, b: &mut Batch, paused: bool, px: f32) {
     }
 
     // ---- CHEAT tribute to tron (#320, 0x48e964): the scroller's band and greeting over everything else
-    if !paused {
+    if mode == HudMode::Race {
         if let Some(sc) = motor_sim::cheats::tron(race.name_cheat).then(|| motor_sim::cheats::tron_scroll(race.since_init_s())).flatten() {
             tron_scroller(b, sc, modern, px);
         }
     }
+    if edit {
+        for e in HudElem::ALL.into_iter().filter(|e| e.movable()) {
+            lay.ghost(e, pl);
+        }
+    }
+    lay.rects
+}
+
+/// The layout editor's splits block (#542): `rows` rows of the field in race order with made-up gaps (yours with a
+/// time), empty slots when the field is smaller.
+fn sample_splits(r: &RaceState, rows: usize) -> Splits {
+    let race = &r.sess.race;
+    let standings = race.standings();
+    let me = standings.iter().position(|&i| i == r.sess.focus).unwrap_or(0) as i64;
+    let rows = (0..rows)
+        .map(|k| {
+            let i = *standings.get(k)?;
+            let (d, you) = (&race.racers[i].driver, i == r.sess.focus);
+            Some(SplitRow { place: Some(k as u32 + 1), colour: d.colour, name: d.nick.clone(), gap: (!you).then_some(RowGap::Ms((k as i64 - me) * 812)), time: you.then_some(41_250), you })
+        })
+        .collect();
+    Splits { caption: "CHECKPOINT 1".to_string(), rows, live: false }
 }
 
 /// The map easter eggs (#366), CLASSIC `0x41353a` in DrawHud `0x413008`: white myfont with a black shadow 2 px down and right
@@ -794,5 +1104,49 @@ mod tests {
         assert_eq!(neighbours(&order, 5, |i| i == 1), (Some(0), None));
         assert_eq!(neighbours(&order, 9, none), (None, None));
         assert_eq!(neighbours(&[2], 2, none), (None, None));
+    }
+
+    /// The frozen layout draws each piece where the stock fit does, at every aspect, HUD Scale and Margin (#542): the
+    /// layout editor's first change moves nothing else (within the whole-percent rounding of the scale).
+    #[test]
+    fn freeze_draws_the_stock_layout() {
+        let map = hud_glass::map_size();
+        for w in [640.0, 853.3, 1146.7] {
+            for scale in [50, 100, 200] {
+                for margin in [0, 60] {
+                    let h = HudSettings { scale, margin, ..Default::default() };
+                    let rows = 3;
+                    let pl = h.place(w, &extents(&h, map, rows));
+                    let f = freeze_with(pl, w, map, rows, scale);
+                    assert!(f.custom);
+                    for e in HudElem::ALL.into_iter().filter(|e| e.movable()) {
+                        let home = home(e, w, map, rows);
+                        let want = moved(home, stock_eff(e, pl, w, home));
+                        let got = f.get(e).placed(home, w, scale);
+                        for i in 0..4 {
+                            assert!((want[i] - got[i]).abs() <= 2.0, "{e:?} at {w}, scale {scale}, margin {margin}: {want:?} {got:?}");
+                        }
+                    }
+                    // the pieces that scale only keep their size: plates 100 %, the arrows the cluster's
+                    let k = |e: HudElem| f.get(e).factor(scale);
+                    assert!((k(HudElem::Plates) - 1.0).abs() < 0.01 && (k(HudElem::Proximity) - pl.scale).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    /// The stock numbers of `HudLayout::stock` put each piece where `home` says the stock layout draws it (#542).
+    #[test]
+    fn stock_layout_matches_the_homes() {
+        let stock = crate::hud_layout::HudLayout::stock();
+        let map = hud_glass::map_size();
+        for w in [640.0, 853.3, 1146.7] {
+            for e in HudElem::ALL.into_iter().filter(|e| e.movable()) {
+                let h = home(e, w, map, 8);
+                let p = stock.get(e).put(h, w, 100);
+                assert_eq!(p.k, 1.0);
+                assert!(p.off.0.abs() < 0.5 && p.off.1.abs() < 0.5, "{e:?} at {w}: {:?}", p.off);
+            }
+        }
     }
 }

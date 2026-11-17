@@ -551,11 +551,12 @@ motor_tune::tunable! {
     /// area: Camera & drive/Skid marks
     SKID_RING: usize = 50;
     /// REMASTER detailed skid marks [design choice]: one tile of the tread texture covers this many metres
-    /// along the mark (the tread's own tile on the wheels, procgen.rs `TYRE_TILE`).
+    /// along the mark: the tread's own tile round the reference wheel (radius 0.353, procgen.rs
+    /// `TREAD_ASPECT`; a test keeps them within 5%), the whole tread across the mark (#529).
     /// range: 0.05..4
     /// unit: m
     /// area: Camera & drive/Skid marks
-    SKID_TILE: f32 = 0.4;
+    pub(crate) SKID_TILE: f32 = 0.22;
     /// REMASTER detailed skid marks [design choice]: the sideways speed, in multiples of the surface's limit
     /// above it, that makes a mark full strength.
     /// range: 0.05..10
@@ -1230,6 +1231,24 @@ impl Session {
         Self::wheel_at(&car.p, car.wheel_ext[w], w, radius)
     }
 
+    /// DEBUG (#531): how far each tyre of car `slot` is above the road as drawn, m (FL, FR, BR, BL;
+    /// positive hangs, negative is sunk into it; None: no wheel or no road below). The lowest point of the wheel
+    /// mesh (`generated`: the Remaster one, lowered by `Scene::remaster_drop` as the renderer does; else the
+    /// original octagon) against the world mesh straight below it (`Scene::ground_y`). Not the collision: the
+    /// physics rides 0.0714 m above it (the ray's 0.08 m skin, `motor_data::col`), the picture does not.
+    pub fn tyre_gaps(&self, scene: &crate::scene::Scene, slot: usize, generated: bool) -> [Option<f32>; 4] {
+        let models = self.models_hiding(None);
+        let drop = if generated { scene.remaster_drop.get(slot).copied().unwrap_or(0.0) } else { 0.0 };
+        std::array::from_fn(|w| {
+            let mesh = slot * CAR_MESHES + 1 + w;
+            let m = models.iter().find(|(i, _)| *i == mesh)?.1;
+            let m = crate::scene::remaster_lowered(m, drop);
+            let verts = scene.remaster_cars.get(mesh).filter(|v| generated && !v.is_empty()).or_else(|| scene.cars.get(mesh))?;
+            let low = verts.iter().map(|v| m.transform_point3(Vec3::from(v.pos)) * FLIP).min_by(|a, b| a.y.total_cmp(&b.y))?;
+            Some(low.y - scene.ground_y(low.x, -low.z, low.y + 0.3)?)
+        })
+    }
+
     /// `wheel_local` from the parameters and one spring extension.
     fn wheel_at(p: &motor_sim::car::CarParams, ext: f32, w: usize, radius: f32) -> (Vec3, Vec3) {
         let hub = p.wheels[w];
@@ -1394,9 +1413,9 @@ impl Session {
             // the kind rides in `env` of the detailed vertices only: the quads stay as they were
             let at = |x: Vec3, uv: [f32; 2], color: [f32; 4], across: f32, layer: f32| Vertex { pos: (x * FLIP).into(), uv, color, layer, normal: [across, 0.0, 0.0], env: if layer >= 0.0 { g.kind as f32 } else { 0.0 } };
             if let (true, Some(layer)) = (detailed, self.tyre_layer) {
-                // u: across the tread in tile units (the strip's middle on the tile's middle); v:
-                // metres along the strip in tiles. Edge distance (-1..1) rides in the normal.
-                let hw = g.side.length() / tile;
+                // u: the whole tread across the strip (#529: the baked tile spans the crown); v: metres
+                // along the strip in tiles. Edge distance (-1..1) rides in the normal.
+                let hw = 0.5;
                 // REMASTER detailed marks keep their rubber a touch lighter than pure black
                 let c = |s: f32| [rgba[0].max(0.03), rgba[1].max(0.03), rgba[2].max(0.03), s];
                 let (v0, v1) = (g.v0 / tile, g.v1 / tile);
@@ -2210,7 +2229,10 @@ mod tests {
             s.step(dt, Input::default());
         }
         assert!(s.respawn_focus());
-        assert!(pos(&s).distance(grid) > 5.0, "after the start it moves the car");
+        // after the start it puts the car on the nearest centreline point (#482): off the grid slot, on the line
+        let m = s.race.racers[s.focus].car.model_pos();
+        assert!(pos(&s).distance(grid) > 1.0, "after the start it moves the car");
+        assert!(s.race.line.at(s.race.line.nearest(m)).0.distance(m) < 0.01, "onto the line");
     }
 
     /// The timeline reaches past 15 s, keeps the future of a rewind, replays it exactly, and a
@@ -2515,5 +2537,39 @@ mod tests {
         out.clear();
         wall_quads(&mut out, pts[..1].iter(), 2.0, LIGHT_WALL_YOU);
         assert!(out.is_empty());
+    }
+
+    /// #531: settled on track 2's grid, every car's tyres stand on the road as drawn: the round Remaster tyre within
+    /// 1 cm, the original octagon from 1 cm in to its flat side up (a flat facing down sits r (1 - cos 22.5 deg) above a
+    /// corner, 2.7 cm at r 0.35 m: R-Build 2's rear reads +2.5 cm, the phase the wheel stopped at). The grid spawn used
+    /// to stand Titan, Kobra X3, Venom and the Resonic's front 7 cm up (the wheel ray's skin band, `motor_data::col`).
+    /// Needs the install; cars 11-14 only when it has them.
+    #[test]
+    fn grid_tyres_stand_on_the_road() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../installed_game");
+        if !root.exists() {
+            return;
+        }
+        // the octagon's flat side over its corners at the largest wheel (0.4 m), cm
+        const OCTAGON_FLAT_CM: f32 = 3.1;
+        let ids: Vec<u32> = (1..=14).filter(|n| motor_data::fs::config(&root, &format!("Game/car{n:02}.car")).is_ok()).collect();
+        for cars in ids.chunks(7) {
+            let sc = crate::scene::load(&root, 2, cars, &[]).unwrap();
+            let mut s = Session::new(&root, 2, cars, None, Difficulty::Medium).unwrap();
+            s.set_wheels(&sc);
+            for _ in 0..180 {
+                s.step(1.0 / 60.0, Input::default());
+            }
+            assert!(!s.race.started());
+            for (slot, id) in cars.iter().enumerate() {
+                let [classic, remaster] = [false, true].map(|g| s.tyre_gaps(&sc, slot, g).map(|x| x.expect("a tyre over the road")));
+                for w in 0..4 {
+                    let cm = |x: f32| (x * 100.0 * 10.0).round() / 10.0;
+                    let (c, r) = (cm(classic[w]), cm(remaster[w]));
+                    assert!(r.abs() <= 1.0, "car {id:02} wheel {w}: the Remaster tyre {r:+} cm over the road");
+                    assert!((-1.0..=OCTAGON_FLAT_CM).contains(&c), "car {id:02} wheel {w}: the octagon {c:+} cm over the road");
+                }
+            }
+        }
     }
 }

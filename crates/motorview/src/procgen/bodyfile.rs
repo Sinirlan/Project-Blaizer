@@ -357,8 +357,25 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 if lo.len() != hi.len() {
                     return Err(kv.err(format!("Smooth: lo lists {} boxes, hi {}", lo.len(), hi.len())));
                 }
-                // `round`: one value, or one per box
-                let round: Vec<f32> = kv.list::<1>("round")?.into_iter().map(|[r]| r).collect();
+                // `round`: one value, or one per box; an entry `r@z:r@z…` is a ramp along z (#534)
+                let (mut round, mut ramps) = (Vec::new(), Vec::new());
+                for p in kv.take("round")?.split(';').map(str::trim) {
+                    let mut t: Vec<[f32; 2]> = Vec::new();
+                    if p.contains('@') {
+                        for q in p.split(':') {
+                            let Some((r, z)) = q.split_once('@') else { return Err(kv.err(format!("round: '{q}' is not a ramp point (round@z)"))) };
+                            t.push([kv.num("round", z.trim())?, kv.num("round", r.trim())?]);
+                        }
+                        t.sort_by(|a, b| a[0].total_cmp(&b[0]));
+                        round.push(t[0][1]);
+                    } else {
+                        round.push(kv.num("round", p)?);
+                    }
+                    ramps.push(t);
+                }
+                if ramps.iter().all(|t| t.is_empty()) {
+                    ramps.clear();
+                }
                 if round.len() != 1 && round.len() != lo.len() {
                     return Err(kv.err(format!("Smooth: round lists {} values for {} boxes", round.len(), lo.len())));
                 }
@@ -371,7 +388,7 @@ pub fn from_text(text: &str) -> Result<BodyStyle, String> {
                 let max_degs = if degs.len() > 1 { degs.clone() } else { Vec::new() };
                 // `level`: optional tags whose level edges keep their height (#464)
                 let level = if kv.pairs.contains_key("level") { tags(kv.list::<3>("level")?) } else { Vec::new() };
-                smooths.push(Smooth { from: tags(kv.list::<3>("from")?), lo, hi, max_deg: degs[0], step: kv.f("step")?, loose: kv.b("loose")?, round, level, max_degs })
+                smooths.push(Smooth { from: tags(kv.list::<3>("from")?), lo, hi, max_deg: degs[0], step: kv.f("step")?, loose: kv.b("loose")?, round, ramps, level, max_degs })
             }
             "Warp" => {
                 // `y` and `z` are optional: a missing table weighs 1
@@ -561,7 +578,12 @@ fn vents_text(t: &mut String, st: &BodyStyle) {
         let boxes = |b: &[[f32; 3]]| b.iter().map(|&p| v3(p)).collect::<Vec<_>>().join(";");
         let tags = |l: &[[u8; 3]]| l.iter().map(|&c| rgb(c)).collect::<Vec<_>>().join(";");
         let level = if s.level.is_empty() { String::new() } else { format!(" level={}", tags(&s.level)) };
-        *t += &format!("Smooth from={} lo={} hi={} max_deg={} step={} loose={} round={}{level}\n", tags(&s.from), boxes(&s.lo), boxes(&s.hi), if s.max_degs.is_empty() { s.max_deg.to_string() } else { s.max_degs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(";") }, s.step, s.loose as u8, s.round.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(";"));
+        // a ramp's points as `round@z`, joined by `:`
+        let round = |i: usize, r: f32| match s.ramps.get(i) {
+            Some(t) if !t.is_empty() => t.iter().map(|p| format!("{}@{}", p[1], p[0])).collect::<Vec<_>>().join(":"),
+            _ => r.to_string(),
+        };
+        *t += &format!("Smooth from={} lo={} hi={} max_deg={} step={} loose={} round={}{level}\n", tags(&s.from), boxes(&s.lo), boxes(&s.hi), if s.max_degs.is_empty() { s.max_deg.to_string() } else { s.max_degs.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(";") }, s.step, s.loose as u8, s.round.iter().enumerate().map(|(i, &r)| round(i, r)).collect::<Vec<_>>().join(";"));
     }
     for w in &st.warps {
         let table = |name: &str, t: &[[f32; 2]]| if t.is_empty() { String::new() } else { format!(" {name}={}", t.iter().map(|p| format!("{},{}", p[0], p[1])).collect::<Vec<_>>().join(";")) };
@@ -614,6 +636,22 @@ mod tests {
         assert_eq!((titan.lamps.len(), titan.vents.len(), titan.smooths.len(), titan.thickens[0].splits.len()), (2, 6, 2, 1));
         assert!(titan.uses_carbon());
         assert!(embedded(0).is_none() && embedded(11).is_none());
+    }
+
+    /// a `round` entry `r@z:r@z` is a ramp along z (#534): sorted by z, written back as given,
+    /// the plain entries beside it unchanged; a point without its `@` is an error
+    #[test]
+    fn round_ramp_parses() {
+        let body = "Body bevel=0.015 segments=3 bevel_tol=0.001 smooth_deg=10 arch_step_deg=7.5 arch_clearance=0.035 arch_lip=0.02 drop=0\n";
+        let zone = "Smooth from=1,1,1 lo=0,0,0;0,0,1 hi=1,1,1;1,1,2 max_deg=50 step=0.025 loose=0 round=";
+        let st = from_text(&format!("{body}{zone}0.1;0.05@0.6:0.3@-0.3\n")).unwrap();
+        let z = &st.smooths[0];
+        assert_eq!((z.round.clone(), z.ramps.clone()), (vec![0.1, 0.3], vec![Vec::new(), vec![[-0.3, 0.3], [0.6, 0.05]]]));
+        assert_eq!((z.round_at(0, 0.15), z.round_at(1, -1.0), z.round_at(1, 0.6)), (0.1, 0.3, 0.05));
+        assert!(to_text(&st).contains("round=0.1;0.3@-0.3:0.05@0.6\n"), "{}", to_text(&st));
+        assert_eq!(from_text(&format!("{body}{zone}0.1;0.25\n")).unwrap().smooths[0].ramps, Vec::<Vec<[f32; 2]>>::new());
+        let e = from_text(&format!("{body}{zone}0.1;0.05@0.6:0.3\n")).unwrap_err();
+        assert!(e.contains("not a ramp point"), "{e}");
     }
 
     #[test]

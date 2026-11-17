@@ -822,6 +822,12 @@ impl WorldEdit {
         self.pdrag.is_some()
     }
 
+    /// The mouse holds something that re-meshes as it moves: a handle, a piece, a gizmo axis (move, scale,
+    /// rotate, the skirt's ring) or the paint brush. The viewer re-meshes at most a few times a second then.
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some() || self.pdrag.is_some() || self.gdrag.is_some() || self.painting()
+    }
+
     /// The mouse moved with a piece held: it slides on the horizontal plane through the grab point, the
     /// start state plus the change. Blocks and plants (one point) then drop onto the ground under them
     /// (`ground` takes a game-space point: the ground height there) [design choice]; other pieces
@@ -2495,6 +2501,21 @@ mod tests {
         let mut g = f.pieces[0].clone();
         assert_eq!(level(&mut g, &|xz| vec![3.0; xz.len()]), Some(4.0));
         assert!(handles(&g, 0.0).iter().all(|h| h.y == 4.0));
+    }
+
+    #[test]
+    fn a_held_gizmo_counts_as_a_drag() {
+        // the viewer throttles and lightens the re-mesh while `dragging` (a gizmo drag re-meshed every frame before)
+        let (f, _) = fill::from_text("Water Area Level -3 Point 0 0 Point 10 0 Point 10 10 Style still\n");
+        let mut e = WorldEdit { file: f, water_sel: Some(0), mode: Mode::Scale, ..Default::default() };
+        assert!(!e.dragging());
+        let base = e.water_piece().unwrap();
+        e.gdrag = Some(GizmoDrag { axis: 0, base, pivot: Vec3::ZERO, start: 0.0, vertex: None, crest: Vec::new(), axes: fill_gizmo::AXES, len: 1.0 });
+        assert!(e.dragging());
+        e.gizmo_release();
+        assert!(!e.dragging());
+        e.begin_drag(0);
+        assert!(e.dragging());
     }
 
     #[test]
