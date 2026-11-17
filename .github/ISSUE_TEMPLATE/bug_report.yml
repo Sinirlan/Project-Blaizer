@@ -1,0 +1,154 @@
+name: Bug report
+description: Something is broken, crashes or behaves differently from the original game
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Before you submit:
+        - Search the existing issues and the `CHANGELOG.md`; it may already be fixed in a newer release.
+        - **Do not attach game data** (files from your Motorhead install, disc images, ripped music or videos).
+          Screenshots and short clips of the problem are fine.
+        - One bug per issue, please.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The release you are running (see the Releases page or the game's title / menu), e.g. v0.9.3.
+      placeholder: v0.9.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Linux
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: program
+    attributes:
+      label: Program
+      description: Which program shows the problem?
+      options:
+        - motorhead (the game)
+        - motorinstall (the installer)
+        - motorview (developer viewer)
+        - motortex (texture exporter)
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Render mode
+      description: Classic follows the original game; Remaster is toggled with F9 in the game.
+      options:
+        - Classic
+        - Remaster
+        - Both
+        - Not graphics-related
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Gameplay / race rules
+        - Physics / handling
+        - AI opponents
+        - Graphics
+        - Audio
+        - Menus / HUD
+        - Input (keyboard, gamepad, wheel)
+        - Installer
+        - Crash / freeze
+        - Performance
+        - Settings / saves
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem. If it differs from the original game, say how.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the track, car and difficulty if it happens in a race.
+      placeholder: |
+        1. Start a single race on track 3 with car 5
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver
+      description: Needed for graphics problems and crashes.
+      placeholder: "e.g. NVIDIA RTX 3060, driver 560.35 / AMD RX 6600, Mesa 24.2"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: game-source
+    attributes:
+      label: Where does your game data come from?
+      options:
+        - Installed with motorinstall from my disc image
+        - An existing install of the original game
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Console output / error messages
+      description: Paste any text the program printed (start it from a terminal to see it). Remove personal paths if you like.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Screenshots, clips and other context
+      description: Drag images or short videos in here. Settings that differ from the defaults are useful to mention.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched the existing issues and this has not been reported yet.
+          required: true
+        - label: I did not attach any game data or copyrighted files.
+          required: true
