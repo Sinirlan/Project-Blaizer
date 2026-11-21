@@ -20,6 +20,25 @@
 - No installation of Rust is needed to play: ready-made programs are on the
   [Releases page](../../releases/latest).
 
+<p align="center">
+  <a href="https://youtu.be/cvA0qFiQGv0">
+    <img src="https://img.youtube.com/vi/cvA0qFiQGv0/maxresdefault.jpg" alt="Project Blaizer teaser video (YouTube)" width="720">
+  </a>
+  <br><sub>Watch the teaser on YouTube</sub>
+</p>
+
+## Classic and Remaster
+
+Same tracks, cars and physics, two renderers: **Classic** (left) follows the original, **Remaster** (right, F9 in the game) is the modern one.
+
+| Classic | Remaster |
+|:---:|:---:|
+| <img src="assets/screenshots/menu-c.jpg" alt="Main menu, Classic"><br><sub>Main menu</sub> | <img src="assets/screenshots/menu-r.jpg" alt="Main menu, Remaster"><br><sub>Main menu</sub> |
+| <img src="assets/screenshots/pause-c.jpg" alt="Pause menu, Classic"><br><sub>Pause menu</sub> | <img src="assets/screenshots/pause-r.jpg" alt="Pause menu, Remaster"><br><sub>Pause menu</sub> |
+| <img src="assets/screenshots/goldbridge-c.jpg" alt="Goldbridge, Classic"><br><sub>Goldbridge</sub> | <img src="assets/screenshots/goldbridge-r.jpg" alt="Goldbridge, Remaster"><br><sub>Goldbridge</sub> |
+| <img src="assets/screenshots/neocity-c.jpg" alt="NeoCity, Classic"><br><sub>NeoCity</sub> | <img src="assets/screenshots/neocity-r.jpg" alt="NeoCity, Remaster"><br><sub>NeoCity</sub> |
+| <img src="assets/screenshots/olympos-c.jpg" alt="Olympos, Classic"><br><sub>Olympos</sub> | <img src="assets/screenshots/olympos-r.jpg" alt="Olympos, Remaster"><br><sub>Olympos</sub> |
+
 ## What you need
 
 - Your own copy of **Motorhead** (the CD, a disc image of it, or an existing install). The game's
